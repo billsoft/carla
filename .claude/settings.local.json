@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(conda info:*)",
+      "Bash(conda activate:*)",
+      "Bash(powershell:*)",
+      "Bash(conda list:*)",
+      "Bash(cmake --build:*)",
+      "Bash(conda env remove:*)",
+      "Bash(cmake:*)",
+      "Bash(Select-String -Pattern \"error|ERROR|FATAL\" -Context 1,1)",
+      "Bash(cmd.exe /c \"d:\\code\\carla\\fixed_build.bat\")",
+      "Bash(Select-String -Pattern \"carla|plugin|unreal\" -CaseSensitive:$false)",
+      "Bash(cmd.exe /c \"cd /d d:\\code\\carla && cmake --build Build --target help\")",
+      "Bash(cmd.exe /c \"dir /b d:\\code\\carla\\Unreal\\CarlaUnreal\\Plugins\\Carla\\Binaries\\Win64\\ 2>nul\")",
+      "Bash(cmd.exe /c \"if exist d:\\code\\carla\\Unreal\\CarlaUnreal\\Plugins\\Carla\\Binaries\\Win64 (echo Directory exists) else (echo Directory NOT found)\")",
+      "Bash(cmd.exe /c \"d:\\code\\carla\\build_unreal_editor.bat\")",
+      "Bash(timeout:*)",
+      "Bash(cd:*)",
+      "Bash(del /q build_all.bat build_unreal_editor.bat FAST_LAUNCH.bat final_build.bat fixed_build.bat gcm-diagnose.log run_python_demo.bat run_simulation.py test_imports.py unreal_editor_build.log 快速开始.txt 完整构建和运行指南.md 最终操作步骤.txt)",
+      "Bash(cmd.exe /c \"cd /d d:\\code\\carla && del /f build_all.bat build_unreal_editor.bat FAST_LAUNCH.bat final_build.bat fixed_build.bat gcm-diagnose.log run_python_demo.bat run_simulation.py test_imports.py unreal_editor_build.log 快速开始.txt 完整构建和运行指南.md 最终操作步骤.txt 2>nul && dir /b *.bat *.txt *.md *.py *.log | findstr /V /I /C:BUILD_FINAL /C:start_carla /C:run_carla /C:test_connection /C:README /C:QUICK_START /C:TROUBLESHOOTING /C:CLAUDE\")",
+      "Bash(cmd.exe /c \"netstat -ano | findstr :8000\")",
+      "Bash(python -c:*)",
+      "Bash(cmd.exe /c \"del /f d:\\code\\carla\\run_automatic_control_fixed.bat 2>nul\")",
+      "Bash(cmd.exe /c \"cd /d d:\\code\\carla && dir /b *.txt\")",
+      "Bash(findstr:*)",
+      "Bash(cmd.exe /c \"cd /d d:\\code\\carla && dir /b *.txt *.bat 2>nul | findstr /I /C:AUTOMATIC_CONTROL_FIX /C:PERFORMANCE_FIX /C:QUICK_START /C:README /C:TROUBLESHOOTING /C:run_automatic_control_fixed\")",
+      "Bash(cmd.exe /c \"cd /d d:\\code\\carla && del /f AUTOMATIC_CONTROL_FIX.txt PERFORMANCE_FIX.txt QUICK_START.txt README.txt TROUBLESHOOTING.txt 2>nul && echo Files deleted successfully\")",
+      "Bash(cmd.exe /c \"if exist d:\\code\\carla\\run_automatic_control_fixed.bat (del /f d:\\code\\carla\\run_automatic_control_fixed.bat && echo Deleted run_automatic_control_fixed.bat) else (echo run_automatic_control_fixed.bat does not exist)\")",
+      "Bash(cmd.exe /c \"cd /d d:\\code\\carla && dir /b *.txt *.md *.log 2>nul | findstr /V /I /C:BUILD_FINAL /C:start_carla /C:run_carla /C:test_connection /C:README /C:QUICK_START /C:TROUBLESHOOTING /C:CLAUDE\")",
+      "Bash(cmd.exe /c:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

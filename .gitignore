@@ -15,3 +15,5 @@ CMakeSettings.json
 .clangd
 
 Help.md
+
+PythonAPI/examples/cache/
