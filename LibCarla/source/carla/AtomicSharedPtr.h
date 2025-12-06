@@ -7,10 +7,13 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 
 namespace carla {
 
   /// A very simple atomic shared ptr with release-acquire memory order.
+  /// FIXED for C++20/VS2026: Removed deprecated std::atomic_load/store for shared_ptr
+  /// Replaced with std::mutex protection
   template <typename T>
   class AtomicSharedPtr {
   public:
@@ -19,13 +22,16 @@ namespace carla {
     explicit AtomicSharedPtr(Args &&... args)
       : _ptr(std::forward<Args>(args)...) {}
 
-    AtomicSharedPtr(const AtomicSharedPtr &rhs)
-      : _ptr(rhs.load()) {}
+    AtomicSharedPtr(const AtomicSharedPtr &rhs) {
+        std::lock_guard<std::mutex> lock(rhs._mutex);
+        _ptr = rhs._ptr;
+    }
 
     AtomicSharedPtr(AtomicSharedPtr &&) = delete;
 
     void store(std::shared_ptr<T> ptr) noexcept {
-      std::atomic_store_explicit(&_ptr, ptr, std::memory_order_release);
+      std::lock_guard<std::mutex> lock(_mutex);
+      _ptr = ptr;
     }
 
     void reset(std::shared_ptr<T> ptr = nullptr) noexcept {
@@ -33,16 +39,19 @@ namespace carla {
     }
 
     std::shared_ptr<T> load() const noexcept {
-      return std::atomic_load_explicit(&_ptr, std::memory_order_acquire);
+      std::lock_guard<std::mutex> lock(_mutex);
+      return _ptr;
     }
 
     bool compare_exchange(std::shared_ptr<T> *expected, std::shared_ptr<T> desired) noexcept {
-      return std::atomic_compare_exchange_strong_explicit(
-          &_ptr,
-          expected,
-          desired,
-          std::memory_order_acq_rel,
-          std::memory_order_acq_rel);
+      std::lock_guard<std::mutex> lock(_mutex);
+      if (_ptr == *expected) {
+          _ptr = desired;
+          return true;
+      } else {
+          *expected = _ptr;
+          return false;
+      }
     }
 
     AtomicSharedPtr &operator=(std::shared_ptr<T> ptr) noexcept {
@@ -58,7 +67,7 @@ namespace carla {
     AtomicSharedPtr &operator=(AtomicSharedPtr &&) = delete;
 
   private:
-
+    mutable std::mutex _mutex;
     std::shared_ptr<T> _ptr;
   };
 
