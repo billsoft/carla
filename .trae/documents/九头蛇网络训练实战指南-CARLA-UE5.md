@@ -2,7 +2,53 @@
 
 > 从数据采集到模型部署：打造特斯拉 FSD 级别的视觉自动驾驶系统
 
-> 结合 CARLA UE5.5 仿真器 + 自定义 UE 组件 + 多模态传感器融合
+> 结合 CARLA UE5.5 仿真器 + 自定义 UE 组件 + **特斯拉纯视觉方案**(仅 8 相机)
+
+---
+
+## ⚠️ 核心理念: 特斯拉纯视觉方案 (基于 AI Day 2021)
+
+### 相机规格 (重要修正!)
+根据 **2021 年特斯拉 AI Day** (Andrej Karpathy 讲解):
+
+- ✅ **分辨率**: 1280×960 (约 1.2MP) - **不是** 1920×1080!
+- ✅ **色彩深度**: **12-bit RAW** (有些相机是14-16bit) - **不是** 8-bit!
+- ✅ **色彩空间**: YUV 或 RAW Bayer
+- ✅ **帧率**: 36 FPS (不是30 FPS)
+
+**设计哲学** (您的理解完全正确!):
+> "用深度弥补分辨率" - 12-16bit 的高色彩深度保留了更多光照细节信息,这相当于在 Backbone 第一次卷积前就已经有了"高通道深度"的输入,等效于已经做了一次特征提取,**大幅减少了第一层卷积的计算量**!
+
+### 九头蛇(HydraNet)架构命名
+- 📛 **命名者**: Andrej Karpathy (前特斯拉 AI 总监)
+- 🐉 **设计理念**: 共享 Backbone + 共享 RNN + 9个独立任务头 (像九头蛇)
+
+### 传感器配置
+- ✅ **仅 8 个 RGB 相机** (无 LiDAR/雷达/GPS/IMU)
+- ✅ **车辆状态来自 CAN 总线**: 速度、航向角(从车辆直接获取)
+
+### CARLA 实现
+```python
+# ===== TESLA_PURE_VISION: 正确方式 =====
+velocity = vehicle.get_velocity()  # 从车辆获取,不是 GPS
+speed = np.linalg.norm([velocity.x, velocity.y, velocity.z])
+
+# ===== CARLA 相机配置 (模拟 Tesla AI Day 规格) =====
+# 注意: CARLA 默认是8-bit,需要特殊处理模拟12-bit效果
+cam_bp.set_attribute('image_size_x', '1280')  # Tesla 规格
+cam_bp.set_attribute('image_size_y', '960')
+cam_bp.set_attribute('sensor_tick', '0.028')  # 36 FPS
+
+# ===== 错误: 不要使用外部传感器 =====
+# gnss_sensor = world.spawn_actor(gnss_bp, ...)  ❌
+# imu_sensor = world.spawn_actor(imu_bp, ...)    ❌
+```
+
+### 参考资料
+- 🎥 **Tesla AI Day 2021**: https://youtu.be/j0z4FweCy4M
+  - HydraNet 讲解: 1:13:40 - 1:45:20
+  - 相机规格说明: 1:18:30
+  - BEV Transformer: 1:45:20 - 2:10:00
 
 ---
 
@@ -34,12 +80,9 @@ graph TB
         WEATHER[Weather System<br/>晴/雨/雾/夜]
     end
 
-    subgraph Sensors["传感器套件"]
-        CAM[8×RGB 相机<br/>1920×1080 @30Hz]
-        GPS[GNSS<br/>GPS 坐标]
-        IMU[IMU<br/>加速度/角速度]
-        MAG[磁力计<br/>航向角]
-        ODO[里程计<br/>速度/位移]
+    subgraph Sensors["传感器套件 (TESLA_PURE_VISION)"]
+        CAM[8×RGB 相机<br/>1280×960 12-bit RAW @36Hz<br/>用深度弥补分辨率]
+        VEH[车辆 CAN 总线<br/>速度/航向角速率]
     end
 
     subgraph DataCollector["数据采集模块 (Python)"]
@@ -76,8 +119,8 @@ graph TB
     UE --> VEHICLE
     TRAFFIC --> UE
     WEATHER --> UE
-    VEHICLE --> CAM & GPS & IMU & MAG & ODO
-    CAM & GPS & IMU & MAG & ODO --> SYNC
+    VEHICLE --> CAM & VEH
+    CAM & VEH --> SYNC
     SYNC --> LABEL
     LABEL --> SAVE
     SAVE --> TRAIN & VAL & TEST
@@ -113,7 +156,7 @@ graph TB
 | **加速库** | TensorRT | 8.6+ | 推理优化 |
 | **数据存储** | HDF5 / Zarr | - | 高效 I/O |
 | **可视化** | Weights & Biases | - | 实验追踪 |
-| **多模态融合** | Kalman Filter | - | 传感器融合 |
+| **BEV 变换** | Transformer | - | 纯视觉 3D 重建 |
 | **自定义传感器** | UE5 C++ Plugin | - | 扩展 CARLA |
 
 ### 1.3 项目目录结构
@@ -123,11 +166,9 @@ carla_hydra_training/
 ├── carla_interface/
 │   ├── sensors/
 │   │   ├── camera_array.py          # 8相机管理
-│   │   ├── gnss_sensor.py           # GPS 传感器
-│   │   ├── imu_sensor.py            # IMU 传感器
-│   │   ├── magnetometer.py          # 磁力计
-│   │   └── sensor_fusion.py         # 多模态融合
-│   ├── data_collector.py            # 数据采集主程序
+│   │   ├── vehicle_state.py         # 车辆状态读取 (CAN 总线模拟)
+│   │   └── sensor_config.py         # 传感器配置
+│   ├── data_collector.py            # 数据采集主程序 (纯视觉)
 │   ├── scenario_manager.py          # 场景管理
 │   └── autopilot_expert.py          # 专家驾驶系统
 │
@@ -211,57 +252,57 @@ class CameraConfig:
 
 @dataclass
 class SensorSuite:
-    """完整传感器套件配置"""
+    """
+    传感器套件配置 (特斯拉纯视觉方案)
 
-    # ===== 8个 RGB 相机 =====
+    仅包含: 8个 RGB 相机
+    不包含: GPS/IMU/磁力计
+    """
+
+    # ===== TESLA_PURE_VISION: 仅 8个 RGB 相机 =====
     cameras: List[CameraConfig] = None
-
-    # ===== GPS 配置 =====
-    gnss_config: Dict = None
-
-    # ===== IMU 配置 =====
-    imu_config: Dict = None
-
-    # ===== 磁力计配置 =====
-    magnetometer_config: Dict = None
 
     def __post_init__(self):
         if self.cameras is None:
             self.cameras = [
-                # 前置三目相机
+                # ===== 前置三目相机 (特斯拉 AI Day 2021 规格) =====
+                # 分辨率: 1280×960 (不是1920×1080!)
+                # 色彩深度: 12-bit RAW (不是8-bit!)
+                # 设计理念: 用深度弥补分辨率,减少第一层卷积计算量
+
                 CameraConfig(
                     name='front_narrow',
                     transform=(2.5, 0.0, 1.4, 0.0, 0.0, 0.0),
-                    fov=50,  # 窄角
-                    width=1920,
-                    height=1080,
-                    sensor_tick=0.033  # 30 FPS
+                    fov=50,  # 窄角 - 远距离高精度
+                    width=1280,   # Tesla AI Day 规格
+                    height=960,
+                    sensor_tick=0.028  # 36 FPS (Tesla 实际帧率)
                 ),
                 CameraConfig(
                     name='front_main',
                     transform=(2.5, 0.0, 1.4, 0.0, 0.0, 0.0),
                     fov=70,  # 主视角
-                    width=1920,
-                    height=1080,
-                    sensor_tick=0.033
+                    width=1280,
+                    height=960,
+                    sensor_tick=0.028
                 ),
                 CameraConfig(
                     name='front_wide',
                     transform=(2.5, 0.0, 1.4, 0.0, 0.0, 0.0),
-                    fov=120,  # 广角/鱼眼
-                    width=1920,
-                    height=1080,
-                    sensor_tick=0.033
+                    fov=120,  # 广角/鱼眼 - 大视野
+                    width=1280,
+                    height=960,
+                    sensor_tick=0.028
                 ),
 
-                # 侧视相机
+                # ===== 侧视相机 =====
                 CameraConfig(
                     name='left_front',
                     transform=(0.5, -0.8, 1.4, 0.0, -90.0, 0.0),
                     fov=100,
                     width=1280,
                     height=960,
-                    sensor_tick=0.033
+                    sensor_tick=0.028
                 ),
                 CameraConfig(
                     name='left_rear',
@@ -269,7 +310,7 @@ class SensorSuite:
                     fov=100,
                     width=1280,
                     height=960,
-                    sensor_tick=0.033
+                    sensor_tick=0.028
                 ),
                 CameraConfig(
                     name='right_front',
@@ -277,7 +318,7 @@ class SensorSuite:
                     fov=100,
                     width=1280,
                     height=960,
-                    sensor_tick=0.033
+                    sensor_tick=0.028
                 ),
                 CameraConfig(
                     name='right_rear',
@@ -285,44 +326,19 @@ class SensorSuite:
                     fov=100,
                     width=1280,
                     height=960,
-                    sensor_tick=0.033
+                    sensor_tick=0.028
                 ),
 
-                # 后视相机
+                # ===== 后视相机 =====
                 CameraConfig(
                     name='rear',
                     transform=(-2.5, 0.0, 1.4, 0.0, 180.0, 0.0),
                     fov=110,
                     width=1280,
                     height=960,
-                    sensor_tick=0.033
+                    sensor_tick=0.028
                 ),
             ]
-
-        if self.gnss_config is None:
-            self.gnss_config = {
-                'noise_alt_stddev': 0.1,      # 高度噪声 (米)
-                'noise_lat_stddev': 0.00001,  # 纬度噪声 (度)
-                'noise_lon_stddev': 0.00001,  # 经度噪声 (度)
-                'sensor_tick': 0.1            # 10 Hz
-            }
-
-        if self.imu_config is None:
-            self.imu_config = {
-                'noise_accel_stddev_x': 0.01,  # 加速度噪声 (m/s²)
-                'noise_accel_stddev_y': 0.01,
-                'noise_accel_stddev_z': 0.015,
-                'noise_gyro_stddev_x': 0.001,  # 角速度噪声 (rad/s)
-                'noise_gyro_stddev_y': 0.001,
-                'noise_gyro_stddev_z': 0.001,
-                'sensor_tick': 0.01            # 100 Hz
-            }
-
-        if self.magnetometer_config is None:
-            self.magnetometer_config = {
-                'noise_stddev': 0.01,          # 磁场噪声 (Tesla)
-                'sensor_tick': 0.1             # 10 Hz
-            }
 ```
 
 ### 2.2 传感器管理器实现
@@ -559,182 +575,84 @@ class CameraArray:
             print(f"✓ 销毁相机: {name}")
 ```
 
-### 2.3 多模态传感器融合
+### 2.3 车辆状态获取 (纯视觉方案)
 
 ```python
-# carla_interface/sensors/sensor_fusion.py
+# carla_interface/sensors/vehicle_state.py
+
+# ===== TESLA_PURE_VISION =====
+# 特斯拉纯视觉方案:车辆状态来自 CAN 总线,不使用 GPS/IMU传感器
 
 import numpy as np
-from typing import Dict, Tuple
-from filterpy.kalman import KalmanFilter
+from typing import Dict
 
-class MultiModalSensorFusion:
+class VehicleStateReader:
     """
-    多模态传感器融合
+    车辆状态读取器 (纯视觉方案)
 
-    融合传感器:
-    1. GPS (低频 10Hz, 低精度 ±10cm)
-    2. IMU (高频 100Hz, 高精度短期)
-    3. 磁力计 (航向角)
-    4. 轮速里程计 (速度)
+    特斯拉纯视觉理念:
+    - 车辆状态(速度、航向角)来自 CAN 总线,不是外部传感器
+    - 在 CARLA 中,通过 vehicle API 直接获取,模拟真车 CAN 总线
 
     输出:
-    - 高精度位置 (x, y, z)
-    - 高精度姿态 (roll, pitch, yaw)
-    - 速度 (vx, vy, vz)
+    - 速度 (m/s)
+    - 航向角 (rad)
+    - 航向角速率 (rad/s)
+    - 加速度 (m/s²) - 从车辆动力学模型
     """
 
-    def __init__(self):
-        # ===== 卡尔曼滤波器 (位置与速度) =====
-        self.kf_pos = KalmanFilter(dim_x=6, dim_z=3)
-
-        # 状态向量: [x, y, z, vx, vy, vz]
-        self.kf_pos.x = np.zeros(6)
-
-        # 状态转移矩阵 (匀速模型)
-        dt = 0.01  # 100 Hz
-        self.kf_pos.F = np.array([
-            [1, 0, 0, dt, 0,  0 ],
-            [0, 1, 0, 0,  dt, 0 ],
-            [0, 0, 1, 0,  0,  dt],
-            [0, 0, 0, 1,  0,  0 ],
-            [0, 0, 0, 0,  1,  0 ],
-            [0, 0, 0, 0,  0,  1 ]
-        ])
-
-        # 观测矩阵 (只观测位置)
-        self.kf_pos.H = np.array([
-            [1, 0, 0, 0, 0, 0],
-            [0, 1, 0, 0, 0, 0],
-            [0, 0, 1, 0, 0, 0]
-        ])
-
-        # 过程噪声协方差
-        self.kf_pos.Q *= 0.01
-
-        # 观测噪声协方差 (GPS 误差)
-        self.kf_pos.R = np.diag([0.1, 0.1, 0.2])  # x, y, z (米)
-
-        # 初始协方差
-        self.kf_pos.P *= 100
-
-        # ===== 互补滤波器 (姿态融合) =====
-        self.alpha = 0.98  # 陀螺仪权重
-        self.roll = 0.0
-        self.pitch = 0.0
-        self.yaw = 0.0
-
-        # 上一次更新时间
+    def __init__(self, vehicle):
+        self.vehicle = vehicle
+        self.last_yaw = None
         self.last_time = None
 
-    def update(
-        self,
-        gps_data: Dict = None,
-        imu_data: Dict = None,
-        mag_data: Dict = None,
-        odom_data: Dict = None
-    ) -> Dict:
+    def get_state(self) -> Dict:
         """
-        融合多个传感器数据
+        获取车辆状态
 
-        参数:
-          gps_data: {'lat': float, 'lon': float, 'alt': float, 'timestamp': float}
-          imu_data: {'accel': [ax,ay,az], 'gyro': [gx,gy,gz], 'timestamp': float}
-          mag_data: {'heading': float, 'timestamp': float}
-          odom_data: {'velocity': [vx,vy,vz], 'timestamp': float}
-
-        返回:
+        返回: dict
           {
-            'position': (x, y, z),
-            'velocity': (vx, vy, vz),
-            'orientation': (roll, pitch, yaw)
+            'speed': float,        # m/s
+            'yaw': float,          # rad
+            'yaw_rate': float,     # rad/s
+            'acceleration': float  # m/s²
           }
         """
-        # ===== 1. 位置融合 (GPS + 里程计) =====
-        if gps_data is not None:
-            # GPS 测量更新
-            z = np.array([
-                gps_data['x'],  # 假设已转换为局部坐标
-                gps_data['y'],
-                gps_data['alt']
-            ])
-            self.kf_pos.update(z)
+        import time
 
-        if imu_data is not None:
-            # IMU 预测步骤
-            # 使用加速度更新速度
-            dt = imu_data['timestamp'] - self.last_time if self.last_time else 0.01
-            accel = np.array(imu_data['accel'])
+        # ===== 1. 速度 (从车辆速度向量) =====
+        velocity = self.vehicle.get_velocity()
+        speed = np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)  # m/s
 
-            # 重力补偿 (假设 z 轴向上)
-            accel[2] -= 9.81
+        # ===== 2. 航向角 (从车辆旋转) =====
+        transform = self.vehicle.get_transform()
+        yaw = np.radians(transform.rotation.yaw)  # 转换为弧度
 
-            # 更新状态
-            self.kf_pos.x[3:6] += accel * dt
-            self.kf_pos.predict()
+        # ===== 3. 航向角速率 (数值微分) =====
+        current_time = time.time()
+        if self.last_yaw is not None and self.last_time is not None:
+            dt = current_time - self.last_time
+            yaw_rate = (yaw - self.last_yaw) / dt if dt > 0 else 0.0
+        else:
+            yaw_rate = 0.0
 
-            self.last_time = imu_data['timestamp']
+        self.last_yaw = yaw
+        self.last_time = current_time
 
-        # ===== 2. 姿态融合 (IMU + 磁力计) =====
-        if imu_data is not None:
-            # 陀螺仪积分
-            gyro = np.array(imu_data['gyro'])
-            dt = imu_data['timestamp'] - self.last_time if self.last_time else 0.01
+        # ===== 4. 加速度 (从车辆物理引擎) =====
+        acceleration_vec = self.vehicle.get_acceleration()
+        acceleration = np.sqrt(
+            acceleration_vec.x**2 +
+            acceleration_vec.y**2 +
+            acceleration_vec.z**2
+        )
 
-            self.roll += gyro[0] * dt
-            self.pitch += gyro[1] * dt
-            self.yaw += gyro[2] * dt
-
-            # 加速度计估计的倾角 (重力方向)
-            accel = np.array(imu_data['accel'])
-            accel_roll = np.arctan2(accel[1], accel[2])
-            accel_pitch = np.arctan2(-accel[0], np.sqrt(accel[1]**2 + accel[2]**2))
-
-            # 互补滤波
-            self.roll = self.alpha * self.roll + (1 - self.alpha) * accel_roll
-            self.pitch = self.alpha * self.pitch + (1 - self.alpha) * accel_pitch
-
-        if mag_data is not None:
-            # 磁力计修正航向角
-            mag_yaw = mag_data['heading']
-            self.yaw = self.alpha * self.yaw + (1 - self.alpha) * mag_yaw
-
-        # ===== 3. 返回融合结果 =====
         return {
-            'position': tuple(self.kf_pos.x[:3]),
-            'velocity': tuple(self.kf_pos.x[3:6]),
-            'orientation': (self.roll, self.pitch, self.yaw)
+            'speed': speed,
+            'yaw': yaw,
+            'yaw_rate': yaw_rate,
+            'acceleration': acceleration
         }
-
-    def get_transform_matrix(self) -> np.ndarray:
-        """
-        获取车辆的世界坐标变换矩阵
-
-        返回: 4×4 齐次变换矩阵
-        """
-        # 位置
-        x, y, z = self.kf_pos.x[:3]
-
-        # 姿态 (欧拉角 → 旋转矩阵)
-        cr = np.cos(self.roll)
-        sr = np.sin(self.roll)
-        cp = np.cos(self.pitch)
-        sp = np.sin(self.pitch)
-        cy = np.cos(self.yaw)
-        sy = np.sin(self.yaw)
-
-        R = np.array([
-            [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
-            [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
-            [-sp,   cp*sr,            cp*cr           ]
-        ])
-
-        # 齐次变换矩阵
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = [x, y, z]
-
-        return T
 ```
 
 ### 2.4 数据采集主程序
@@ -750,18 +668,19 @@ from pathlib import Path
 from typing import Dict, List
 from .sensors.camera_array import CameraArray
 from .sensors.sensor_config import SensorSuite
-from .sensors.sensor_fusion import MultiModalSensorFusion
+from .sensors.vehicle_state import VehicleStateReader  # TESLA_PURE_VISION
 
 class DataCollector:
     """
-    CARLA 数据采集器
+    CARLA 数据采集器 (特斯拉纯视觉方案)
 
     采集内容:
-    1. 8个相机图像 (RGB)
-    2. GPS/IMU/磁力计数据
-    3. 车辆状态 (速度, 位置, 姿态)
-    4. 专家驾驶标签 (转向, 油门, 刹车)
-    5. 环境标注 (车道线, 目标检测, 深度, 分割)
+    1. 8个相机图像 (RGB) - 唯一的外部传感器
+    2. 车辆状态 (速度、航向角) - 来自车辆 CAN 总线
+    3. 专家驾驶标签 (转向、油门、刹车)
+    4. 环境标注 (车道线、目标检测、深度、分割)
+
+    不采集: GPS/IMU/磁力计 (特斯拉纯视觉不使用)
     """
 
     def __init__(
@@ -786,14 +705,9 @@ class DataCollector:
         # 车辆
         self.vehicle = None
 
-        # 传感器
+        # ===== TESLA_PURE_VISION: 仅相机传感器 =====
         self.camera_array = None
-        self.gnss_sensor = None
-        self.imu_sensor = None
-        self.mag_sensor = None
-
-        # 传感器融合
-        self.sensor_fusion = MultiModalSensorFusion()
+        self.vehicle_state_reader = None  # 车辆状态读取器
 
         # 数据缓冲区
         self.data_buffer = []
@@ -820,59 +734,19 @@ class DataCollector:
         print(f"✓ 车辆已生成: {spawn_point.location}")
 
     def setup_sensors(self):
-        """设置所有传感器"""
-        # ===== 1. 相机阵列 =====
+        """设置传感器 (纯视觉方案)"""
+        # ===== TESLA_PURE_VISION: 仅相机阵列 =====
         self.camera_array = CameraArray(
             self.world,
             self.vehicle,
             self.sensor_suite.cameras
         )
 
-        # ===== 2. GPS =====
-        gnss_bp = self.world.get_blueprint_library().find('sensor.other.gnss')
-        for key, value in self.sensor_suite.gnss_config.items():
-            if gnss_bp.has_attribute(key):
-                gnss_bp.set_attribute(key, str(value))
+        # ===== 车辆状态读取器 =====
+        self.vehicle_state_reader = VehicleStateReader(self.vehicle)
 
-        self.gnss_sensor = self.world.spawn_actor(
-            gnss_bp,
-            carla.Transform(),
-            attach_to=self.vehicle
-        )
-
-        self.gnss_data = None
-        self.gnss_sensor.listen(lambda data: setattr(self, 'gnss_data', {
-            'lat': data.latitude,
-            'lon': data.longitude,
-            'alt': data.altitude,
-            'timestamp': data.timestamp
-        }))
-
-        print("✓ GPS 已启用")
-
-        # ===== 3. IMU =====
-        imu_bp = self.world.get_blueprint_library().find('sensor.other.imu')
-        for key, value in self.sensor_suite.imu_config.items():
-            if imu_bp.has_attribute(key):
-                imu_bp.set_attribute(key, str(value))
-
-        self.imu_sensor = self.world.spawn_actor(
-            imu_bp,
-            carla.Transform(),
-            attach_to=self.vehicle
-        )
-
-        self.imu_data = None
-        self.imu_sensor.listen(lambda data: setattr(self, 'imu_data', {
-            'accel': [data.accelerometer.x, data.accelerometer.y, data.accelerometer.z],
-            'gyro': [data.gyroscope.x, data.gyroscope.y, data.gyroscope.z],
-            'compass': data.compass,
-            'timestamp': data.timestamp
-        }))
-
-        print("✓ IMU 已启用")
-
-        print(f"✓ 所有传感器已启用 (总计 {8 + 3} 个)")
+        print(f"✓ 纯视觉传感器已启用: 8 个相机")
+        print(f"✓ 车辆状态读取器已初始化 (模拟 CAN 总线)")
 
     def collect_frame(self) -> Dict:
         """
@@ -885,23 +759,10 @@ class DataCollector:
         if camera_frames is None:
             return None
 
-        # ===== 2. GPS/IMU 融合 =====
-        # 转换 GPS 到局部坐标
-        if self.gnss_data:
-            # 简化: 假设原点为 (0, 0)
-            # 实际应用中需要使用地图原点转换
-            self.gnss_data['x'] = (self.gnss_data['lon'] - 0) * 111320 * np.cos(np.radians(self.gnss_data['lat']))
-            self.gnss_data['y'] = (self.gnss_data['lat'] - 0) * 110540
+        # ===== TESLA_PURE_VISION: 2. 车辆状态 (来自 CAN 总线) =====
+        vehicle_state = self.vehicle_state_reader.get_state()
 
-        fused_state = self.sensor_fusion.update(
-            gps_data=self.gnss_data,
-            imu_data=self.imu_data
-        )
-
-        # ===== 3. 车辆状态 =====
-        velocity = self.vehicle.get_velocity()
-        speed = np.linalg.norm([velocity.x, velocity.y, velocity.z]) * 3.6  # km/h
-
+        # ===== 3. 控制输入 (专家标签) =====
         control = self.vehicle.get_control()
 
         # ===== 4. 自动标注 (Ground Truth) =====
@@ -917,34 +778,31 @@ class DataCollector:
         # 4.4 目标检测
         objects = self._get_nearby_objects()
 
-        # ===== 5. 组装数据 =====
+        # ===== 5. 组装数据 (纯视觉方案) =====
         frame_data = {
-            # 输入
+            # ===== TESLA_PURE_VISION: 输入数据 =====
             'cameras': camera_frames,  # 8 × (H, W, 3)
             'camera_params': self.camera_array.get_camera_params(),
 
-            # 传感器数据
-            'gps': self.gnss_data,
-            'imu': self.imu_data,
-            'fused_state': fused_state,
+            # 车辆状态 (来自 CAN 总线, 不是 GPS/IMU)
+            'speed': vehicle_state['speed'],           # m/s
+            'yaw': vehicle_state['yaw'],               # rad
+            'yaw_rate': vehicle_state['yaw_rate'],     # rad/s
+            'acceleration': vehicle_state['acceleration'],  # m/s²
 
-            # 车辆状态
-            'speed': speed,
-            'velocity': (velocity.x, velocity.y, velocity.z),
-
-            # 专家标签
+            # ===== 专家驾驶标签 =====
             'steering': control.steer,
             'throttle': control.throttle,
             'brake': control.brake,
             'gear': control.reverse,
 
-            # Ground Truth
+            # ===== Ground Truth (自动标注) =====
             'semantic_seg': semantic_camera,
             'depth': depth_camera,
             'lane_info': lane_invasion,
             'objects': objects,
 
-            # 元信息
+            # ===== 元信息 =====
             'frame': self.frame_count,
             'timestamp': time.time()
         }
@@ -1021,7 +879,8 @@ class DataCollector:
                     elapsed = time.time() - self.start_time
                     fps = self.frame_count / elapsed
                     print(f"已采集 {self.frame_count} 帧 | {fps:.1f} FPS | "
-                          f"速度: {frame_data['speed']:.1f} km/h")
+                          f"速度: {frame_data['speed']:.1f} m/s | "
+                          f"航向角速率: {frame_data['yaw_rate']:.3f} rad/s")
 
             time.sleep(0.01)  # 避免 CPU 100%
 
@@ -1077,24 +936,17 @@ class DataCollector:
                 print(f"  ✓ {cam_name}: {dset.shape}")
 
             # ===== 标签数据 =====
-            for label_name in ['steering', 'throttle', 'brake', 'speed']:
+            for label_name in ['steering', 'throttle', 'brake']:
                 data = [frame[label_name] for frame in self.data_buffer]
                 labels_group.create_dataset(label_name, data=data, dtype='float32')
                 print(f"  ✓ {label_name}: {len(data)}")
 
-            # ===== 传感器数据 =====
-            # GPS
-            gps_data = np.array([
-                [frame['gps']['lat'], frame['gps']['lon'], frame['gps']['alt']]
-                for frame in self.data_buffer if frame['gps']
-            ])
-            sensors_group.create_dataset('gps', data=gps_data, dtype='float64')
-
-            # IMU
-            imu_accel = np.array([frame['imu']['accel'] for frame in self.data_buffer if frame['imu']])
-            imu_gyro = np.array([frame['imu']['gyro'] for frame in self.data_buffer if frame['imu']])
-            sensors_group.create_dataset('imu_accel', data=imu_accel, dtype='float32')
-            sensors_group.create_dataset('imu_gyro', data=imu_gyro, dtype='float32')
+            # ===== TESLA_PURE_VISION: 车辆状态 (来自 CAN 总线) =====
+            vehicle_state_group = f.create_group('vehicle_state')
+            for state_name in ['speed', 'yaw', 'yaw_rate', 'acceleration']:
+                data = [frame[state_name] for frame in self.data_buffer]
+                vehicle_state_group.create_dataset(state_name, data=data, dtype='float32')
+                print(f"  ✓ vehicle_state/{state_name}: {len(data)}")
 
             # ===== 元数据 =====
             timestamps = [frame['timestamp'] for frame in self.data_buffer]
@@ -1104,17 +956,13 @@ class DataCollector:
         print(f"✓ 数据集已保存: {n_samples} 样本")
 
     def cleanup(self):
-        """清理资源"""
+        """清理资源 (纯视觉方案)"""
         if self.camera_array:
             self.camera_array.destroy()
-        if self.gnss_sensor:
-            self.gnss_sensor.destroy()
-        if self.imu_sensor:
-            self.imu_sensor.destroy()
         if self.vehicle:
             self.vehicle.destroy()
 
-        print("✓ 资源已清理")
+        print("✓ 资源已清理 (纯视觉传感器)")
 
 
 # ===== 使用示例 =====
@@ -1373,18 +1221,21 @@ from albumentations.pytorch import ToTensorV2
 
 class CARLAHydraDataset(Dataset):
     """
-    CARLA 九头蛇训练数据集
+    CARLA 九头蛇训练数据集 (特斯拉纯视觉方案)
 
     数据格式:
-      - 输入: 8个相机图像 + GPS/IMU
+      - 输入: 8个相机图像 + 车辆状态(速度、航向角速率)
       - 输出: 9个任务的标签
+
+    ===== TESLA_PURE_VISION =====
+    不使用: GPS/IMU/磁力计等外部传感器
 
     数据增强:
       - 光照变化
       - 对比度调整
       - 高斯噪声
-      - 随机裁剪
-      - 相机随机丢弃
+      - 高斯模糊(模拟运动模糊)
+      - 相机随机丢弃(模拟传感器失效)
     """
 
     def __init__(
@@ -1512,13 +1363,10 @@ class CARLAHydraDataset(Dataset):
                 drop_indices = np.random.choice(8, num_drop, replace=False)
                 cameras[drop_indices] = 0.0
 
-            # ===== 加载传感器数据 =====
-            gps = torch.tensor(f['sensors/gps'][frame_idx], dtype=torch.float32)
-            imu_accel = torch.tensor(f['sensors/imu_accel'][frame_idx], dtype=torch.float32)
-            imu_gyro = torch.tensor(f['sensors/imu_gyro'][frame_idx], dtype=torch.float32)
-            imu = torch.cat([imu_accel, imu_gyro], dim=0)  # (6,)
-
-            speed = torch.tensor([f['labels/speed'][frame_idx]], dtype=torch.float32)
+            # ===== TESLA_PURE_VISION: 加载车辆状态 (CAN 总线数据) =====
+            speed = torch.tensor([f['vehicle_state/speed'][frame_idx]], dtype=torch.float32)
+            yaw = torch.tensor([f['vehicle_state/yaw'][frame_idx]], dtype=torch.float32)
+            yaw_rate = torch.tensor([f['vehicle_state/yaw_rate'][frame_idx]], dtype=torch.float32)
 
             # ===== 加载标签 =====
             labels = {
@@ -1530,10 +1378,12 @@ class CARLAHydraDataset(Dataset):
             # TODO: 加载其他标签 (车道线, 目标检测, 深度等)
 
         return {
-            'cameras': cameras,
-            'gps': gps,
-            'imu': imu,
-            'speed': speed,
+            # ===== TESLA_PURE_VISION: 输入 =====
+            'cameras': cameras,       # (8, 3, H, W)
+            'speed': speed,           # (1,)
+            'yaw_rate': yaw_rate,     # (1,) 航向角速率
+
+            # 标签
             'labels': labels
         }
 ```
