@@ -4,6 +4,54 @@
 
 ---
 
+## 前置参考 ⭐ **新增**
+
+### 数据规范与标准
+
+本文档假设你已阅读以下文档:
+
+1. **[Occupancy-Network训练实战指南-CARLA-UE5.md](./Occupancy-Network训练实战指南-CARLA-UE5.md)**
+   - 项目概述、数据采集、标注生成 (§1-4)
+   - ⭐ **§1.3 数据规范与国际标准符合性** - 输入输出规范
+
+2. **[Occupancy-Network输入输出数据规范.md](./Occupancy-Network输入输出数据规范.md)**
+   - 输入: 8 相机 (12-bit RAW) + 车辆状态 (speed, yaw_rate)
+   - 输出: 占据网格 + 运动流 → ISO 22133 控制命令
+
+3. **[Occupancy-Network执行器反馈器架构设计.md](./Occupancy-Network执行器反馈器架构设计.md)**
+   - ISO 22133-2:2022 车辆控制接口
+   - ASAM OSI 3.5.0 Ground Truth 标准
+
+### 关键参数快速参考
+
+```python
+# 输入
+input_shape = {
+    'cameras': (8, 3, 960, 1280),  # 12-bit RAW → 归一化 [0, 1]
+    'speed': float,                 # m/s
+    'yaw_rate': float,             # rad/s
+}
+
+# 输出
+output_shape = {
+    'occupancy': (200, 200, 16),    # 占据概率 [0, 1]
+    'flow': (200, 200, 16, 3),      # 运动向量 m/s
+}
+
+# 控制命令 (ISO 22133)
+control_command = {
+    'acceleration': float,          # m/s²
+    'steering_angle': float,        # rad
+    'steering_rate': float,         # rad/s (限制)
+    'jerk': float,                 # m/s³ (限制)
+    'control_mode': 'AUTONOMOUS',
+    'safety_level': 'ASIL_D',
+    'target_speed': float,         # m/s (可选)
+}
+```
+
+---
+
 ## 5. Occupancy Network 完整实现 {#网络实现}
 
 ### 5.1 完整网络架构整合

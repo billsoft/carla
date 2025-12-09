@@ -142,7 +142,66 @@ graph TB
 | **可视化** | Weights & Biases | - | 实验追踪 |
 | **点云处理** | NumPy / PyTorch3D | - | 体素化 |
 
-### 1.3 项目目录结构
+### 1.3 数据规范与国际标准符合性 ⭐ **新增**
+
+#### 输入数据规范 (详见 [Occupancy-Network输入输出数据规范.md](./Occupancy-Network输入输出数据规范.md))
+
+**关键参数**:
+- **相机输入**: 8 × (1280×960, 12-bit RAW) @ 36 FPS
+  - ⚠️ **注意**: 是 12-bit,不是 14-bit (参考 Tesla AI Day 2021)
+- **车辆状态**: 仅需 `speed` (m/s) 和 `yaw_rate` (rad/s)
+  - ✅ 不需要 GPS 经纬度
+  - ✅ 不需要原始 IMU 数据
+  - ✅ 不需要完整车辆 Pose
+
+**输出控制命令** (符合 ISO 22133-2:2022):
+```python
+control_command = {
+    'acceleration': float,      # m/s² (纵向加速度)
+    'steering_angle': float,    # rad (方向盘转角)
+    'steering_rate': float,     # rad/s (转向速率限制)
+    'jerk': float,             # m/s³ (加加速度限制,舒适性)
+    'control_mode': enum,      # AUTONOMOUS
+    'safety_level': enum,      # ASIL_D
+    'target_speed': float      # m/s (可选)
+}
+```
+
+⚠️ **不是简单的 3 个值 (加速/减速/转向)**,而是完整的车辆控制命令,包含安全等级和速率限制。
+
+#### ASAM 标准集成 (详见 [ASAM标准使用指南-快速开始.md](./ASAM标准使用指南-快速开始.md))
+
+**本项目使用的 ASAM 标准**:
+
+| 标准 | 用途 | 集成位置 |
+|-----|------|---------|
+| **OpenDRIVE** | 高精地图加载,车道提取 | 数据采集阶段 |
+| **OpenSCENARIO** | 场景定义,测试用例管理 | 数据采集/测试 |
+| **OpenLABEL** | 占据标注格式 (可选) | 数据集标注 |
+| **ASAM OSI** | Ground Truth 标准化 | 反馈器接口 |
+
+**快速开始**:
+```python
+# 1. 从 OpenDRIVE 加载地图
+with open('Town10.xodr', 'r') as f:
+    opendrive_data = f.read()
+world = client.generate_opendrive_world(opendrive=opendrive_data)
+
+# 2. 从 OpenSCENARIO 加载测试场景
+from scenariogeneration import xosc
+scenario = xosc.Scenario(name="highway_traffic")
+# ... 场景定义 ...
+
+# 3. 控制命令符合 ISO 22133 标准
+# 参考 Occupancy-Network执行器反馈器架构设计.md
+```
+
+**坐标系约定** (ISO 8855):
+- **世界坐标系**: ENU (East-North-Up)
+- **车体坐标系**: X-前 Y-左 Z-上
+- **相机坐标系**: X-右 Y-下 Z-前 (OpenCV 约定)
+
+### 1.4 项目目录结构
 
 ```
 carla_occupancy_training/

@@ -80,7 +80,31 @@ carla_occupancy/
 └── README.md                            # 项目说明
 ```
 
-### 1.2 环境配置
+### 1.2 数据规范与标准符合性 ⭐ **新增**
+
+#### 关键数据规范
+
+**输入数据** (详见 [Occupancy-Network输入输出数据规范.md](./Occupancy-Network输入输出数据规范.md)):
+- **8 相机**: 1280×960, 12-bit RAW @ 36 FPS
+- **车辆状态**: `speed` (m/s) + `yaw_rate` (rad/s) 从 CAN 总线获取
+- ✅ 不需要 GPS 经纬度
+- ✅ 不需要原始 IMU 数据
+
+**输出控制命令** (符合 ISO 22133-2:2022):
+- **7 个参数**: acceleration, steering_angle, steering_rate, jerk, control_mode, safety_level, target_speed
+- ⚠️ 不是简单的 3 个值 (加速/减速/转向)
+
+**执行器/反馈器接口** (详见 [Occupancy-Network执行器反馈器架构设计.md](./Occupancy-Network执行器反馈器架构设计.md)):
+- **ISO 22133-2:2022**: 车辆控制接口标准
+- **ASAM OSI 3.5.0**: Ground Truth 反馈标准
+- **ISO 8855**: 车辆坐标系定义
+
+**ASAM 标准** (详见 [ASAM标准使用指南-快速开始.md](./ASAM标准使用指南-快速开始.md)):
+- **OpenDRIVE**: 地图加载 (CARLA 原生支持)
+- **OpenSCENARIO**: 场景定义 (可选)
+- **OpenLABEL**: 占据标注格式 (可选)
+
+### 1.3 环境配置
 
 #### Python 依赖
 

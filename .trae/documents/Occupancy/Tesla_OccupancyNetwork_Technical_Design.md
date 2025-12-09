@@ -325,8 +325,9 @@ class OccupancyHead(nn.Module):
 
 我们模拟 Tesla HW4.0 传感器套件，核心在于**多路高动态范围 (HDR) 图像的同步采集**。
 
-#### 5.1.1 传感器配置与 14-bit RAW 模拟
-CARLA 默认输出 8-bit RGB，无法满足夜间或强光场景需求。我们需要配置相机输出 Logarithmic HDR 数据或模拟 14-bit RAW。
+#### 5.1.1 传感器配置与 12-bit RAW 模拟
+⚠️ **重要**: Tesla 实际使用 **12-bit RAW** (Tesla AI Day 2021),不是 14-bit。
+CARLA 默认输出 8-bit RGB,无法满足夜间或强光场景需求。我们需要配置相机输出 Logarithmic HDR 数据或模拟 12-bit RAW。
 
 ```python
 import carla
@@ -381,7 +382,7 @@ class SensorManager:
             # 这里简化处理，实际需检查 frame_number 是否一致
             sensor_id, carla_image = self.data_queues[sensor_id].get(timeout=2.0)
             
-            # 将 CARLA 原始数据转换为 14-bit (模拟) 或 float32
+            # 将 CARLA 原始数据转换为 12-bit (模拟) 或 float32
             # CARLA RawData -> Buffer -> Numpy
             array = np.frombuffer(carla_image.raw_data, dtype=np.dtype("uint8"))
             array = np.reshape(array, (carla_image.height, carla_image.width, 4)) # RGBA
