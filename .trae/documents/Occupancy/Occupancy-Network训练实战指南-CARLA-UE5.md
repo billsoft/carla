@@ -63,6 +63,7 @@ occupancy_gt = voxelize_point_cloud(lidar_points, voxel_size=0.5)
 3. [3D 占据标注生成 (LiDAR 体素化)](#占据标注)
 4. [训练数据集构建与管理](#数据集构建)
 5. [Occupancy Network 完整实现](#网络实现)
+   - **5.5 时空记忆系统** ⭐ **特斯拉核心创新** (详见 [时空记忆系统文档](./Occupancy-Network时空记忆系统-原理与实现.md))
 6. [训练流程与超参数调优](#训练流程)
 7. [验证与可视化](#验证可视化)
 8. [模型部署与实时推理](#模型部署)
@@ -93,20 +94,25 @@ graph TB
         SYNC[传感器同步]
         VOXEL[点云体素化<br/>生成占据 GT]
         FLOW[光流计算<br/>生成运动 GT]
+        OCCL[遮挡标注<br/>空/可见/被遮挡]
+        TRAJ[历史轨迹<br/>120帧序列]
         SAVE[数据存储<br/>HDF5]
     end
 
     subgraph Training["训练模块"]
-        LOADER[数据加载器<br/>3D 体素数据]
+        LOADER[数据加载器<br/>时间序列数据]
         MODEL[Occupancy Network<br/>RegNet + BiFPN + Attention]
-        LOSS[损失函数<br/>Focal + Lovász + Flow]
+        TMEM[⏱️ 时间记忆<br/>ConvGRU3D]
+        SMEM[🗺️ 空间记忆<br/>Memory Bank]
+        FUSION[时空融合<br/>Cross-Attention]
+        LOSS[损失函数<br/>Occupancy + Flow + Memory]
         OPT[优化器<br/>AdamW]
     end
 
     subgraph Inference["推理模块"]
         DEPLOY[模型部署<br/>TensorRT FP16]
-        REALTIME[实时推理<br/>纯视觉输入]
-        VIZ[3D 可视化<br/>Open3D]
+        REALTIME[实时推理<br/>带记忆状态]
+        VIZ[3D 可视化<br/>Open3D + 记忆热力图]
     end
 
     UE --> VEHICLE
@@ -116,18 +122,24 @@ graph TB
     VEHICLE --> CAM & LIDAR & VEH
 
     CAM & LIDAR --> SYNC
-    SYNC --> VOXEL & FLOW
-    VOXEL & FLOW --> SAVE
+    SYNC --> VOXEL & FLOW & OCCL & TRAJ
+    VOXEL & FLOW & OCCL & TRAJ --> SAVE
 
     SAVE --> LOADER
     LOADER --> MODEL
-    MODEL --> LOSS
+    MODEL --> TMEM & SMEM
+    TMEM & SMEM --> FUSION
+    FUSION --> LOSS
     LOSS --> OPT
     OPT --> MODEL
 
     MODEL --> DEPLOY
     DEPLOY --> REALTIME
     REALTIME --> VIZ
+
+    style TMEM fill:#e3f2fd
+    style SMEM fill:#fff3e0
+    style FUSION fill:#f3e5f5
 ```
 
 ### 1.2 技术栈
@@ -201,6 +213,46 @@ scenario = xosc.Scenario(name="highway_traffic")
 - **车体坐标系**: X-前 Y-左 Z-上
 - **相机坐标系**: X-右 Y-下 Z-前 (OpenCV 约定)
 
+#### 时空记忆系统 ⭐ **特斯拉 AI Day 2022 核心创新**
+
+本项目完整实现特斯拉的**双记忆架构** (详见 [时空记忆系统文档](./Occupancy-Network时空记忆系统-原理与实现.md)):
+
+**为什么需要时空记忆？**
+
+| 场景 | 问题 | 解决方案 |
+|-----|------|---------|
+| **行人被遮挡** | 前车遮挡行人 0.5秒 → 传统方案认为行人消失 | **空间记忆**: 记住"行人曾在前车右侧,速度1.2m/s" |
+| **红绿灯等待60秒** | 2400帧 → RNN梯度消失,记忆衰减 | **空间记忆**: 静止场景压缩存储,不占用RNN |
+| **运动物体追踪** | 需要预测未来轨迹 | **时间记忆**: ConvGRU3D 建模短期运动 |
+
+**双记忆架构**:
+
+```python
+# 时间记忆 ⏱️ (短期: 3秒/120帧)
+temporal_context = TemporalRNN(current_frame, hidden_state)
+用途: 跟踪快速运动 (车辆/行人)
+
+# 空间记忆 🗺️ (长期: 100m×100m区域)
+spatial_context = SpatialMemory.query(location, radius=50m)
+用途: 存储静态场景 + 被遮挡物体
+
+# 时空融合 (Cross-Attention)
+fused = CrossAttention(temporal, spatial)
+输出: 占据概率 + 运动向量
+```
+
+**关键参数**:
+- **时间记忆范围**: 3 秒 (120 帧 @ 40fps)
+- **空间记忆范围**: 半径 50 米 (动态查询)
+- **空间记忆衰减**: 30 秒时间常数 (自适应衰减)
+- **记忆网格分辨率**: 0.5m (与占据网格一致)
+
+**CARLA 训练特性**:
+- ✅ 时间序列数据采集 (连续120帧)
+- ✅ 遮挡物体标注 (3类: 空/可见/被遮挡)
+- ✅ 历史轨迹标注 (用于时间记忆监督)
+- ✅ 记忆一致性损失 (时空互补)
+
 ### 1.4 项目目录结构
 
 ```
@@ -212,25 +264,34 @@ carla_occupancy_training/
 │   │   ├── vehicle_state.py         # 车辆状态
 │   │   └── sensor_config.py         # 传感器配置
 │   ├── data_collector_occupancy.py  # 占据数据采集
+│   ├── data_collector_memory.py     # ⭐ 时空记忆数据采集
 │   ├── voxelization.py              # 点云体素化
+│   ├── occlusion_annotator.py       # ⭐ 遮挡标注生成
+│   ├── trajectory_tracker.py        # ⭐ 历史轨迹追踪
 │   └── flow_estimation.py           # 运动流估计
 │
 ├── dataset/
 │   ├── occupancy_dataset.py         # 占据数据集
+│   ├── memory_dataset.py            # ⭐ 时空记忆数据集 (序列数据)
 │   ├── augmentation.py              # 数据增强
 │   └── split_dataset.py             # 数据划分
 │
 ├── models/
 │   ├── occupancy_network.py         # 完整网络
+│   ├── occupancy_network_memory.py  # ⭐ 带时空记忆的网络
 │   ├── regnet_backbone.py           # RegNet backbone
 │   ├── bifpn.py                     # BiFPN 特征金字塔
 │   ├── occupancy_lifting.py         # 2D→3D 特征提升
-│   ├── temporal_fusion.py           # 时序融合
+│   ├── temporal_memory.py           # ⭐ 时间记忆模块 (ConvGRU3D)
+│   ├── spatial_memory.py            # ⭐ 空间记忆模块 (Memory Bank)
+│   ├── temporal_spatial_fusion.py   # ⭐ 时空融合 (Cross-Attention)
 │   └── occupancy_heads.py           # 占据预测头
 │
 ├── training/
 │   ├── trainer.py                   # 训练器
+│   ├── trainer_memory.py            # ⭐ 时空记忆训练器
 │   ├── losses.py                    # 损失函数
+│   ├── memory_losses.py             # ⭐ 记忆损失函数 (一致性+遮挡)
 │   ├── metrics.py                   # 评估指标
 │   └── scheduler.py                 # 学习率调度
 │
@@ -242,16 +303,20 @@ carla_occupancy_training/
 ├── visualization/
 │   ├── visualize_occupancy.py       # 3D 占据可视化
 │   ├── visualize_flow.py            # 运动流可视化
+│   ├── visualize_memory.py          # ⭐ 时空记忆可视化 (BEV热力图)
 │   └── carla_renderer.py            # CARLA 内渲染
 │
 ├── configs/
 │   ├── sensor_config.yaml           # 传感器配置
 │   ├── training_config.yaml         # 训练配置
+│   ├── memory_config.yaml           # ⭐ 时空记忆配置
 │   └── voxel_config.yaml            # 体素配置
 │
 └── scripts/
     ├── collect_data.py              # 数据采集脚本
+    ├── collect_memory_data.py       # ⭐ 时空记忆数据采集
     ├── train.py                     # 训练脚本
+    ├── train_with_memory.py         # ⭐ 带记忆的训练脚本
     ├── evaluate.py                  # 评估脚本
     └── deploy_carla.py              # CARLA 部署
 
