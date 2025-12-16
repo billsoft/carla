@@ -33,7 +33,21 @@
       "Bash(git checkout:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(while read dir)",
+      "Bash(do if [ ! -f $dir/__init__.py ])",
+      "Bash([ $dir != . ])",
+      "Bash([ $dir != ./scripts ])",
+      "Bash([ $dir != ./data ])",
+      "Bash(then touch $dir/__init__.py)",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(del \"d:\\code\\carla\\carla_data_collection\\sensors\\camera_sensor.py\")",
+      "Bash(python:*)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe d:codecarlacarla_data_collectionscriptscollect_5_frames.py)",
+      "Bash(ls:*)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe /d/code/carla/carla_data_collection/scripts/check_vehicles.py)",
+      "Bash(/c/Users/bills/.conda/envs/carla/python.exe:*)"
     ],
     "deny": [],
     "ask": []
