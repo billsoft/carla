@@ -10,136 +10,111 @@
 
 import carla
 
-# 特斯拉 8 相机配置
+# 镜头畸变参数 (基于 CARLA 文档)
+# 鱼眼镜头参数 (适用于 120度+ 超广角)
+FISHEYE_DISTORTION = {
+    'lens_circle_multiplier': 3.0,  # 使用典型值 3.0
+    'lens_circle_falloff': 3.0,     # 使用典型值 3.0
+    'lens_k': -1.0,                 # 桶形畸变系数
+    'lens_kcube': 0.0,
+    'lens_x_size': 0.0,
+    'lens_y_size': 0.0
+}
+
+# 广角镜头参数 (适用于 90度 广角) - 轻微畸变以减少拉伸
+WIDE_ANGLE_DISTORTION = {
+    'lens_circle_multiplier': 0.0,
+    'lens_circle_falloff': 5.0,
+    'lens_k': -0.2,                 # 非常轻微的畸变
+    'lens_kcube': 0.0,
+    'lens_x_size': 0.0,
+    'lens_y_size': 0.0
+}
+
+# 特斯拉 8 相机配置 - 基于真实 Tesla Autopilot 传感器布局
+# 参考: Tesla AI Day & 社区拆解数据
+# 1280x960 (960p) 4:3 宽高比
 TESLA_CAMERA_CONFIGS = [
+    # --- 前视相机组 (Windshield Triple Cam) ---
     {
-        'id': 'cam_front_ultra_wide',
+        'id': 'cam_front_main',  # Main
         'index': 0,
-        'fov': 120,  # 超广角 - 鱼眼镜头
-        'position': {'x': 1.5, 'y': 0.0, 'z': 1.4},   # 前挡风玻璃上沿
+        'fov': 50,  # 主摄标准 50度
+        'position': {'x': 1.0, 'y': 0.0, 'z': 1.6},
         'rotation': {'pitch': 0, 'yaw': 0, 'roll': 0},
-        'description': '前方超广角 - 近距离障碍物检测',
-        # 鱼眼畸变参数 (模拟真实超广角镜头)
-        'lens_distortion': {
-            'lens_circle_multiplier': 2.5,  # 鱼眼效果强度
-            'lens_circle_falloff': 2.0,     # 边缘衰减
-            'lens_k': -0.15,                # 径向畸变 k1
-            'lens_kcube': 0.05,             # 径向畸变 k3
-            'lens_x_size': 0.95,            # X 方向有效范围
-            'lens_y_size': 0.95,            # Y 方向有效范围
-        }
-    },
-    {
-        'id': 'cam_front_wide',
-        'index': 1,
-        'fov': 90,   # 广角
-        'position': {'x': 1.5, 'y': 0.0, 'z': 1.4},
-        'rotation': {'pitch': 0, 'yaw': 0, 'roll': 0},
-        'description': '前方广角 - 主视野/车道线',
-        # 轻度桶形畸变 (模拟真实广角镜头)
-        'lens_distortion': {
-            'lens_circle_multiplier': 1.2,
-            'lens_circle_falloff': 1.0,
-            'lens_k': -0.05,
-            'lens_kcube': 0.01,
-            'lens_x_size': 1.0,
-            'lens_y_size': 1.0,
-        }
-    },
-    {
-        'id': 'cam_front_narrow',
-        'index': 2,
-        'fov': 50,   # 长焦 - 无畸变
-        'position': {'x': 1.5, 'y': 0.0, 'z': 1.4},
-        'rotation': {'pitch': 0, 'yaw': 0, 'roll': 0},
-        'description': '前方长焦 - 远距离目标/交通标志',
-        # 长焦镜头 - 无明显畸变
+        'description': '前视主摄 (Main)',
         'lens_distortion': None
     },
     {
-        'id': 'cam_front_left',
+        'id': 'cam_front_wide',  # Wide
+        'index': 1,
+        'fov': 120, # 广角 120度
+        'position': {'x': 1.0, 'y': 0.0, 'z': 1.6},
+        'rotation': {'pitch': 0, 'yaw': 0, 'roll': 0},
+        'description': '前视广角 (Wide/Fisheye)',
+        'lens_distortion': FISHEYE_DISTORTION
+    },
+    {
+        'id': 'cam_front_narrow', # Narrow
+        'index': 2,
+        'fov': 35,  # 长焦 35度
+        'position': {'x': 1.0, 'y': 0.0, 'z': 1.6},
+        'rotation': {'pitch': 0, 'yaw': 0, 'roll': 0},
+        'description': '前视长焦 (Narrow)',
+        'lens_distortion': None
+    },
+    
+    # --- 侧向前视 (B-Pillar) ---
+    # B柱位置，向前看，用于路口检测
+    {
+        'id': 'cam_left_pillar',
         'index': 3,
-        'fov': 90,
-        'position': {'x': 1.2, 'y': -0.6, 'z': 1.2},  # 左前 A 柱附近
-        'rotation': {'pitch': 0, 'yaw': -55, 'roll': 0},
-        'description': '前左广角 - 左前盲区',
-        # 广角畸变
-        'lens_distortion': {
-            'lens_circle_multiplier': 1.2,
-            'lens_circle_falloff': 1.0,
-            'lens_k': -0.05,
-            'lens_kcube': 0.01,
-            'lens_x_size': 1.0,
-            'lens_y_size': 1.0,
-        }
+        'fov': 80,
+        'position': {'x': 0.0, 'y': -0.9, 'z': 1.7}, # B柱高位
+        'rotation': {'pitch': 0, 'yaw': -60, 'roll': 0}, # 指向左前
+        'description': '左侧 B 柱 (Left Pillar)',
+        'lens_distortion': None
     },
     {
-        'id': 'cam_front_right',
+        'id': 'cam_right_pillar',
         'index': 4,
-        'fov': 90,
-        'position': {'x': 1.2, 'y': 0.6, 'z': 1.2},   # 右前 A 柱附近
-        'rotation': {'pitch': 0, 'yaw': 55, 'roll': 0},
-        'description': '前右广角 - 右前盲区',
-        # 广角畸变
-        'lens_distortion': {
-            'lens_circle_multiplier': 1.2,
-            'lens_circle_falloff': 1.0,
-            'lens_k': -0.05,
-            'lens_kcube': 0.01,
-            'lens_x_size': 1.0,
-            'lens_y_size': 1.0,
-        }
+        'fov': 80,
+        'position': {'x': 0.0, 'y': 0.9, 'z': 1.7}, # B柱高位
+        'rotation': {'pitch': 0, 'yaw': 60, 'roll': 0}, # 指向右前
+        'description': '右侧 B 柱 (Right Pillar)',
+        'lens_distortion': None
     },
+
+    # --- 侧向后视 (Repeater/Fender) ---
+    # 翼子板位置，向后看，用于盲区/变道
     {
-        'id': 'cam_rear_left',
+        'id': 'cam_left_repeater',
         'index': 5,
-        'fov': 90,
-        'position': {'x': -0.5, 'y': -0.8, 'z': 1.2},  # 左后视镜位置
-        'rotation': {'pitch': 0, 'yaw': -110, 'roll': 0},
-        'description': '左后广角 - 左后方/变道监控',
-        # 广角畸变
-        'lens_distortion': {
-            'lens_circle_multiplier': 1.2,
-            'lens_circle_falloff': 1.0,
-            'lens_k': -0.05,
-            'lens_kcube': 0.01,
-            'lens_x_size': 1.0,
-            'lens_y_size': 1.0,
-        }
+        'fov': 100,
+        'position': {'x': 1.2, 'y': -0.9, 'z': 1.0}, # 翼子板低位
+        'rotation': {'pitch': 0, 'yaw': -160, 'roll': 0}, # 指向左后
+        'description': '左侧翼子板 (Left Repeater)',
+        'lens_distortion': None
     },
     {
-        'id': 'cam_rear_right',
+        'id': 'cam_right_repeater',
         'index': 6,
-        'fov': 90,
-        'position': {'x': -0.5, 'y': 0.8, 'z': 1.2},   # 右后视镜位置
-        'rotation': {'pitch': 0, 'yaw': 110, 'roll': 0},
-        'description': '右后广角 - 右后方/变道监控',
-        # 广角畸变
-        'lens_distortion': {
-            'lens_circle_multiplier': 1.2,
-            'lens_circle_falloff': 1.0,
-            'lens_k': -0.05,
-            'lens_kcube': 0.01,
-            'lens_x_size': 1.0,
-            'lens_y_size': 1.0,
-        }
+        'fov': 100,
+        'position': {'x': 1.2, 'y': 0.9, 'z': 1.0}, # 翼子板低位
+        'rotation': {'pitch': 0, 'yaw': 160, 'roll': 0}, # 指向右后
+        'description': '右侧翼子板 (Right Repeater)',
+        'lens_distortion': None
     },
+
+    # --- 后视 (Backup) ---
     {
         'id': 'cam_rear',
         'index': 7,
-        'fov': 120,  # 超广角 - 鱼眼镜头
-        'position': {'x': -1.8, 'y': 0.0, 'z': 1.0},   # 后备箱上沿
-        'rotation': {'pitch': 0, 'yaw': 180, 'roll': 0},
-        'description': '后方超广角 - 倒车/后方车辆',
-        # 鱼眼畸变参数
-        'lens_distortion': {
-            'lens_circle_multiplier': 2.5,
-            'lens_circle_falloff': 2.0,
-            'lens_k': -0.15,
-            'lens_kcube': 0.05,
-            'lens_x_size': 0.95,
-            'lens_y_size': 0.95,
-        }
+        'fov': 120,
+        'position': {'x': -2.5, 'y': 0.0, 'z': 1.2}, # 车尾
+        'rotation': {'pitch': -5, 'yaw': 180, 'roll': 0}, # 略微向下
+        'description': '后视 (Rear)',
+        'lens_distortion': FISHEYE_DISTORTION
     }
 ]
 
@@ -154,20 +129,24 @@ for cam_config in TESLA_CAMERA_CONFIGS:
     # 添加图像尺寸
     cam_config['width'] = 1280
     cam_config['height'] = 960
-]
 
 # 相机传感器参数
+# 启用后处理以获得 Lumen/RayTracing 光照效果
 CAMERA_SENSOR_CONFIG = {
     'image_size_x': 1280,
     'image_size_y': 960,
-    'sensor_tick': 1.0 / 36.0,  # 36 fps
-    'gamma': 2.2,
-    'motion_blur_intensity': 0.0,
+    'sensor_tick': 0.0, # 与仿真步长同步 (10Hz)
+    
+    # 启用后处理 (Lumen/RT 需要)
     'enable_postprocess_effects': True,
-
-    # 曝光设置 (模拟硬件相机)
+    'gamma': 2.2, # 标准 Gamma 2.2，确保光照亮度正常
+    
+    # 运动模糊 (0.0 = 关闭)
+    'motion_blur_intensity': 0.0,
+    
+    # 曝光设置
     'exposure_mode': 'manual',
     'exposure_compensation': 0.0,
-    'shutter_speed': 60.0,  # 1/60s
+    'shutter_speed': 200.0, # 1/200s (运动捕捉更清晰)
     'iso': 100.0
 }
