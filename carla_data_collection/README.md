@@ -18,7 +18,7 @@ cd d:\code\carla\carla_data_collection
 python scripts\collect_5_frames.py
 ```
 
-**采集内容**: 5 帧数据 (2 相机 + 语义激光雷达 + 20 NPC)
+**采集内容**: 5 帧数据 (8 相机 + 语义激光雷达 + 20 NPC + Occupancy Grid)
 
 ---
 
@@ -29,44 +29,67 @@ python scripts\collect_5_frames.py
 ```
 dataset_output/town10_test/
 ├── cameras/               # 相机图像 (PNG 格式)
-│   ├── cam_front/        # 前置广角相机 (120° 鱼眼)
-│   │   ├── 000000.png
-│   │   ├── 000001.png
-│   │   └── ...
-│   └── cam_rear/         # 后置广角相机 (90°)
-│       ├── 000000.png
-│       ├── 000001.png
-│       └── ...
-├── lidar/                # 激光雷达点云 (NPZ 压缩格式)
-│   ├── 000000.npz        # 包含: points, frame, timestamp
-│   ├── 000001.npz
+│   ├── cam_front_main/    # 前置主摄 (50°)
+│   ├── cam_front_wide/    # 前置广角 (120° 鱼眼)
+│   ├── cam_front_narrow/  # 前置长焦 (35°)
+│   ├── cam_left_pillar/   # 左侧 B 柱
+│   ├── cam_right_pillar/  # 右侧 B 柱
+│   ├── cam_left_repeater/ # 左侧翼子板
+│   ├── cam_right_repeater/# 右侧翼子板
+│   └── cam_rear/          # 后置相机 (120° 鱼眼)
+├── lidar/                 # 激光雷达点云 (NPZ 压缩格式)
+│   ├── 000000.npz         # 包含: points (N,6), frame, timestamp
 │   └── ...
-├── occupancy/            # 3D 体素标签 (TODO: 待实现)
+├── occupancy/             # 3D 体素标签 (NPZ 格式)
+│   ├── 000000.npz         # 包含: occupancy (200,200,16), mask
 │   └── ...
-└── calibration.json      # 相机/激光雷达标定参数
+└── calibration.json       # 相机/激光雷达标定参数
 ```
 
 ---
 
-## 📁 关键文件
+## 🔧 已修复问题 (2025-12-16)
 
-- [collect_5_frames.py](scripts/collect_5_frames.py) - 主测试脚本
-- [quick_test.py](scripts/quick_test.py) - 快速连接测试
-- [validate_dataset.py](scripts/validate_dataset.py) - 数据集验证
-- [运行测试.txt](运行测试.txt) - 详细运行说明
+### Bug 修复
+1. **车型硬编码**: 修复了 `vehicle.tesla.model3` 导致的崩溃，增加了智能车型选择。
+2. **后置摄像头遮挡**: 调整了后置摄像头位置 (`x=-2.5, z=1.5`)，解决了图像全黑问题。
+3. **数据保存**: 实现了完整的磁盘保存功能 (PNG/NPZ/JSON)。
+4. **NPY 解析**: 修复了 Occupancy Viewer 中 NPY 解析器对标量数据的支持问题。
+
+### 功能增强
+1. **Occupancy 生成**: 实现了从语义激光雷达直接生成 Occupancy Grid 的算法。
+2. **可视化工具**: 开发了基于 Three.js 的 `occupancy_viewer`，支持自动加载和 3D 交互。
+3. **数据验证**: 提供了 `verify_occupancy.py` 脚本，可全面验证数据集完整性。
 
 ---
 
-## 🔧 最新修复 (2025-12-16)
+## 📁 关键文件说明
 
-✅ **问题 1**: 硬编码车型 `vehicle.tesla.model3` 导致崩溃
-**修复**: 智能车型选择,自动尝试多个候选车型
+| 文件 | 说明 |
+|------|------|
+| `scripts/collect_5_frames.py` | **主采集脚本**，执行 5 帧完整采集流程 |
+| `scripts/verify_occupancy.py` | **验证脚本**，检查数据集结构、完整性和有效性 |
+| `data/occupancy_generator.py` | **核心算法**，点云转体素网格 |
+| `config/camera_config.py` | **配置**，特斯拉 8 相机布局参数 |
+| `config/occupancy_config.py` | **配置**，体素网格尺寸和语义映射 |
 
-✅ **问题 2**: 后置摄像头全黑 (范围 [0, 0])
-**修复**: 调整位置从 `x=-1.8, z=1.0` → `x=-2.5, z=1.5` (避免车身遮挡)
+---
 
-✅ **问题 3**: 数据未保存到磁盘
-**修复**: 添加图像保存 (PNG) + 激光雷达保存 (NPZ) + 元数据保存 (JSON)
+## 📊 数据验证
+
+运行以下命令验证采集的数据集：
+
+```cmd
+python scripts\verify_occupancy.py
+```
+
+预期输出：
+```
+✓ 相机数据: 通过 (8 相机 × 5 帧)
+✓ 标定文件: 通过
+✓ 体素数据: 通过 (格式正确, Mask 一致)
+✓ 所有验证通过! 数据集完整。
+```
 
 ---
 
@@ -79,7 +102,6 @@ dataset_output/town10_test/
 
 ## 🚧 待实现功能
 
-- [ ] 体素化处理 (LiDAR → Occupancy Grid)
-- [ ] 完整 8 相机布局 (当前仅 2 相机测试)
-- [ ] 语义标签映射 (23 CARLA 类 → 18 Occupancy 类)
-- [ ] 大规模数据采集脚本 (多场景、多地图)
+- [ ] **大规模采集**: 支持多地图自动切换、长时间采集
+- [ ] **多天气支持**: 随机天气变化 (雨/雾/夜)
+- [ ] **动态场景**: 增加行人、骑行者等更多交通参与者

@@ -313,8 +313,11 @@ def main():
                         cam_bp.set_attribute(key, str(val))
             
             # 覆盖特定参数
-            cam_bp.set_attribute('image_size_x', str(cam_config['width']))
-            cam_bp.set_attribute('image_size_y', str(cam_config['height']))
+            width = CAMERA_SENSOR_CONFIG.get('image_size_x', 1280)
+            height = CAMERA_SENSOR_CONFIG.get('image_size_y', 960)
+            
+            cam_bp.set_attribute('image_size_x', str(width))
+            cam_bp.set_attribute('image_size_y', str(height))
             cam_bp.set_attribute('fov', str(cam_config['fov']))
             
             # 后处理 Profile
@@ -332,7 +335,14 @@ def main():
                     if cam_bp.has_attribute(key):
                         cam_bp.set_attribute(key, str(val))
 
-            transform = cam_config['transform']
+            # 创建 Transform
+            pos = cam_config['position']
+            rot = cam_config['rotation']
+            transform = carla.Transform(
+                carla.Location(x=pos['x'], y=pos['y'], z=pos['z']),
+                carla.Rotation(pitch=rot['pitch'], yaw=rot['yaw'], roll=rot['roll'])
+            )
+            
             camera = world.spawn_actor(cam_bp, transform, attach_to=vehicle)
             actor_list.append(camera)
             
@@ -484,8 +494,8 @@ def main():
             camera_configs[cfg['id']] = {
                 'transform': transform_dict,
                 'fov': cfg['fov'],
-                'width': cfg['width'],
-                'height': cfg['height'],
+                'width': CAMERA_SENSOR_CONFIG.get('image_size_x', 1280),
+                'height': CAMERA_SENSOR_CONFIG.get('image_size_y', 960),
                 'lens_distortion': cfg.get('lens_distortion', None)
             }
 

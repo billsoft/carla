@@ -8,8 +8,6 @@
 - 长焦 (50°): 无畸变
 """
 
-import carla
-
 # 镜头畸变参数 (基于 CARLA 文档)
 # 鱼眼镜头参数 (适用于 120度+ 超广角)
 FISHEYE_DISTORTION = {
@@ -117,18 +115,6 @@ TESLA_CAMERA_CONFIGS = [
         'lens_distortion': FISHEYE_DISTORTION
     }
 ]
-
-# 为每个相机添加 Transform 对象
-for cam_config in TESLA_CAMERA_CONFIGS:
-    pos = cam_config['position']
-    rot = cam_config['rotation']
-    cam_config['transform'] = carla.Transform(
-        carla.Location(x=pos['x'], y=pos['y'], z=pos['z']),
-        carla.Rotation(pitch=rot['pitch'], yaw=rot['yaw'], roll=rot['roll'])
-    )
-    # 添加图像尺寸
-    cam_config['width'] = 1280
-    cam_config['height'] = 960
 
 # 相机传感器参数
 # 启用后处理以获得 Lumen/RayTracing 光照效果
