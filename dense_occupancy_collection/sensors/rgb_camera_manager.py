@@ -119,12 +119,12 @@ class RGBCameraManager:
             weak_queue = weakref.ref(queue)
             sensor.listen(lambda image, q=weak_queue: self._sensor_callback(image, q))
 
-            print(f"✓ RGB相机创建成功: {cam_id} (FOV={cam_cfg['fov']}°)")
+            print(f"✓ RGB相机创建成功: {cam_id} (FOV={cam_cfg['fov']}°)", flush=True)
 
     def _sensor_callback(self, image, weak_queue):
         """
         传感器数据回调函数
-
+        
         Args:
             image: carla.Image 对象 (RGB图)
             weak_queue: 弱引用队列

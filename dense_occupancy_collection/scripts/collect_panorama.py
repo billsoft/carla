@@ -16,7 +16,16 @@ from pathlib import Path
 
 # 添加项目路径 (与 carla_data_collection 一致的方式)
 try:
+    # 优先添加 PythonAPI/carla
+    # 这是 UE5.5 CARLA 0.10.0 的源码路径
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'PythonAPI/carla'))
+    
+    # 移除 dist 下的 egg 文件添加，避免加载到错误的 0.9.16 版本
+    # carla_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'PythonAPI/carla/dist')
+    # if os.path.exists(carla_path):
+    #     for file in os.listdir(carla_path):
+    #         if file.endswith('.egg'):
+    #             sys.path.append(os.path.join(carla_path, file))
 except IndexError:
     pass
 
@@ -190,7 +199,17 @@ def setup_hero_vehicle(world):
         vehicle_bp.set_attribute('role_name', 'hero')
 
     spawn_points = world.get_map().get_spawn_points()
-    vehicle = world.spawn_actor(vehicle_bp, spawn_points[0])
+    
+    # 尝试找到一个空闲的生成点
+    vehicle = None
+    for point in spawn_points:
+        vehicle = world.try_spawn_actor(vehicle_bp, point)
+        if vehicle is not None:
+            break
+            
+    if vehicle is None:
+        raise RuntimeError("无法找到空闲的生成点生成Hero车辆")
+        
     print(f"✓ Hero车辆已生成: {vehicle.type_id}")
 
     return vehicle
@@ -288,12 +307,12 @@ def main():
         # 连接CARLA
         print("⏳ 连接CARLA服务器...")
         client = carla.Client(args.host, args.port)
-        client.set_timeout(10.0)
+        client.set_timeout(30.0)
         world = client.get_world()
         print(f"✓ 已连接到CARLA: {world.get_map().name}")
 
         # 加载地图
-        if args.town and args.town != world.get_map().name:
+        if args.town and args.town not in world.get_map().name:
             print(f"⏳ 加载地图: {args.town}...")
             try:
                 world = client.load_world(args.town)
@@ -306,7 +325,7 @@ def main():
         print("✓ 天气已设置为 ClearNoon")
 
         # Traffic Manager
-        tm_port = 8005
+        tm_port = 8010
         traffic_manager = client.get_trafficmanager(tm_port)
         traffic_manager.set_global_distance_to_leading_vehicle(2.5)
         traffic_manager.set_synchronous_mode(True)
@@ -323,18 +342,19 @@ def main():
         print("\n⏳ 生成hero车辆...")
         vehicle = setup_hero_vehicle(world)
 
-        # 生成NPC
-        print("\n⏳ 生成交通NPC...")
-        traffic_actors = spawn_traffic(world, tm_port, num_vehicles=30)
+        # 生成NPC (减少数量以防卡顿)
+        print("\n⏳ 生成交通NPC...", flush=True)
+        traffic_actors = spawn_traffic(world, tm_port, num_vehicles=15)
 
         # 等待稳定
         print("\n⏳ 等待场景稳定...")
         for _ in range(20):
-            world.tick()
+           world.tick()
         time.sleep(1.0)
+        print("✓ 场景已稳定", flush=True)
 
         # 创建传感器
-        print("\n⏳ 创建传感器...")
+        print("\n⏳ 创建传感器...", flush=True)
         camera_configs = prepare_rgb_camera_configs()
 
         # 1. RGB相机 (8个)
@@ -376,13 +396,16 @@ def main():
             lidar_dir.mkdir(parents=True, exist_ok=True)
 
         for frame_idx in range(args.frames):
-            print(f"📷 采集帧 {frame_idx + 1}/{args.frames}...")
-
+            print(f"📷 采集帧 {frame_idx + 1}/{args.frames}...", flush=True)
+            
             # Tick
+            # print(f"   [DEBUG] Ticking world...", flush=True)
             world.tick()
 
             # 获取RGB数据
             if rgb_manager:
+                print(f"   [DEBUG] Getting RGB data...", flush=True)
+                # 增加timeout，因为可能需要等待新数据
                 rgb_data = rgb_manager.get_data(timeout=2.0)
                 if rgb_data is None:
                     print(f"⚠ RGB数据超时，跳过帧 {frame_idx}")
@@ -415,6 +438,7 @@ def main():
                 continue
 
             # 保存RGB图像 (8-bit)
+            print(f"   [DEBUG] Saving RGB images...", flush=True)
             for cam_cfg in camera_configs:
                 cam_id = cam_cfg['id']
                 rgb_array = rgb_data[cam_id]['data']  # (H, W, 3) RGB
@@ -508,6 +532,7 @@ def main():
             settings.synchronous_mode = False
             world.apply_settings(settings)
             print("✓ 已恢复异步模式")
+            # pass
 
     print("\n✅ 数据采集完成!")
 

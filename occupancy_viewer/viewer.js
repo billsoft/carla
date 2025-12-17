@@ -1,26 +1,27 @@
 // CARLA Occupancy 3D 体素查看器
 // 使用 Three.js 渲染体素网格
 
-// Occupancy 类别颜色映射 (nuScenes 配色方案)
+// Occupancy 类别颜色映射（优化配色方案，参考Cityscapes和nuScenes）
+// 使用更符合语义且易于区分的颜色
 const OCCUPANCY_COLORS = [
-    0x000000,  // 0: free
-    0xC8C8C8,  // 1: barrier (200, 200, 200)
-    0x808000,  // 2: bicycle (128, 128, 0)
-    0x000080,  // 3: bus (0, 0, 128)
-    0x008000,  // 4: car (0, 128, 0)
-    0x800080,  // 5: construction_vehicle (128, 0, 128)
-    0x800000,  // 6: motorcycle (128, 0, 0)
-    0xFF0000,  // 7: pedestrian (255, 0, 0)
-    0xFFA500,  // 8: traffic_cone (255, 165, 0)
-    0x008080,  // 9: trailer (0, 128, 128)
-    0x0000FF,  // 10: truck (0, 0, 255)
-    0x646464,  // 11: driveable_surface (100, 100, 100)
-    0x969696,  // 12: other_flat (150, 150, 150)
-    0xFFC0CB,  // 13: sidewalk (255, 192, 203)
-    0x00FF00,  // 14: terrain (0, 255, 0)
-    0xFFFF00,  // 15: manmade (255, 255, 0)
-    0x00FF80,  // 16: vegetation (0, 255, 128)
-    0xFF00FF,  // 17: general_object (255, 0, 255)
+    0x000000,  // 0: free - 黑色/透明
+    0x708090,  // 1: barrier - 灰蓝色 (112, 128, 144)
+    0xFF3D63,  // 2: bicycle - 粉红色 (255, 61, 99)
+    0xDC143C,  // 3: bus - 深红色 (220, 20, 60)
+    0xFF9E00,  // 4: car - 橙色 (255, 158, 0)
+    0xE99646,  // 5: construction_vehicle - 土黄色 (233, 150, 70)
+    0xFF00FF,  // 6: motorcycle - 品红色 (255, 0, 255)
+    0x1E90FF,  // 7: pedestrian - 道奇蓝（鲜艳蓝色）(30, 144, 255)
+    0xFF7F50,  // 8: traffic_cone - 珊瑚橙 (255, 127, 80)
+    0xFF8C00,  // 9: trailer - 暗橙色 (255, 140, 0)
+    0xB4A5B4,  // 10: truck - 紫灰色 (180, 165, 180)
+    0x804080,  // 11: driveable_surface - 深紫色 (128, 64, 128)
+    0xF423E8,  // 12: other_flat - 洋红色 (244, 35, 232)
+    0x6B8E23,  // 13: sidewalk - 橄榄绿 (107, 142, 35)
+    0x98FB98,  // 14: terrain - 淡绿色 (152, 251, 152)
+    0x464646,  // 15: manmade - 深灰色 (70, 70, 70)
+    0x00FF00,  // 16: vegetation - 绿色 (0, 255, 0)
+    0xFFFFFF,  // 17: general_object - 白色 (255, 255, 255)
 ];
 
 const OCCUPANCY_NAMES = [

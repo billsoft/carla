@@ -53,7 +53,8 @@
       "Bash(C:\\Users\\bills\\.conda\\envs\\carla\\python.exe:*)",
       "Bash(C:Usersbills.condaenvscarlapython.exe dense_occupancy_collectionscriptscollect_panorama_fixed.py --frames 1)",
       "Bash(tree:*)",
-      "Bash(C:Usersbills.condaenvscarlapython.exe dense_occupancy_collectionscriptsquery_all_actors.py)"
+      "Bash(C:Usersbills.condaenvscarlapython.exe dense_occupancy_collectionscriptsquery_all_actors.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe d:codecarlatest_carla_api.py)"
     ],
     "deny": [],
     "ask": []
