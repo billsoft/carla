@@ -380,6 +380,14 @@ class OccupancyViewer {
         const [gridX, gridY, gridZ] = grid_size;
 
         console.log(`Rendering voxels: ${gridX} × ${gridY} × ${gridZ}`);
+        console.log(`Total voxel cells: ${(gridX * gridY * gridZ).toLocaleString()}`);
+
+        // 性能警告
+        const totalCells = gridX * gridY * gridZ;
+        if (totalCells > 20000000) {
+            console.warn(`⚠️ 体素数量过大 (${(totalCells/1000000).toFixed(1)}M), 可能导致浏览器卡顿!`);
+            alert(`警告: 体素网格过大 (${(totalCells/1000000).toFixed(1)}M 个单元)，加载可能需要较长时间。\n建议使用更大的分辨率 (如 0.2m 或 0.25m)。`);
+        }
 
         // 创建实例化网格 (性能优化)
         const voxelSize = resolution;

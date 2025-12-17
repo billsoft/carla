@@ -10,82 +10,13 @@ import logging
 from dense_occupancy_collection.config.occupancy_config import (
     CARLA_TO_OCCUPANCY_MAPPING, OCCUPANCY_LABELS
 )
+from dense_occupancy_collection.config.actor_occupancy_mapping import (
+    get_occupancy_label_from_actor
+)
 
 # 配置日志
 logging.basicConfig(filename='voxel_mapping.log', level=logging.INFO,
                     format='%(asctime)s - %(message)s')
-
-# ============================================================================
-# Actor类型到Occupancy标签的智能映射
-# ============================================================================
-
-def _classify_vehicle_type(type_id):
-    """根据vehicle type_id细分车辆类型"""
-    type_id = type_id.lower()
-
-    # Bus (3)
-    if 'volkswagen.t2' in type_id:
-        return 3
-
-    # Truck (10)
-    if any(x in type_id for x in ['carlacola', 'firetruck', 'ambulance', 'sprinter', 'cybertruck']):
-        return 10
-
-    # Bicycle (2)
-    if any(x in type_id for x in ['crossbike', 'century', 'omafiets']):
-        return 2
-
-    # Motorcycle (6)
-    if any(x in type_id for x in ['harley', 'kawasaki', 'vespa', 'yamaha']):
-        return 6
-
-    # 默认: Car (4)
-    return 4
-
-
-def get_actor_occupancy_label(actor):
-    """
-    智能获取Actor的Occupancy标签
-
-    Args:
-        actor: carla.Actor对象
-
-    Returns:
-        int: Occupancy标签ID (0-17)
-    """
-    type_id = actor.type_id.lower()
-
-    # 行人 (7)
-    if 'walker' in type_id or 'pedestrian' in type_id:
-        return 7
-
-    # 车辆 - 使用细分函数
-    if 'vehicle' in type_id:
-        return _classify_vehicle_type(type_id)
-
-    # Props - 交通锥桶 (8)
-    if 'trafficcone' in type_id or 'constructioncone' in type_id:
-        return 8
-
-    # Props - 隔离栏 (1)
-    if 'barrier' in type_id or 'chainbarrier' in type_id:
-        return 1
-
-    # Props - 其他物体 (17) - 垃圾桶、箱子等
-    if 'prop' in type_id:
-        return 17
-
-    # 兜底 - 优先使用semantic_tags
-    if hasattr(actor, 'semantic_tags') and actor.semantic_tags:
-        sem_tag = actor.semantic_tags[0]
-        mapped = CARLA_TO_OCCUPANCY_MAPPING.get(sem_tag, 17)
-        # 如果映射到车辆，再细分
-        if mapped == 4 and 'vehicle' in type_id:
-            return _classify_vehicle_type(type_id)
-        return mapped
-
-    # 最终兜底
-    return 17  # general_object
 
 class GroundTruthVoxelGenerator:
     """
@@ -580,11 +511,11 @@ class GroundTruthVoxelGenerator:
         if not np.any(mask_in):
             return
             
-        # Determine Label - 使用新的智能映射函数
+        # Determine Label - 使用统一的映射配置
         if is_ego:
             occ_label = 4  # Car (Default for Ego)
         else:
-            occ_label = get_actor_occupancy_label(actor)
+            occ_label = get_occupancy_label_from_actor(actor)
         
         # Fill
         nx, ny, nz = max_ix - min_ix, max_iy - min_iy, max_iz - min_iz

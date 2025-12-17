@@ -100,11 +100,35 @@ def main():
         # 创建hero车辆
         print("\n⏳ 生成hero车辆...")
         bp_lib = world.get_blueprint_library()
-        vehicle_bp = bp_lib.filter('vehicle.tesla.*')[0]
+
+        # 尝试多种车辆类型
+        vehicle_bp = None
+        for bp_filter in ['vehicle.tesla.*', 'vehicle.audi.*', 'vehicle.bmw.*', 'vehicle.*']:
+            vehicles = bp_lib.filter(bp_filter)
+            # 找一个4轮车辆
+            for v in vehicles:
+                if v.has_attribute('number_of_wheels') and int(v.get_attribute('number_of_wheels')) == 4:
+                    vehicle_bp = v
+                    break
+            if vehicle_bp:
+                break
+
+        if not vehicle_bp:
+            raise RuntimeError("无法找到合适的车辆蓝图")
+
         if vehicle_bp.has_attribute('role_name'):
             vehicle_bp.set_attribute('role_name', 'hero')
+
         spawn_points = world.get_map().get_spawn_points()
-        vehicle = world.spawn_actor(vehicle_bp, spawn_points[0])
+        vehicle = None
+        for point in spawn_points:
+            vehicle = world.try_spawn_actor(vehicle_bp, point)
+            if vehicle is not None:
+                break
+
+        if vehicle is None:
+            raise RuntimeError("无法找到空闲的生成点")
+
         print(f"✓ Hero车辆已生成: {vehicle.type_id}")
 
         # 生成NPC

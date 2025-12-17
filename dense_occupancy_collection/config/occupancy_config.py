@@ -9,13 +9,15 @@ Y_RANGE = [-50.0, 50.0]   # 左右 100m
 Z_RANGE = [-4.0, 4.0]     # 上下 8m
 
 # 体素分辨率 (单位: 米)
-RESOLUTION = 0.5  # 每个体素边长 0.5m
+# 注意: 0.1m会导致1000x1000x80=8000万体素，浏览器无法渲染
+# 0.2m是性能和精度的平衡点: 500x500x40=1000万体素
+RESOLUTION = 0.2  # 每个体素边长 0.2m，可检测细小物体且性能可控
 
 # 计算网格尺寸
 GRID_SIZE = [
-    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 200
-    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 200
-    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 16
+    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 500
+    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 500
+    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 40
 ]
 
 # 语义激光雷达配置 (128线)

@@ -1,0 +1,303 @@
+{
+  "map_name": "Carla/Maps/Town10HD_Opt",
+  "total_actor_types": 21,
+  "actor_types": [
+    {
+      "type_id": "spectator",
+      "semantic_tags": [
+        []
+      ]
+    },
+    {
+      "type_id": "traffic.stop",
+      "semantic_tags": [
+        [
+          6,
+          8
+        ]
+      ]
+    },
+    {
+      "type_id": "traffic.traffic_light",
+      "semantic_tags": [
+        [
+          6,
+          7,
+          8,
+          20
+        ],
+        [
+          8,
+          6,
+          7,
+          20
+        ]
+      ]
+    },
+    {
+      "type_id": "traffic.unknown",
+      "semantic_tags": [
+        []
+      ]
+    },
+    {
+      "type_id": "traffic.yield",
+      "semantic_tags": [
+        [
+          6,
+          8
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.ambulance.ford",
+      "semantic_tags": [
+        [
+          15
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.carlacola.actors",
+      "semantic_tags": [
+        [
+          15
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.dodge.charger",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.dodgecop.charger",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.firetruck.actors",
+      "semantic_tags": [
+        [
+          15
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.fuso.mitsubishi",
+      "semantic_tags": [
+        [
+          16
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.mini.cooper",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.nissan.patrol",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.sprinter.mercedes",
+      "semantic_tags": [
+        [
+          15
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.taxi.ford",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.ue4.audi.tt",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.ue4.bmw.grantourer",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.ue4.chevrolet.impala",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.ue4.ford.crown",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.ue4.ford.mustang",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    },
+    {
+      "type_id": "vehicle.ue4.mercedes.ccc",
+      "semantic_tags": [
+        [
+          14
+        ]
+      ]
+    }
+  ],
+  "city_object_labels": [
+    {
+      "name": "NONE",
+      "value": 0,
+      "count": 110
+    },
+    {
+      "name": "Roads",
+      "value": 1,
+      "count": 4
+    },
+    {
+      "name": "Sidewalks",
+      "value": 2,
+      "count": 269
+    },
+    {
+      "name": "Buildings",
+      "value": 3,
+      "count": 48369
+    },
+    {
+      "name": "Walls",
+      "value": 4,
+      "count": 48
+    },
+    {
+      "name": "Fences",
+      "value": 5,
+      "count": 1767
+    },
+    {
+      "name": "Poles",
+      "value": 6,
+      "count": 120
+    },
+    {
+      "name": "TrafficLight",
+      "value": 7,
+      "count": 62
+    },
+    {
+      "name": "TrafficSigns",
+      "value": 8,
+      "count": 147
+    },
+    {
+      "name": "Vegetation",
+      "value": 9,
+      "count": 4270
+    },
+    {
+      "name": "Terrain",
+      "value": 10,
+      "count": 23
+    },
+    {
+      "name": "Car",
+      "value": 14,
+      "count": 80
+    },
+    {
+      "name": "Truck",
+      "value": 15,
+      "count": 45
+    },
+    {
+      "name": "Bus",
+      "value": 16,
+      "count": 5
+    },
+    {
+      "name": "Motorcycle",
+      "value": 18,
+      "count": 8
+    },
+    {
+      "name": "Bicycle",
+      "value": 19,
+      "count": 56
+    },
+    {
+      "name": "Static",
+      "value": 20,
+      "count": 1223
+    },
+    {
+      "name": "Dynamic",
+      "value": 21,
+      "count": 489
+    },
+    {
+      "name": "Other",
+      "value": 22,
+      "count": 370
+    },
+    {
+      "name": "Water",
+      "value": 23,
+      "count": 2
+    },
+    {
+      "name": "RoadLines",
+      "value": 24,
+      "count": 4
+    },
+    {
+      "name": "Ground",
+      "value": 25,
+      "count": 15
+    },
+    {
+      "name": "Bridge",
+      "value": 26,
+      "count": 9
+    },
+    {
+      "name": "Any",
+      "value": 255,
+      "count": 57495
+    }
+  ]
+}
