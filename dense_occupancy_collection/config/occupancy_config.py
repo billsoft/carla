@@ -18,75 +18,91 @@ GRID_SIZE = [
     int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 16
 ]
 
+# 语义激光雷达配置 (128线)
+SEMANTIC_LIDAR_CONFIG = {
+    'channels': 128,
+    'range': 100.0,
+    'points_per_second': 1000000,
+    'rotation_frequency': 20,
+    'upper_fov': 30.0,
+    'lower_fov': -40.0,
+    'position': {'x': 0.0, 'y': 0.0, 'z': 2.4},  # 安装在车顶
+    'rotation': {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
+}
+
 # CARLA 语义标签 (23类) 到 Occupancy 标签 (18类) 的映射
+# 适配 OpenOccupancy / SemanticKITTI 格式
+# [1] car (Red)
+# [6] pedestrian (Green)
 CARLA_TO_OCCUPANCY_MAPPING = {
-    0: 0,   # Unlabeled → Unlabeled
-    1: 1,   # Building → Building
-    2: 2,   # Fence → Fence
-    3: 3,   # Other → Other
-    4: 4,   # Pedestrian → Pedestrian
-    5: 5,   # Pole → Pole
-    6: 6,   # RoadLine → RoadLine
-    7: 7,   # Road → Road
-    8: 8,   # SideWalk → Sidewalk
-    9: 9,   # Vegetation → Vegetation
-    10: 10, # Vehicles → Vehicles
-    11: 11, # Wall → Wall
-    12: 12, # TrafficSign → TrafficSign
-    13: 13, # Sky → Sky
-    14: 14, # Ground → Ground
-    15: 15, # Bridge → Bridge
-    16: 16, # RailTrack → RailTrack
-    17: 17, # GuardRail → GuardRail
-    18: 3,  # TrafficLight → Other (合并)
-    19: 3,  # Static → Other (合并)
-    20: 9,  # Dynamic → Vegetation (合并)
-    21: 14, # Water → Ground (合并)
-    22: 9,  # Terrain → Vegetation (合并)
+    0: 0,   # Unlabeled → free / empty
+    1: 15,  # Building → manmade
+    2: 1,   # Fence → barrier
+    3: 17,  # Other → general object / other
+    4: 7,   # Pedestrian → pedestrian
+    5: 15,  # Pole → manmade
+    6: 11,  # RoadLine → driveable surface
+    7: 11,  # Road → driveable surface
+    8: 13,  # SideWalk → sidewalk
+    9: 16,  # Vegetation → vegetation
+    10: 4,  # Vehicles → car
+    11: 15, # Wall → manmade
+    12: 15, # TrafficSign → manmade
+    13: 0,  # Sky → free / empty
+    14: 12, # Ground → other flat
+    15: 15, # Bridge → manmade
+    16: 17, # RailTrack → general object / other
+    17: 1,  # GuardRail → barrier
+    18: 15, # TrafficLight → manmade
+    19: 17, # Static → general object / other
+    20: 17, # Dynamic → general object / other
+    21: 12, # Water → other flat
+    22: 14, # Terrain → terrain
 }
 
 # Occupancy 标签名称
 OCCUPANCY_LABELS = [
-    'Unlabeled',
-    'Building',
-    'Fence',
-    'Other',
-    'Pedestrian',
-    'Pole',
-    'RoadLine',
-    'Road',
-    'Sidewalk',
-    'Vegetation',
-    'Vehicles',
-    'Wall',
-    'TrafficSign',
-    'Sky',
-    'Ground',
-    'Bridge',
-    'RailTrack',
-    'GuardRail'
+    'free',               # 0
+    'barrier',            # 1
+    'bicycle',            # 2
+    'bus',                # 3
+    'car',                # 4
+    'construction_vehicle', # 5
+    'motorcycle',         # 6
+    'pedestrian',         # 7
+    'traffic_cone',       # 8
+    'trailer',            # 9
+    'truck',              # 10
+    'driveable_surface',  # 11
+    'other_flat',         # 12
+    'sidewalk',           # 13
+    'terrain',            # 14
+    'manmade',            # 15
+    'vegetation',         # 16
+    'general_object',     # 17
 ]
 
-# 可视化颜色映射 (RGB, 0-255)
+# 可视化颜色映射 (RGB)
+# 尝试匹配常见标准
 OCCUPANCY_COLORS = [
-    (0, 0, 0),        # 0: Unlabeled - 黑色
-    (70, 70, 70),     # 1: Building - 深灰
-    (190, 153, 153),  # 2: Fence - 浅灰
-    (250, 170, 160),  # 3: Other - 橙色
-    (220, 20, 60),    # 4: Pedestrian - 红色
-    (153, 153, 153),  # 5: Pole - 灰色
-    (157, 234, 50),   # 6: RoadLine - 黄绿
-    (128, 64, 128),   # 7: Road - 紫色
-    (244, 35, 232),   # 8: Sidewalk - 粉色
-    (107, 142, 35),   # 9: Vegetation - 绿色
-    (0, 0, 142),      # 10: Vehicles - 深蓝
-    (102, 102, 156),  # 11: Wall - 灰蓝
-    (220, 220, 0),    # 12: TrafficSign - 黄色
-    (70, 130, 180),   # 13: Sky - 天蓝
-    (81, 0, 81),      # 14: Ground - 深紫
-    (150, 100, 100),  # 15: Bridge - 棕色
-    (230, 150, 140),  # 16: RailTrack - 浅红棕
-    (180, 165, 180),  # 17: GuardRail - 浅紫灰
+    (0, 0, 0),        # 0: free
+    (200, 200, 200),  # 1: barrier
+    (128, 128, 0),    # 2: bicycle
+    (0, 0, 128),      # 3: bus
+    (0, 128, 0),      # 4: car
+    (128, 0, 128),    # 5: construction_vehicle
+    (128, 0, 0),      # 6: motorcycle
+    (255, 0, 0),      # 7: pedestrian
+    (255, 165, 0),    # 8: traffic_cone
+    (0, 128, 128),    # 9: trailer
+    (0, 0, 255),      # 10: truck
+    (100, 100, 100),  # 11: driveable_surface
+    (150, 150, 150),  # 12: other_flat
+    (255, 192, 203),  # 13: sidewalk
+    (0, 255, 0),      # 14: terrain
+    (255, 255, 0),    # 15: manmade
+    (0, 255, 128),    # 16: vegetation
+    (255, 0, 255),    # 17: general_object
 ]
 
 
@@ -103,7 +119,5 @@ def get_voxel_config():
         'z_range': Z_RANGE,
         'resolution': RESOLUTION,
         'grid_size': GRID_SIZE,
-        'label_mapping': CARLA_TO_OCCUPANCY_MAPPING,
-        'label_names': OCCUPANCY_LABELS,
-        'colors': OCCUPANCY_COLORS
+        'mapping': CARLA_TO_OCCUPANCY_MAPPING
     }

@@ -52,7 +52,8 @@
       "Bash(find:*)",
       "Bash(C:\\Users\\bills\\.conda\\envs\\carla\\python.exe:*)",
       "Bash(C:Usersbills.condaenvscarlapython.exe dense_occupancy_collectionscriptscollect_panorama_fixed.py --frames 1)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe dense_occupancy_collectionscriptsquery_all_actors.py)"
     ],
     "deny": [],
     "ask": []

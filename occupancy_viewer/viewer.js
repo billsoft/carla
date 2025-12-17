@@ -1,33 +1,33 @@
 // CARLA Occupancy 3D 体素查看器
 // 使用 Three.js 渲染体素网格
 
-// Occupancy 类别颜色映射 (CityScapes 配色方案)
+// Occupancy 类别颜色映射 (nuScenes 配色方案)
 const OCCUPANCY_COLORS = [
-    0x000000,  // 0:  empty (黑色 - 不渲染)
-    0xFF0000,  // 1:  car (红色)
-    0xFF6600,  // 2:  truck (橙红)
-    0xFFAA00,  // 3:  trailer (橙黄)
-    0xFFFF00,  // 4:  bus (黄色)
-    0xAAFF00,  // 5:  construction_vehicle (黄绿)
-    0x00FF00,  // 6:  pedestrian (绿色)
-    0x00FFAA,  // 7:  motorcycle (青绿)
-    0x00FFFF,  // 8:  bicycle (青色)
-    0x0088FF,  // 9:  road (蓝色)
-    0x8888FF,  // 10: sidewalk (浅蓝)
-    0xAA00FF,  // 11: traffic_cone (紫色)
-    0xFF00FF,  // 12: vegetation (品红)
-    0xFF0088,  // 13: terrain (粉红)
-    0x888888,  // 14: building (灰色)
-    0xCCCCCC,  // 15: barrier (浅灰)
-    0xFFFFFF,  // 16: traffic_sign (白色)
-    0xFFCC88,  // 17: other (浅橙)
+    0x000000,  // 0: free
+    0xC8C8C8,  // 1: barrier (200, 200, 200)
+    0x808000,  // 2: bicycle (128, 128, 0)
+    0x000080,  // 3: bus (0, 0, 128)
+    0x008000,  // 4: car (0, 128, 0)
+    0x800080,  // 5: construction_vehicle (128, 0, 128)
+    0x800000,  // 6: motorcycle (128, 0, 0)
+    0xFF0000,  // 7: pedestrian (255, 0, 0)
+    0xFFA500,  // 8: traffic_cone (255, 165, 0)
+    0x008080,  // 9: trailer (0, 128, 128)
+    0x0000FF,  // 10: truck (0, 0, 255)
+    0x646464,  // 11: driveable_surface (100, 100, 100)
+    0x969696,  // 12: other_flat (150, 150, 150)
+    0xFFC0CB,  // 13: sidewalk (255, 192, 203)
+    0x00FF00,  // 14: terrain (0, 255, 0)
+    0xFFFF00,  // 15: manmade (255, 255, 0)
+    0x00FF80,  // 16: vegetation (0, 255, 128)
+    0xFF00FF,  // 17: general_object (255, 0, 255)
 ];
 
 const OCCUPANCY_NAMES = [
-    'empty', 'car', 'truck', 'trailer', 'bus', 'construction_vehicle',
-    'pedestrian', 'motorcycle', 'bicycle', 'road', 'sidewalk',
-    'traffic_cone', 'vegetation', 'terrain', 'building', 'barrier',
-    'traffic_sign', 'other'
+    'free', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+    'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+    'driveable_surface', 'other_flat', 'sidewalk', 'terrain',
+    'manmade', 'vegetation', 'general_object'
 ];
 
 class OccupancyViewer {

@@ -31,8 +31,8 @@ from PIL import Image
 import json
 import cv2
 
-# 导入项目模块
-# from dense_occupancy_collection.config.depth_camera_config import TESLA_CAMERA_CONFIGS, IMAGE_WIDTH, IMAGE_HEIGHT
+from dense_occupancy_collection.processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
+# from dense_occupancy_collection.processing.lidar_voxel_generator import LidarVoxelGenerator
 from dense_occupancy_collection.config.occupancy_config import (
     X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION, CARLA_TO_OCCUPANCY_MAPPING
 )
@@ -139,8 +139,12 @@ TESLA_CAMERA_CONFIGS = [
     }
 ]
 from dense_occupancy_collection.sensors.rgb_camera_manager import RGBCameraManager
-from dense_occupancy_collection.sensors.panorama_manager import PanoramaSensorManager
-from dense_occupancy_collection.processing.dense_voxel_generator import DenseVoxelGenerator
+# from dense_occupancy_collection.sensors.panorama_manager import PanoramaSensorManager
+from dense_occupancy_collection.sensors.semantic_lidar_sensor import SemanticLidarSensor
+from dense_occupancy_collection.processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
+from dense_occupancy_collection.processing.lidar_voxel_generator import LidarVoxelGenerator
+
+import queue
 
 
 def parse_args():
@@ -253,6 +257,7 @@ def main():
     depth_dir = output_dir / 'depth'
     semantic_color_dir = output_dir / 'semantic_color'
     occupancy_dir = output_dir / 'occupancy'
+    lidar_dir = output_dir / 'lidar_semantic'
 
     for cam_cfg in TESLA_CAMERA_CONFIGS:
         (cameras_dir / cam_cfg['id']).mkdir(parents=True, exist_ok=True)
@@ -260,6 +265,7 @@ def main():
     depth_dir.mkdir(parents=True, exist_ok=True)
     semantic_color_dir.mkdir(parents=True, exist_ok=True)
     occupancy_dir.mkdir(parents=True, exist_ok=True)
+    lidar_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
     print(f"CARLA 360° 全景体素数据采集")
@@ -274,7 +280,8 @@ def main():
     world = None
     vehicle = None
     rgb_manager = None
-    pano_manager = None
+    # pano_manager = None
+    lidar_sensor = None
     traffic_actors = []
 
     try:
@@ -288,8 +295,11 @@ def main():
         # 加载地图
         if args.town and args.town != world.get_map().name:
             print(f"⏳ 加载地图: {args.town}...")
-            world = client.load_world(args.town)
-            time.sleep(2.0)
+            try:
+                world = client.load_world(args.town)
+                time.sleep(2.0)
+            except RuntimeError:
+                print(f"⚠ 地图 {args.town} 加载失败，使用当前地图")
 
         # 设置天气
         world.set_weather(carla.WeatherParameters.ClearNoon)
@@ -331,21 +341,39 @@ def main():
         rgb_manager = RGBCameraManager(world, vehicle, camera_configs)
 
         # 2. 全景相机 (CubeMap: 6个深度 + 6个语义)
-        pano_manager = PanoramaSensorManager(world, vehicle)
+        # pano_manager = PanoramaSensorManager(world, vehicle)
+
+        # 3. 语义激光雷达
+        lidar_sensor = SemanticLidarSensor(world, vehicle)
+        lidar_sensor.listen_to_queue()
 
         # 等待传感器初始化
-        print("\n⏳ 等待传感器初始化...")
-        for _ in range(10):
+        print("\n⏳ 等待传感器初始化...", flush=True)
+        for i in range(10):
+            print(f"   Tick {i+1}/10", flush=True)
             world.tick()
+            time.sleep(0.1) # 增加延时防止过载
         time.sleep(0.5)
 
-        # 创建体素生成器
-        voxel_generator = DenseVoxelGenerator(X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION)
+        print("正在初始化体素生成器...", flush=True)
+        # 创建体素生成器 (使用 Ground Truth 生成器)
+        # voxel_generator = LidarVoxelGenerator(X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION)
+        voxel_generator = GroundTruthVoxelGenerator(X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION)
+        print("体素生成器初始化完成 (Ground Truth Mode)", flush=True)
 
         # 开始采集
         print(f"\n{'='*60}")
         print("开始数据采集")
         print(f"{'='*60}\n")
+
+        # 确保输出目录存在
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True)
+            (cameras_dir / cam_cfg['id']).mkdir(parents=True, exist_ok=True)
+            depth_dir.mkdir(parents=True, exist_ok=True)
+            semantic_color_dir.mkdir(parents=True, exist_ok=True)
+            occupancy_dir.mkdir(parents=True, exist_ok=True)
+            lidar_dir.mkdir(parents=True, exist_ok=True)
 
         for frame_idx in range(args.frames):
             print(f"📷 采集帧 {frame_idx + 1}/{args.frames}...")
@@ -360,10 +388,30 @@ def main():
                     print(f"⚠ RGB数据超时，跳过帧 {frame_idx}")
                     continue
             
-            # 获取全景数据
-            pano_data = pano_manager.get_panorama_frame(timeout=2.0)
-            if pano_data is None:
-                print(f"⚠ 全景数据超时，跳过帧 {frame_idx}")
+            # 获取全景数据 (已禁用)
+            # pano_data = pano_manager.get_panorama_frame(timeout=2.0)
+            # if pano_data is None:
+            #     print(f"⚠ 全景数据超时，跳过帧 {frame_idx}")
+            #     continue
+
+            # 获取LiDAR数据
+            try:
+                lidar_data_dict = lidar_sensor.data_queue.get(timeout=2.0)
+                lidar_raw = lidar_data_dict['raw_data']
+                lidar_timestamp = lidar_data_dict['timestamp']
+                lidar_points, lidar_labels = lidar_sensor.parse_lidar_data(lidar_raw)
+                
+                # 保存LiDAR数据
+                lidar_save_path = lidar_dir / f"{frame_idx:06d}.npz"
+                np.savez_compressed(
+                    lidar_save_path,
+                    points=lidar_points,
+                    labels=lidar_labels
+                )
+                # print(f"   ✓ LiDAR数据已保存")
+                
+            except queue.Empty:
+                print(f"⚠ LiDAR数据超时，跳过帧 {frame_idx}")
                 continue
 
             # 保存RGB图像 (8-bit)
@@ -379,37 +427,35 @@ def main():
 
             print(f"   ✓ RGB图像已保存 (8个相机)")
 
-            # 保存全景深度图 (黑白)
-            depth_pano = pano_data['depth_pano']
-            viz_depth = np.clip(depth_pano / 100.0 * 255.0, 0, 255).astype(np.uint8)
-            depth_img = Image.fromarray(viz_depth, mode='L')
-            depth_path = depth_dir / f"{frame_idx:06d}.png"
-            depth_img.save(depth_path)
+            # 保存全景深度图 (黑白) - 禁用
+            # depth_pano = pano_data['depth_pano']
+            # viz_depth = np.clip(depth_pano / 100.0 * 255.0, 0, 255).astype(np.uint8)
+            # depth_img = Image.fromarray(viz_depth, mode='L')
+            # depth_path = depth_dir / f"{frame_idx:06d}.png"
+            # depth_img.save(depth_path)
 
-            print(f"   ✓ 全景深度图已保存")
+            # print(f"   ✓ 全景深度图已保存")
 
-            # 保存全景语义图 (彩色)
-            semantic_pano = pano_data['semantic_pano']
-            h, w = semantic_pano.shape
-            sem_color = np.zeros((h, w, 3), dtype=np.uint8)
+            # 保存全景语义图 (彩色) - 禁用
+            # semantic_pano = pano_data['semantic_pano']
+            # h, w = semantic_pano.shape
+            # sem_color = np.zeros((h, w, 3), dtype=np.uint8)
 
-            # 简单彩色映射 (使用配置文件的映射)
-            from dense_occupancy_collection.config.occupancy_config import OCCUPANCY_COLORS
-            for class_id in range(len(OCCUPANCY_COLORS)):
-                mask = (semantic_pano == class_id)
-                sem_color[mask] = OCCUPANCY_COLORS[class_id]
+            # # 简单彩色映射 (使用配置文件的映射)
+            # from dense_occupancy_collection.config.occupancy_config import OCCUPANCY_COLORS
+            # for class_id in range(len(OCCUPANCY_COLORS)):
+            #     mask = (semantic_pano == class_id)
+            #     sem_color[mask] = OCCUPANCY_COLORS[class_id]
 
-            sem_color_img = Image.fromarray(sem_color)
-            sem_color_path = semantic_color_dir / f"{frame_idx:06d}.png"
-            sem_color_img.save(sem_color_path)
+            # sem_color_img = Image.fromarray(sem_color)
+            # sem_color_path = semantic_color_dir / f"{frame_idx:06d}.png"
+            # sem_color_img.save(sem_color_path)
 
-            print(f"   ✓ 全景语义图已保存")
+            # print(f"   ✓ 全景语义图已保存")
 
-            # 生成体素
-            # 使用反向投影法直接从全景图生成，避免点云稀疏导致的间隙
-            occupancy, mask = voxel_generator.generate_from_panorama(
-                depth_pano, semantic_pano, vehicle_height=2.0
-            )
+            # 生成体素 (Ground Truth 方案)
+            # 传入: world, vehicle (不再依赖 LiDAR 点云生成体素，但仍保存 LiDAR 点云)
+            occupancy, mask = voxel_generator.generate(world, vehicle)
             
             voxel_stats = voxel_generator.get_statistics(occupancy, mask)
 
@@ -422,7 +468,7 @@ def main():
                 occupancy_path, occupancy, mask,
                 metadata={
                     'frame': frame_idx,
-                    'timestamp': pano_data['timestamp'],
+                    'timestamp': lidar_timestamp,
                     'map': args.town
                 }
             )
@@ -444,8 +490,10 @@ def main():
 
         if rgb_manager:
             rgb_manager.destroy()
-        if pano_manager:
-            pano_manager.destroy()
+        # if pano_manager:
+        #     pano_manager.destroy()
+        if lidar_sensor:
+            lidar_sensor.destroy()
         if vehicle:
             vehicle.destroy()
             print("✓ Hero车辆已销毁")
