@@ -12,7 +12,7 @@ import mimetypes
 # 配置
 PORT = 8000
 VIEWER_DIR = Path(__file__).parent.absolute()
-DATA_DIR = Path(r"d:\code\carla\dataset_output\town10_test\occupancy")
+DATA_DIR = Path(r"d:\code\carla\dataset_output\occupancy")
 
 class ViewerHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
