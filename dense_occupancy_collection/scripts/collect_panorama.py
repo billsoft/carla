@@ -43,7 +43,8 @@ import cv2
 from dense_occupancy_collection.processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
 # from dense_occupancy_collection.processing.lidar_voxel_generator import LidarVoxelGenerator
 from dense_occupancy_collection.config.occupancy_config import (
-    X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION, CARLA_TO_OCCUPANCY_MAPPING
+    X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION, CARLA_TO_OCCUPANCY_MAPPING,
+    VISIBILITY_LIDAR_CONFIG  # ⭐ 新增：512线激光雷达配置
 )
 
 IMAGE_WIDTH = 1280
@@ -363,8 +364,8 @@ def main():
         # 2. 全景相机 (CubeMap: 6个深度 + 6个语义)
         # pano_manager = PanoramaSensorManager(world, vehicle)
 
-        # 3. 语义激光雷达
-        lidar_sensor = SemanticLidarSensor(world, vehicle)
+        # 3. 512线语义激光雷达（用于可见性检测）
+        lidar_sensor = SemanticLidarSensor(world, vehicle, config=VISIBILITY_LIDAR_CONFIG)
         lidar_sensor.listen_to_queue()
 
         # 等待传感器初始化
@@ -417,14 +418,16 @@ def main():
             #     print(f"⚠ 全景数据超时，跳过帧 {frame_idx}")
             #     continue
 
-            # 获取LiDAR数据
+            # 获取64线LiDAR数据（同时用于保存点云和可见性过滤）
+            visibility_lidar_data = None
+            lidar_timestamp = 0.0
             try:
                 lidar_data_dict = lidar_sensor.data_queue.get(timeout=2.0)
                 lidar_raw = lidar_data_dict['raw_data']
                 lidar_timestamp = lidar_data_dict['timestamp']
                 lidar_points, lidar_labels = lidar_sensor.parse_lidar_data(lidar_raw)
-                
-                # 保存LiDAR数据
+
+                # 保存LiDAR点云数据
                 lidar_save_path = lidar_dir / f"{frame_idx:06d}.npz"
                 np.savez_compressed(
                     lidar_save_path,
@@ -432,7 +435,10 @@ def main():
                     labels=lidar_labels
                 )
                 # print(f"   ✓ LiDAR数据已保存")
-                
+
+                # ⭐ 保存原始数据用于可见性过滤
+                visibility_lidar_data = lidar_raw
+
             except queue.Empty:
                 print(f"⚠ LiDAR数据超时，跳过帧 {frame_idx}")
                 continue
@@ -477,19 +483,23 @@ def main():
 
             # print(f"   ✓ 全景语义图已保存")
 
-            # 生成体素 (Ground Truth 方案)
-            # 传入: world, vehicle (不再依赖 LiDAR 点云生成体素，但仍保存 LiDAR 点云)
-            occupancy, mask = voxel_generator.generate(world, vehicle)
-            
+            # ⭐ 64线激光雷达数据已在上面获取，visibility_lidar_data变量已设置
+
+            # 生成体素 (Ground Truth 方案 + 可见性过滤)
+            # ⭐ 传入激光雷达数据进行可见性过滤
+            occupancy, actor_ids, mask = voxel_generator.generate(
+                world, vehicle, visibility_lidar_data=visibility_lidar_data
+            )
+
             voxel_stats = voxel_generator.get_statistics(occupancy, mask)
 
             print(f"   ✓ 体素网格: {voxel_stats['observed_voxels']} / {voxel_stats['total_voxels']} "
                   f"({voxel_stats['observation_rate']*100:.1f}% 观测率)")
 
-            # 保存体素
+            # 保存体素（包含actor_ids）
             occupancy_path = occupancy_dir / f"{frame_idx:06d}.npz"
             voxel_generator.save_to_npz(
-                occupancy_path, occupancy, mask,
+                occupancy_path, occupancy, actor_ids, mask,  # ⭐ 增加actor_ids参数
                 metadata={
                     'frame': frame_idx,
                     'timestamp': lidar_timestamp,

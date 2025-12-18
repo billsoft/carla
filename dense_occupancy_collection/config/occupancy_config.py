@@ -20,7 +20,7 @@ GRID_SIZE = [
     int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 40
 ]
 
-# 语义激光雷达配置 (128线)
+# 语义激光雷达配置 (128线 - 旧版，用于体素生成)
 SEMANTIC_LIDAR_CONFIG = {
     'channels': 128,
     'range': 100.0,
@@ -28,6 +28,18 @@ SEMANTIC_LIDAR_CONFIG = {
     'rotation_frequency': 20,
     'upper_fov': 30.0,
     'lower_fov': -40.0,
+    'position': {'x': 0.0, 'y': 0.0, 'z': 2.4},  # 安装在车顶
+    'rotation': {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
+}
+
+# 64线语义激光雷达配置 (用于可见性检测) - 参考carla_data_collection配置
+VISIBILITY_LIDAR_CONFIG = {
+    'channels': 64,                # 64线（足够精度，不会超时）
+    'range': 100.0,                # 100米范围
+    'points_per_second': 1200000,  # 120万点/秒 (每帧6万点@20Hz)
+    'rotation_frequency': 20,      # 20Hz
+    'upper_fov': 15.0,             # 上15° (覆盖主要区域)
+    'lower_fov': -25.0,            # 下-25° (覆盖地面)
     'position': {'x': 0.0, 'y': 0.0, 'z': 2.4},  # 安装在车顶
     'rotation': {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
 }

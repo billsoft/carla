@@ -247,8 +247,9 @@ class OccupancyViewer {
 
             console.log('Loaded NPZ data:', Object.keys(data));
 
-            // 提取 occupancy 和 mask
+            // 提取 occupancy, actor_ids 和 mask
             const occupancy = data['occupancy'];
+            const actor_ids = data['actor_ids'];  // ⭐ 新增：读取Actor ID数组
             const mask = data['mask'];
 
             if (!occupancy) {
@@ -257,6 +258,7 @@ class OccupancyViewer {
 
             this.currentData = {
                 occupancy: occupancy,
+                actor_ids: actor_ids,  // ⭐ 保存Actor ID数据
                 mask: mask,
                 x_range: Array.from(data['x_range']?.data || [-50, 50]),
                 y_range: Array.from(data['y_range']?.data || [-50, 50]),
@@ -351,6 +353,9 @@ class OccupancyViewer {
 
         if (dtype.includes('u1')) {
             array = new Uint8Array(dataBytes);
+        } else if (dtype.includes('u4') || dtype.includes('<u4')) {
+            // ⭐ 新增：支持uint32类型（actor_ids使用）
+            array = new Uint32Array(dataBytes.buffer, dataBytes.byteOffset, dataBytes.byteLength / 4);
         } else if (dtype.includes('f4') || dtype.includes('<f4')) {
             array = new Float32Array(dataBytes.buffer, dataBytes.byteOffset, dataBytes.byteLength / 4);
         } else if (dtype.includes('f8') || dtype.includes('<f8')) {
@@ -376,11 +381,12 @@ class OccupancyViewer {
             this.voxelGroup.remove(child);
         }
 
-        const { occupancy, grid_size, resolution } = this.currentData;
+        const { occupancy, actor_ids, grid_size, resolution } = this.currentData;
         const [gridX, gridY, gridZ] = grid_size;
 
         console.log(`Rendering voxels: ${gridX} × ${gridY} × ${gridZ}`);
         console.log(`Total voxel cells: ${(gridX * gridY * gridZ).toLocaleString()}`);
+        console.log(`Actor IDs available: ${actor_ids ? 'Yes' : 'No'}`);  // ⭐ Debug信息
 
         // 性能警告
         const totalCells = gridX * gridY * gridZ;
@@ -402,31 +408,44 @@ class OccupancyViewer {
 
         // 遍历体素网格
         let totalVoxels = 0;
+        let filteredVoxels = 0;  // ⭐ 统计被可见性过滤的体素
         for (let x = 0; x < gridX; x++) {
             for (let y = 0; y < gridY; y++) {
                 for (let z = 0; z < gridZ; z++) {
                     const idx = x * (gridY * gridZ) + y * gridZ + z;
                     const label = occupancy.data[idx];
 
+                    // ⭐ 可见性过滤：只渲染actor_id非0的体素
+                    // 如果没有actor_ids数据，则渲染所有label>0的体素（兼容旧数据）
+                    const actorId = actor_ids ? actor_ids.data[idx] : 1;
+                    const isVisible = !actor_ids || (actorId !== 0);
+
                     if (label > 0) {
-                        // 计算世界坐标 (以车辆为中心)
-                        const worldX = (x - gridX/2) * voxelSize;
-                        const worldY = (y - gridY/2) * voxelSize;
-                        const worldZ = (z - gridZ/2) * voxelSize;
+                        if (isVisible) {
+                            // 计算世界坐标 (以车辆为中心)
+                            const worldX = (x - gridX/2) * voxelSize;
+                            const worldY = (y - gridY/2) * voxelSize;
+                            const worldZ = (z - gridZ/2) * voxelSize;
 
-                        if (label < OCCUPANCY_COLORS.length) {
-                            instancesByClass[label].push({
-                                position: new THREE.Vector3(worldX, worldZ, worldY) // 注意: Y-up
-                            });
+                            if (label < OCCUPANCY_COLORS.length) {
+                                instancesByClass[label].push({
+                                    position: new THREE.Vector3(worldX, worldZ, worldY) // 注意: Y-up
+                                });
+                            }
+
+                            totalVoxels++;
+                        } else {
+                            filteredVoxels++;  // ⭐ 统计被过滤的不可见体素
                         }
-
-                        totalVoxels++;
                     }
                 }
             }
         }
 
         console.log(`Non-empty voxels: ${totalVoxels}`);
+        if (actor_ids) {
+            console.log(`Filtered (invisible) voxels: ${filteredVoxels}`);  // ⭐ 输出过滤统计
+        }
 
         // 为每个类别创建实例化网格
         for (const [label, instances] of Object.entries(instancesByClass)) {

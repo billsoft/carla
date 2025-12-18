@@ -8,7 +8,10 @@ import numpy as np
 import queue
 from typing import Optional, Dict, Tuple
 
-from dense_occupancy_collection.config.occupancy_config import SEMANTIC_LIDAR_CONFIG
+from dense_occupancy_collection.config.occupancy_config import (
+    SEMANTIC_LIDAR_CONFIG,
+    VISIBILITY_LIDAR_CONFIG
+)
 
 
 class SemanticLidarSensor:

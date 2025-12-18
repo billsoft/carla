@@ -40,57 +40,66 @@ class GroundTruthVoxelGenerator:
             int((z_range[1] - z_range[0]) / resolution)
         ]
         
-    def generate(self, world, ego_vehicle):
+    def generate(self, world, ego_vehicle, visibility_lidar_data=None):
         """
         生成一帧的体素数据
-        
+
         Args:
             world: carla.World
             ego_vehicle: carla.Actor (hero vehicle)
-            
+            visibility_lidar_data: Optional[bytes] - 512线语义激光雷达原始数据，用于可见性过滤
+
         Returns:
-            occupancy: (X, Y, Z) uint8 array
-            mask: (X, Y, Z) uint8 array (1=Observed, 0=Unknown) -> GT 模式下全是 1
+            occupancy: (X, Y, Z) uint8 array - 体素类别
+            actor_ids: (X, Y, Z) uint32 array - 每个体素对应的Actor ID
+            mask: (X, Y, Z) uint8 array - (1=Observed, 0=Unknown) -> GT 模式下全是 1
         """
         occupancy = np.zeros(self.grid_size, dtype=np.uint8)
+        actor_ids = np.zeros(self.grid_size, dtype=np.int32)  # ⭐ 新增：记录Actor ID（使用int32支持负数虚拟ID）
         
         ego_transform = ego_vehicle.get_transform()
         ego_matrix = np.array(ego_transform.get_matrix())
         
         # 1. 填充静态环境 (地面、道路)
-        self._fill_static_environment(occupancy, world, ego_transform)
+        self._fill_static_environment(occupancy, actor_ids, world, ego_transform)
 
         # 2. 获取动态 Actors (车辆、行人)
         actors = world.get_actors()
         vehicles = actors.filter('vehicle.*')
         walkers = actors.filter('walker.pedestrian.*')
         all_actors = list(vehicles) + list(walkers)
-        
+
+        print(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}")
+
         # 3. 遍历 Actor，光栅化 Bounding Box
+        filled_actor_ids = []
         for actor in all_actors:
             # 距离粗筛
             dist = actor.get_location().distance(ego_vehicle.get_location())
             if dist > 60.0: # 略大于 grid 半径
                 continue
-            
-            # 这里的 ego_matrix 是 ego -> world 还是 world -> ego?
-            # get_matrix() 返回的是 Model to World (Transform Matrix)
-            # 我们需要 World -> Ego 来把 actor 变换到 ego 坐标系
-            # 所以需要 ego_matrix 的逆矩阵
-            
-            self._fill_actor_bb(occupancy, actor, ego_matrix, is_ego=(actor.id == ego_vehicle.id))
 
-        # 4. 填充自车 (如果上面没包含自车)
-        # 通常 world.get_actors() 包含自车，但在 filter 时可能会漏掉或者逻辑需要
-        # 为了保险起见，再次显式填充自车
-        self._fill_actor_bb(occupancy, ego_vehicle, ego_matrix, is_ego=True)
+            self._fill_actor_bb(occupancy, actor_ids, actor, ego_matrix, is_ego=(actor.id == ego_vehicle.id))
+            filled_actor_ids.append(actor.id)
 
-        # 5. Mask (Ground Truth is fully observed)
+        # 4. 填充自车
+        self._fill_actor_bb(occupancy, actor_ids, ego_vehicle, ego_matrix, is_ego=True)
+        filled_actor_ids.append(ego_vehicle.id)
+
+        print(f"[体素生成] 填充到体素的Actor IDs ({len(filled_actor_ids)}个): {sorted(filled_actor_ids)}")
+
+        # 5. 可见性过滤 (如果提供了激光雷达数据)
+        if visibility_lidar_data is not None:
+            occupancy, actor_ids = self._apply_visibility_filter(
+                occupancy, actor_ids, visibility_lidar_data, world, ego_vehicle.id
+            )
+
+        # 6. Mask (Ground Truth is fully observed)
         mask = np.ones_like(occupancy)
-        
-        return occupancy, mask
 
-    def _fill_static_environment(self, occupancy, world, ego_transform):
+        return occupancy, actor_ids, mask
+
+    def _fill_static_environment(self, occupancy, actor_ids, world, ego_transform):
         """
         填充静态环境 (Road, Ground, Sidewalk)
         由于全图 RayCast 太慢，这里采用基于 Map 的启发式方法：
@@ -116,9 +125,10 @@ class GroundTruthVoxelGenerator:
         z_threshold = 0.2
         gz_max = int((z_threshold - self.z_range[0]) / self.resolution)
         gz_max = max(0, min(self.grid_size[2], gz_max))
-        
+
         if gz_max > 0:
-            occupancy[:, :, :gz_max] = 12 # Ground
+            occupancy[:, :, :gz_max] = 12 # Ground (terrain类别)
+            actor_ids[:, :, :gz_max] = -1012  # ⭐ 地面虚拟ID: -(12+1000)=-1012
             
         # 2. 区分 Road (9) 和 Sidewalk (11)
         # 为了性能，我们不逐个体素查询，而是按步长采样，然后插值？
@@ -219,8 +229,9 @@ class GroundTruthVoxelGenerator:
             # 安全切片
             ix_end = min(self.grid_size[0], ix_base + step)
             iy_end = min(self.grid_size[1], iy_base + step)
-            
+
             occupancy[ix_base:ix_end, iy_base:iy_end, :gz_max] = 11 # driveable_surface (11)
+            actor_ids[ix_base:ix_end, iy_base:iy_end, :gz_max] = -1011  # 道路虚拟ID
 
         # Sidewalk
         for idx in sidewalk_indices:
@@ -228,11 +239,12 @@ class GroundTruthVoxelGenerator:
             iy_sub = idx % ny
             ix_base = x_indices[ix_sub]
             iy_base = y_indices[iy_sub]
-            
+
             ix_end = min(self.grid_size[0], ix_base + step)
             iy_end = min(self.grid_size[1], iy_base + step)
-            
+
             occupancy[ix_base:ix_end, iy_base:iy_end, :gz_max] = 13 # sidewalk (13)
+            actor_ids[ix_base:ix_end, iy_base:iy_end, :gz_max] = -1013  # 人行道虚拟ID
             
         # --- B. 静态物体 (建筑物, 交通标志, 杆等) ---
         # 使用 world.get_level_bbs() 获取地图中的静态物体 BoundingBox
@@ -395,18 +407,18 @@ class GroundTruthVoxelGenerator:
                 mask_reshaped = mask_in.reshape(nx, ny, nz)
                 
                 roi = occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
-                
-                # 如果当前是空的 (0) 或者是地/路 (11,12,13)，则覆盖
-                # 这样可以避免覆盖已有的动态物体 (车辆行人通常优先级更高)
-                # 或者是简单的覆盖逻辑
-                # 考虑到静态物体通常在动态物体下面或周围
-                # 我们希望静态物体不要覆盖车辆
-                # 所以: if current <= 14 (static/ground) -> overwrite
-                # 实际上 动态物体是在 _fill_actor_bb 里处理的，那是后处理，会覆盖静态物体
-                # 所以这里直接赋值即可
-                
+                roi_ids = actor_ids[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
+
+                # 为静态物体分配虚拟Actor ID（使用负数+类别标签）
+                # 例如：Buildings都使用 -15，Vegetation都使用 -16
+                # 这样同类型的静态物体会被视为一个整体
+                virtual_actor_id = -(occ_label + 1000)  # 负数区分，避免与真实actor.id冲突
+
                 roi[mask_reshaped] = occ_label
+                roi_ids[mask_reshaped] = virtual_actor_id  # ⭐ 记录虚拟Actor ID
+
                 occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi
+                actor_ids[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi_ids
                 
         # --- C. 记录未映射物体 (Debug) ---
         # 记录每帧遇到的 CityObjectLabel 类型和 Actor 类型
@@ -416,9 +428,92 @@ class GroundTruthVoxelGenerator:
         # 实际生产中建议写入专门的日志文件
         # print(f"DEBUG: Processing {city_label} -> {occ_label}")
 
-    def _fill_actor_bb(self, occupancy, actor, ego_matrix, is_ego=False):
+    def _get_adaptive_extent(self, bb, occ_label, actor):
+        """
+        根据对象类型自适应调整BoundingBox的填充范围
+
+        Args:
+            bb: carla.BoundingBox对象
+            occ_label: Occupancy标签 (0-17)
+            actor: carla.Actor对象
+
+        Returns:
+            (extent_x, extent_y, extent_z): 调整后的extent
+        """
+        original_x, original_y, original_z = bb.extent.x, bb.extent.y, bb.extent.z
+
+        # 15: manmade (建筑、杆、标志等)
+        if occ_label == 15:
+            # 检查是否是细长物体（杆、标志杆等）
+            # 特征：Z向很高，XY向很小
+            if original_z > 2.0 and max(original_x, original_y) < 0.5:
+                # 杆状物体：使用圆柱近似，收缩到半径
+                radius = max(original_x, original_y) * 0.5  # 收缩50%
+                return radius, radius, original_z
+
+            # 交通标志：通常是薄板 + 杆
+            # 特征：某一维度特别薄
+            min_dim = min(original_x, original_y, original_z)
+            if min_dim < 0.1:
+                # 保持薄维度，其他维度收缩70%
+                return (
+                    original_x * 0.7 if original_x > 0.1 else original_x,
+                    original_y * 0.7 if original_y > 0.1 else original_y,
+                    original_z * 0.7 if original_z > 0.1 else original_z
+                )
+
+        # 8: traffic_cone (交通锥)
+        elif occ_label == 8:
+            # 锥形物体：底部圆形，收缩XY向
+            return original_x * 0.6, original_y * 0.6, original_z * 0.9
+
+        # 1: barrier (隔离栏)
+        elif occ_label == 1:
+            # 条状物体：通常某一维度很长
+            # 保持长维度，收缩短维度
+            dims = [original_x, original_y, original_z]
+            max_dim = max(dims)
+            return (
+                original_x if original_x >= max_dim * 0.8 else original_x * 0.7,
+                original_y if original_y >= max_dim * 0.8 else original_y * 0.7,
+                original_z if original_z >= max_dim * 0.8 else original_z * 0.8
+            )
+
+        # 7: pedestrian (行人)
+        elif occ_label == 7:
+            # 行人BoundingBox实际就是胶囊体近似，已经比较准确
+            # 轻微收缩避免过度填充
+            return original_x * 0.85, original_y * 0.85, original_z * 0.95
+
+        # 2: bicycle, 6: motorcycle (自行车、摩托车)
+        elif occ_label in [2, 6]:
+            # 细长物体，收缩宽度
+            return original_x * 0.7, original_y * 0.7, original_z * 0.9
+
+        # 4: car, 3: bus, 10: truck, 5: construction_vehicle (车辆)
+        elif occ_label in [4, 3, 10, 5]:
+            # 车辆BoundingBox通常比较准确，保留大部分
+            return original_x * 0.9, original_y * 0.9, original_z * 0.9
+
+        # 16: vegetation (植被)
+        elif occ_label == 16:
+            # 树木、灌木：不规则形状，保守填充中心区域
+            return original_x * 0.6, original_y * 0.6, original_z * 0.7
+
+        # 其他类型：默认轻微收缩
+        else:
+            return original_x * 0.85, original_y * 0.85, original_z * 0.85
+
+    def _fill_actor_bb(self, occupancy, actor_ids_grid, actor, ego_matrix, is_ego=False):
         """
         Helper to rasterize an actor's bounding box into the occupancy grid
+
+        Args:
+            occupancy: 体素类别数组
+            actor_ids_grid: 体素Actor ID数组
+            actor: CARLA Actor对象
+            ego_matrix: Ego变换矩阵
+            is_ego: 是否是自车
         """
         try:
             bb = actor.bounding_box
@@ -501,33 +596,188 @@ class GroundTruthVoxelGenerator:
         rel_y = points_in_actor[:, 1] - bb.location.y
         rel_z = points_in_actor[:, 2] - bb.location.z
         
-        # Check Extents
-        in_x = np.abs(rel_x) <= bb.extent.x
-        in_y = np.abs(rel_y) <= bb.extent.y
-        in_z = np.abs(rel_z) <= bb.extent.z
-        
-        mask_in = in_x & in_y & in_z
-        
-        if not np.any(mask_in):
-            return
-            
-        # Determine Label - 使用统一的映射配置
+        # Determine Label first (needed for adaptive extent)
         if is_ego:
             occ_label = 4  # Car (Default for Ego)
         else:
             occ_label = get_occupancy_label_from_actor(actor)
+
+        # Adaptive BoundingBox extent based on object type
+        # 根据对象类型自适应调整包围盒填充范围
+        extent_x, extent_y, extent_z = self._get_adaptive_extent(
+            bb, occ_label, actor
+        )
+
+        # Check Extents with adaptive shrinking
+        in_x = np.abs(rel_x) <= extent_x
+        in_y = np.abs(rel_y) <= extent_y
+        in_z = np.abs(rel_z) <= extent_z
+
+        mask_in = in_x & in_y & in_z
         
-        # Fill
+        if not np.any(mask_in):
+            return
+
+        # Fill (label already determined above)
         nx, ny, nz = max_ix - min_ix, max_iy - min_iy, max_iz - min_iz
         mask_reshaped = mask_in.reshape(nx, ny, nz)
-        
-        roi = occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
-        roi[mask_reshaped] = occ_label
-        occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi
 
-    def save_to_npz(self, filepath, occupancy, mask, metadata=None):
+        # 获取Actor ID
+        current_actor_id = actor.id  # ⭐ 真实的CARLA Actor ID
+
+        roi = occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
+        roi_ids = actor_ids_grid[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
+
+        roi[mask_reshaped] = occ_label
+        roi_ids[mask_reshaped] = current_actor_id  # ⭐ 记录Actor ID
+
+        occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi
+        actor_ids_grid[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi_ids
+
+    def _apply_visibility_filter(self, occupancy, actor_ids, lidar_data, world, ego_vehicle_id):
+        """
+        应用可见性过滤：只保留激光雷达扫描到的物体
+
+        核心逻辑：
+        1. 解析64线语义激光雷达数据，提取可见的actor_id和tag（语义标签）
+        2. 对于动态物体（obj_idx>0）：保留该actor_id的所有体素
+        3. 对于静态环境（obj_idx=0）：根据tag映射到虚拟ID，只保留扫到的虚拟ID
+        4. ⭐ Hero车辆始终保留（激光雷达在车顶扫不到自己）
+
+        Args:
+            occupancy: (X,Y,Z) uint8 - 体素类别数组
+            actor_ids: (X,Y,Z) uint32 - 体素Actor ID数组
+            lidar_data: bytes - 64线语义激光雷达原始数据
+            world: carla.World对象
+            ego_vehicle_id: int - Hero车辆的actor ID
+
+        Returns:
+            filtered_occupancy: 过滤后的体素类别数组
+            filtered_actor_ids: 过滤后的Actor ID数组
+        """
+        # 1. 解析激光雷达数据
+        dtype = np.dtype([
+            ('x', np.float32), ('y', np.float32), ('z', np.float32),
+            ('cos', np.float32),
+            ('obj_idx', np.uint32),  # Actor ID
+            ('tag', np.uint32)       # 语义标签 (CARLA semantic tag)
+        ])
+        points = np.frombuffer(lidar_data, dtype=dtype)
+
+        # 2. 提取可见的actor ID（动态物体）
+        visible_actor_ids = np.unique(points['obj_idx'])
+        visible_actor_ids_set = set(visible_actor_ids)
+
+        print(f"\n[可见性过滤] 激光雷达检测到 {len(points)} 点")
+        print(f"[可见性过滤] 可见Actor IDs (obj_idx): {sorted(list(visible_actor_ids))[:20]}...")
+        print(f"[可见性过滤] 可见Actor数量: {len(visible_actor_ids_set)}")
+
+        # ⭐ 强制保留Hero车辆（激光雷达在车顶扫不到自己）
+        visible_actor_ids_set.add(ego_vehicle_id)
+        print(f"[可见性过滤] 强制保留Hero车辆 ID={ego_vehicle_id}")
+
+        # 3. 处理静态环境（obj_idx=0）：根据tag映射到虚拟ID
+        # CARLA语义标签(tag) → 虚拟ID映射
+        #
+        # 映射逻辑：
+        #   激光雷达tag → 体素生成时使用的CityObjectLabel → occupancy_label → virtual_id=-(occ_label+1000)
+        #
+        # 参考：
+        #   - CARLA语义标签：https://carla.readthedocs.io/en/latest/ref_sensors/#semantic-segmentation-camera
+        #   - 体素生成的static_types (Line 253-264)
+
+        tag_to_virtual_id = {
+            # 道路相关（特殊处理）
+            6: -1011,   # RoadLine (tag=6) → 道路虚拟ID
+            7: -1011,   # Road (tag=7) → 道路虚拟ID (Line 233)
+            8: -1013,   # SideWalk (tag=8) → 人行道虚拟ID (Line 246)
+
+            # 地面/地形
+            14: -1012,  # Ground (tag=14) → other_flat(12) → -(12+1000)=-1012
+            21: -1012,  # Water (tag=21) → other_flat(12) → -(12+1000)=-1012
+            22: -1014,  # Terrain (tag=22) → terrain(14) → -(14+1000)=-1014
+
+            # 建筑物、墙、杆、标志等 (manmade=15)
+            1: -1015,   # Building (tag=1) → Buildings → manmade(15) → -1015
+            5: -1015,   # Pole (tag=5) → Poles → manmade(15) → -1015
+            11: -1015,  # Wall (tag=11) → Walls → manmade(15) → -1015
+            12: -1015,  # TrafficSign (tag=12) → TrafficSigns → manmade(15) → -1015
+            18: -1015,  # TrafficLight (tag=18) → TrafficLight → manmade(15) → -1015
+
+            # 围栏/栏杆 (barrier=1)
+            2: -1001,   # Fence (tag=2) → Fences → barrier(1) → -1001
+            16: -1001,  # RailTrack (tag=16) → barrier(1) → -1001
+            17: -1001,  # GuardRail (tag=17) → barrier(1) → -1001
+
+            # 植被 (vegetation=16)
+            9: -1016,   # Vegetation (tag=9) → Vegetation → vegetation(16) → -1016
+
+            # 其他 (general_object=17)
+            3: -1017,   # Other (tag=3) → Other → general_object(17) → -1017
+            19: -1017,  # Static (tag=19) → Static → general_object(17) → -1017
+            20: -1017,  # Dynamic (tag=20) → Dynamic → general_object(17) → -1017
+
+            # 桥梁 (construction=2) - 注意：Fence也是1，但Bridge是15(construction)
+            15: -1002,  # Bridge (tag=15) → construction(2) → -1002
+        }
+
+        # 提取obj_idx=0的点的tag
+        static_points = points[points['obj_idx'] == 0]
+        if len(static_points) > 0:
+            visible_tags = np.unique(static_points['tag'])
+            print(f"[可见性过滤] 扫到的静态环境tag: {sorted(list(visible_tags))}")
+
+            # 映射tag → 虚拟ID
+            for tag in visible_tags:
+                if tag in tag_to_virtual_id:
+                    virtual_id = tag_to_virtual_id[tag]
+                    visible_actor_ids_set.add(virtual_id)
+
+            print(f"[可见性过滤] 保留的静态虚拟IDs: {sorted([x for x in visible_actor_ids_set if x < 0])}")
+
+        # 4. 创建可见性mask
+        visibility_mask = np.isin(actor_ids, list(visible_actor_ids_set))
+
+        # ⭐ 统计
+        all_voxel_actor_ids = np.unique(actor_ids[actor_ids > 0])  # 正数ID（真实actors）
+        all_voxel_virtual_ids = np.unique(actor_ids[actor_ids < 0])  # 负数ID（虚拟actors）
+
+        print(f"[可见性过滤] 体素中包含的真实Actor IDs: {sorted(list(all_voxel_actor_ids))}")
+        print(f"[可见性过滤] 体素中真实Actor数量: {len(all_voxel_actor_ids)}")
+        print(f"[可见性过滤] 体素中虚拟ID数量: {len(all_voxel_virtual_ids)}")
+
+        # 统计
+        total_occupied = np.sum(occupancy > 0)
+        visible_voxels = np.sum(visibility_mask & (occupancy > 0))
+        filtered_voxels = total_occupied - visible_voxels
+
+        print(f"[可见性过滤] 总占用体素: {total_occupied}")
+        print(f"[可见性过滤] 可见体素: {visible_voxels}")
+        print(f"[可见性过滤] 过滤掉: {filtered_voxels} ({filtered_voxels/total_occupied*100:.1f}%)")
+
+        # 5. 应用过滤：不可见的体素设为free (0)
+        filtered_occupancy = occupancy.copy()
+        filtered_actor_ids = actor_ids.copy()
+
+        filtered_occupancy[~visibility_mask] = 0  # 不可见 → free
+        filtered_actor_ids[~visibility_mask] = 0  # 清除Actor ID
+
+        return filtered_occupancy, filtered_actor_ids
+
+    def save_to_npz(self, filepath, occupancy, actor_ids, mask, metadata=None):
+        """
+        保存体素数据到NPZ文件
+
+        Args:
+            filepath: 保存路径
+            occupancy: (X,Y,Z) uint8 - 体素类别
+            actor_ids: (X,Y,Z) uint32 - 体素Actor ID
+            mask: (X,Y,Z) uint8 - 观测mask
+            metadata: 额外元数据
+        """
         save_dict = {
             'occupancy': occupancy,
+            'actor_ids': actor_ids,  # ⭐ 保存Actor ID数组
             'mask': mask,
             'x_range': self.x_range,
             'y_range': self.y_range,
