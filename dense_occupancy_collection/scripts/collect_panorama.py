@@ -200,44 +200,257 @@ def setup_hero_vehicle(world):
         vehicle_bp.set_attribute('role_name', 'hero')
 
     spawn_points = world.get_map().get_spawn_points()
-    
+    print(f"  [调试] 地图总spawn点数: {len(spawn_points)}")
+
+    # ⭐ 过滤掉原点附近的spawn点，避免(0,0,0)位置
+    valid_spawn_points = [
+        point for point in spawn_points
+        if abs(point.location.x) > 5 or abs(point.location.y) > 5
+    ]
+    print(f"  [调试] 过滤后有效spawn点数: {len(valid_spawn_points)}")
+
+    if not valid_spawn_points:
+        print("⚠ 警告: 没有找到有效的spawn点，使用原始spawn点列表")
+        valid_spawn_points = spawn_points
+
+    # 显示前5个spawn点位置
+    print("  [调试] 前5个有效spawn点位置:")
+    for i, point in enumerate(valid_spawn_points[:5]):
+        loc = point.location
+        print(f"    #{i+1}: ({loc.x:.1f}, {loc.y:.1f}, {loc.z:.1f})")
+
     # 尝试找到一个空闲的生成点
     vehicle = None
-    for point in spawn_points:
+    for idx, point in enumerate(valid_spawn_points):
         vehicle = world.try_spawn_actor(vehicle_bp, point)
         if vehicle is not None:
+            # ⭐ CRITICAL: spawn后必须tick几次让物理系统稳定，否则车辆会被传送到(0,0,0)
+            for _ in range(5):
+                world.tick()
+
+            loc = vehicle.get_location()
+            print(f"✓ Hero车辆已生成: {vehicle.type_id}")
+            print(f"  尝试spawn点索引: #{idx+1}/{len(valid_spawn_points)}")
+            print(f"  最终位置: ({loc.x:.1f}, {loc.y:.1f}, {loc.z:.1f})")
+
+            # ⭐ 验证位置不是原点
+            if abs(loc.x) < 1.0 and abs(loc.y) < 1.0:
+                print(f"  ⚠ 警告: Hero位置接近原点！这可能导致行人生成失败！")
+                # 如果还是在原点，销毁重试下一个spawn点
+                vehicle.destroy()
+                vehicle = None
+                continue
             break
-            
+
     if vehicle is None:
         raise RuntimeError("无法找到空闲的生成点生成Hero车辆")
-        
-    print(f"✓ Hero车辆已生成: {vehicle.type_id}")
 
     return vehicle
 
 
-def spawn_traffic(world, tm_port, num_vehicles=20):
-    """生成交通NPC"""
+def spawn_traffic(world, tm_port, num_vehicles=50, num_walkers=20, hero_location=None):
+    """
+    生成丰富的交通NPC，覆盖17类Occupancy分类
+
+    包括：
+    - Car (4): 普通轿车、SUV
+    - Bus (3): 公交车
+    - Truck (10): 卡车、货车
+    - Bicycle (2): 自行车
+    - Motorcycle (6): 摩托车
+    - Pedestrian (7): 行人
+
+    Args:
+        world: CARLA world对象
+        tm_port: Traffic Manager端口
+        num_vehicles: 车辆数量
+        num_walkers: 行人数量
+        hero_location: hero车辆位置(carla.Location)，用于在hero附近spawn行人
+    """
     bp_lib = world.get_blueprint_library()
     spawn_points = world.get_map().get_spawn_points()
-    actors = []
+    all_actors = []
 
-    vehicle_bps = bp_lib.filter('vehicle.*')
-    vehicle_bps = [bp for bp in vehicle_bps if int(bp.get_attribute('number_of_wheels')) == 4]
+    # === 1. 车辆NPC（按类别分配） ===
+    print(f"  正在生成车辆...")
 
-    for i in range(min(num_vehicles, len(spawn_points))):
-        bp = np.random.choice(vehicle_bps)
-        if bp.has_attribute('color'):
-            color = np.random.choice(bp.get_attribute('color').recommended_values)
-            bp.set_attribute('color', color)
+    # 定义车辆类型及其占比（⭐ 增加自行车和摩托车比例）
+    vehicle_categories = {
+        'car': {          # 轿车/SUV - 占比50%
+            'filters': ['vehicle.audi.*', 'vehicle.bmw.*', 'vehicle.mercedes.*',
+                       'vehicle.tesla.*', 'vehicle.toyota.*', 'vehicle.nissan.*',
+                       'vehicle.dodge.charger*', 'vehicle.lincoln.*', 'vehicle.jeep.*'],
+            'ratio': 0.50
+        },
+        'truck': {        # 卡车/货车 - 占比10%
+            'filters': ['vehicle.carlamotors.firetruck', 'vehicle.ford.ambulance',
+                       'vehicle.carlamotors.carlacola', 'vehicle.carlamotors.european_hgv',
+                       'vehicle.tesla.cybertruck'],
+            'ratio': 0.10
+        },
+        'bus': {          # 公交车 - 占比10%
+            'filters': ['vehicle.mitsubishi.fusorosa'],
+            'ratio': 0.10
+        },
+        'bicycle': {      # 自行车 - 占比15% (⭐ 增加)
+            'filters': ['vehicle.bh.crossbike', 'vehicle.diamondback.century',
+                       'vehicle.gazelle.omafiets'],
+            'ratio': 0.15
+        },
+        'motorcycle': {   # 摩托车 - 占比15% (⭐ 增加)
+            'filters': ['vehicle.harley*', 'vehicle.kawasaki.*', 'vehicle.yamaha.*',
+                       'vehicle.vespa.*'],
+            'ratio': 0.15
+        }
+    }
 
-        vehicle = world.try_spawn_actor(bp, spawn_points[i])
-        if vehicle is not None:
-            vehicle.set_autopilot(True, tm_port)
-            actors.append(vehicle)
+    # 按类别生成车辆
+    spawned_vehicles = []
+    spawn_idx = 0
 
-    print(f"✓ 已生成 {len(actors)} 辆NPC车辆")
-    return actors
+    for category, info in vehicle_categories.items():
+        num_this_category = int(num_vehicles * info['ratio'])
+        if num_this_category == 0 and info['ratio'] > 0:
+            num_this_category = 1  # 确保每个类别至少有1个
+
+        # 收集该类别的所有可用蓝图
+        category_bps = []
+        for filter_pattern in info['filters']:
+            category_bps.extend(list(bp_lib.filter(filter_pattern)))
+
+        if not category_bps:
+            print(f"    ⚠ 警告: 找不到{category}类型的车辆蓝图")
+            continue
+
+        # 生成该类别的车辆
+        count = 0
+        for _ in range(num_this_category):
+            if spawn_idx >= len(spawn_points):
+                break
+
+            bp = np.random.choice(category_bps)
+
+            # 设置颜色
+            if bp.has_attribute('color'):
+                color = np.random.choice(bp.get_attribute('color').recommended_values)
+                bp.set_attribute('color', color)
+
+            # 生成车辆
+            vehicle = world.try_spawn_actor(bp, spawn_points[spawn_idx])
+            spawn_idx += 1
+
+            if vehicle is not None:
+                vehicle.set_autopilot(True, tm_port)
+                spawned_vehicles.append(vehicle)
+                count += 1
+
+        if count > 0:
+            print(f"    ✓ {category}: {count} 辆")
+
+    all_actors.extend(spawned_vehicles)
+
+    # === 2. 行人NPC ===
+    print(f"  正在生成行人...")
+
+    # 获取行人蓝图
+    walker_bps = list(bp_lib.filter('walker.pedestrian.*'))
+    walker_controller_bp = bp_lib.find('controller.ai.walker')
+
+    spawned_walkers = []
+    walker_controllers = []
+
+    # ⭐ 优先在hero车辆附近生成行人，确保在60m范围内
+    if hero_location is not None:
+        print(f"    [行人Spawn] Hero位置: ({hero_location.x:.1f}, {hero_location.y:.1f}, {hero_location.z:.1f})")
+        # 在hero周围15-45m半径范围内均匀分布生成行人（避免太近和太远）
+        spawn_attempts = 0
+        max_attempts = num_walkers * 5  # 最多尝试5倍数量
+
+        while len(spawned_walkers) < num_walkers and spawn_attempts < max_attempts:
+            # 极坐标：距离15-45m，角度0-360度
+            distance = np.random.uniform(15, 45)
+            angle = np.random.uniform(0, 2 * np.pi)
+            offset_x = distance * np.cos(angle)
+            offset_y = distance * np.sin(angle)
+
+            spawn_point = carla.Transform(
+                carla.Location(
+                    x=hero_location.x + offset_x,
+                    y=hero_location.y + offset_y,
+                    z=hero_location.z + 1.5  # ⭐ 提高z坐标，避免地面碰撞
+                )
+            )
+
+            walker_bp = np.random.choice(walker_bps)
+
+            # 随机设置行人属性
+            if walker_bp.has_attribute('is_invincible'):
+                walker_bp.set_attribute('is_invincible', 'false')
+
+            # 生成行人
+            walker = world.try_spawn_actor(walker_bp, spawn_point)
+            spawn_attempts += 1
+
+            if walker is not None:
+                spawned_walkers.append(walker)
+                print(f"    [行人Spawn] ✓ 成功 #{len(spawned_walkers)}: 距离={distance:.1f}m, 位置=({spawn_point.location.x:.1f}, {spawn_point.location.y:.1f})")
+
+                # 为行人添加AI控制器
+                controller = world.spawn_actor(walker_controller_bp, carla.Transform(), attach_to=walker)
+                walker_controllers.append(controller)
+
+        if spawn_attempts >= max_attempts:
+            print(f"    ⚠ 警告: 行人spawn达到最大尝试次数 ({max_attempts}次)，只成功spawn {len(spawned_walkers)} 个")
+    else:
+        # 兜底：在车辆生成点附近随机偏移生成行人
+        print(f"    [行人Spawn] ⚠ Hero位置为None，使用兜底逻辑")
+        for i in range(num_walkers):
+            if i < len(spawn_points):
+                loc = spawn_points[i].location
+                # 随机偏移5-10米到人行道
+                offset_x = np.random.uniform(-10, 10)
+                offset_y = np.random.uniform(-10, 10)
+                spawn_point = carla.Transform(
+                    carla.Location(x=loc.x + offset_x, y=loc.y + offset_y, z=loc.z + 1.0)
+                )
+
+                walker_bp = np.random.choice(walker_bps)
+                if walker_bp.has_attribute('is_invincible'):
+                    walker_bp.set_attribute('is_invincible', 'false')
+
+                walker = world.try_spawn_actor(walker_bp, spawn_point)
+                if walker is not None:
+                    spawned_walkers.append(walker)
+                    controller = world.spawn_actor(walker_controller_bp, carla.Transform(), attach_to=walker)
+                    walker_controllers.append(controller)
+
+    all_actors.extend(spawned_walkers)
+    all_actors.extend(walker_controllers)
+
+    # 启动行人AI - ⚠ CRITICAL: 不使用go_to_location，它在同步模式下会导致CARLA服务端崩溃
+    print(f"    [行人AI] 正在启动 {len(walker_controllers)} 个行人控制器...")
+
+    # ⭐ 一次性启动所有控制器（不需要分批，go_to_location才是问题所在）
+    for i, controller in enumerate(walker_controllers):
+        try:
+            controller.start()
+            # ⭐ 只设置速度，让行人自然行走（不调用go_to_location）
+            controller.set_max_speed(1.0 + np.random.random())  # 1.0-2.0 m/s
+        except Exception as e:
+            print(f"    ⚠ 警告: 行人控制器 #{i+1} 启动失败: {e}")
+
+    # tick几次让AI系统稳定
+    for _ in range(5):
+        world.tick()
+
+    print(f"    [行人AI] ✓ 已成功启动 {len(walker_controllers)} 个控制器")
+
+    print(f"    ✓ 行人: {len(spawned_walkers)} 人")
+
+    print(f"✓ 已生成 {len(spawned_vehicles)} 辆车辆 + {len(spawned_walkers)} 个行人")
+    print(f"  总计: {len(all_actors)} 个NPC Actor")
+
+    return all_actors
 
 
 def prepare_rgb_camera_configs():
@@ -343,9 +556,13 @@ def main():
         print("\n⏳ 生成hero车辆...")
         vehicle = setup_hero_vehicle(world)
 
-        # 生成NPC (减少数量以防卡顿)
+        # 生成丰富的NPC（覆盖17类occupancy分类）
+        # ⭐ 传入hero位置，确保行人在hero附近生成
+        # ⭐ 增加行人和自行车等NPC数量
         print("\n⏳ 生成交通NPC...", flush=True)
-        traffic_actors = spawn_traffic(world, tm_port, num_vehicles=15)
+        # ⭐ 减少行人数量到10，避免AI控制器启动崩溃
+        traffic_actors = spawn_traffic(world, tm_port, num_vehicles=30, num_walkers=10,
+                                      hero_location=vehicle.get_location())
 
         # 等待稳定
         print("\n⏳ 等待场景稳定...")

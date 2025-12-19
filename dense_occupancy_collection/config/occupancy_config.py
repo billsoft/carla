@@ -32,16 +32,21 @@ SEMANTIC_LIDAR_CONFIG = {
     'rotation': {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
 }
 
-# 64线语义激光雷达配置 (用于可见性检测) - 参考carla_data_collection配置
+# 256线语义激光雷达配置 (用于可见性检测) - 高密度扫描
+# ⭐ 关键改进：
+#    1. 高度1.5m：与摄像头齐平（1.0-1.7m），避免从上方看到被遮挡物体
+#    2. 位置(0,0)：车辆中心，穿透车身，360°无遮挡
+#    3. 256线：高密度，准确检测可见性
 VISIBILITY_LIDAR_CONFIG = {
-    'channels': 64,                # 64线（足够精度，不会超时）
+    'channels': 256,               # ⭐ 256线（高密度，减少盲区）
     'range': 100.0,                # 100米范围
-    'points_per_second': 1200000,  # 120万点/秒 (每帧6万点@20Hz)
+    'points_per_second': 5120000,  # ⭐ 512万点/秒 (每帧25.6万点@20Hz)
     'rotation_frequency': 20,      # 20Hz
-    'upper_fov': 15.0,             # 上15° (覆盖主要区域)
-    'lower_fov': -25.0,            # 下-25° (覆盖地面)
-    'position': {'x': 0.0, 'y': 0.0, 'z': 2.4},  # 安装在车顶
-    'rotation': {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
+    'upper_fov': 30.0,             # ⭐ 上30° (匹配相机FOV上半部分)
+    'lower_fov': -30.0,            # ⭐ 下-30° (匹配相机FOV下半部分)
+    'position': {'x': 0.0, 'y': 0.0, 'z': 1.5},  # ⭐ 车辆中心，摄像头高度（1.0-1.7m平均值）
+    'rotation': {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0},  # 水平360°自动覆盖
+    'horizontal_fov': 360.0        # 明确指定水平360°
 }
 
 # CARLA 语义标签 (23类) 到 Occupancy 标签 (18类) 的映射

@@ -73,20 +73,49 @@ class GroundTruthVoxelGenerator:
 
         # 3. 遍历 Actor，光栅化 Bounding Box
         filled_actor_ids = []
+        filled_by_type = {'vehicles': [], 'walkers': []}  # ⭐ 统计各类型
+        filtered_by_distance = {'vehicles': 0, 'walkers': 0}  # ⭐ 统计距离过滤
+
+        print(f"\n[行人调试] ========== 开始填充Actor到体素 ==========")
+
         for actor in all_actors:
             # 距离粗筛
             dist = actor.get_location().distance(ego_vehicle.get_location())
+
+            # ⭐ 调试：记录actor类型
+            is_walker = 'walker.pedestrian' in actor.type_id.lower()
+
             if dist > 60.0: # 略大于 grid 半径
+                if is_walker:
+                    filtered_by_distance['walkers'] += 1
+                    print(f"  [行人调试] ID={actor.id} 距离过远被跳过 (dist={dist:.1f}m > 60m)")
+                else:
+                    filtered_by_distance['vehicles'] += 1
                 continue
+
+            # ⭐ 行人调试：记录处理的行人
+            if is_walker:
+                loc = actor.get_location()
+                print(f"  [行人调试] ID={actor.id} 开始填充 (dist={dist:.1f}m, world_loc=({loc.x:.1f}, {loc.y:.1f}, {loc.z:.1f}))")
 
             self._fill_actor_bb(occupancy, actor_ids, actor, ego_matrix, is_ego=(actor.id == ego_vehicle.id))
             filled_actor_ids.append(actor.id)
+
+            # ⭐ 按类型统计
+            if is_walker:
+                filled_by_type['walkers'].append(actor.id)
+            else:
+                filled_by_type['vehicles'].append(actor.id)
+
+        print(f"[行人调试] ========== 填充完成 ==========")
+        print(f"[行人调试] 距离过滤: 车辆 {filtered_by_distance['vehicles']} 个, 行人 {filtered_by_distance['walkers']} 个")
 
         # 4. 填充自车
         self._fill_actor_bb(occupancy, actor_ids, ego_vehicle, ego_matrix, is_ego=True)
         filled_actor_ids.append(ego_vehicle.id)
 
         print(f"[体素生成] 填充到体素的Actor IDs ({len(filled_actor_ids)}个): {sorted(filled_actor_ids)}")
+        print(f"[体素生成]   车辆: {len(filled_by_type['vehicles'])}个, 行人: {len(filled_by_type['walkers'])}个")
 
         # 5. 可见性过滤 (如果提供了激光雷达数据)
         if visibility_lidar_data is not None:
@@ -482,8 +511,9 @@ class GroundTruthVoxelGenerator:
         # 7: pedestrian (行人)
         elif occ_label == 7:
             # 行人BoundingBox实际就是胶囊体近似，已经比较准确
-            # 轻微收缩避免过度填充
-            return original_x * 0.85, original_y * 0.85, original_z * 0.95
+            # ⭐ 行人本来就很小(0.19m×0.19m)，不应该收缩，否则在0.2m分辨率下几乎看不见
+            # 保持原始大小，甚至可以轻微扩大以确保可见性
+            return original_x * 1.1, original_y * 1.1, original_z * 1.0
 
         # 2: bicycle, 6: motorcycle (自行车、摩托车)
         elif occ_label in [2, 6]:
@@ -520,30 +550,30 @@ class GroundTruthVoxelGenerator:
             actor_transform = actor.get_transform()
         except:
             return # Actor might be dead
-            
+
         # Logging for debug
         # print(f"DEBUG: Actor {actor.type_id} -> Semantic Tag {actor.semantic_tags}")
-        
+
         # Ego Matrix Inverse (World -> Ego)
         try:
             m_inv = np.linalg.inv(ego_matrix)
         except np.linalg.LinAlgError:
             return
-        
+
         # Get 8 corners in World
         verts_world = bb.get_world_vertices(actor_transform)
-        if not verts_world: 
+        if not verts_world:
             return
-            
+
         verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
-        
+
         # Transform to Ego
         verts_ego_np = m_inv @ verts_world_np
-        
+
         xs_ego = verts_ego_np[0, :]
         ys_ego = verts_ego_np[1, :]
         zs_ego = verts_ego_np[2, :]
-        
+
         # Grid Indices Range
         min_ix = int(np.floor((np.min(xs_ego) - self.x_range[0]) / self.resolution))
         max_ix = int(np.ceil((np.max(xs_ego) - self.x_range[0]) / self.resolution))
@@ -551,7 +581,7 @@ class GroundTruthVoxelGenerator:
         max_iy = int(np.ceil((np.max(ys_ego) - self.y_range[0]) / self.resolution))
         min_iz = int(np.floor((np.min(zs_ego) - self.z_range[0]) / self.resolution))
         max_iz = int(np.ceil((np.max(zs_ego) - self.z_range[0]) / self.resolution))
-        
+
         # Clip
         min_ix = max(0, min_ix)
         max_ix = min(self.grid_size[0], max_ix)
@@ -559,8 +589,15 @@ class GroundTruthVoxelGenerator:
         max_iy = min(self.grid_size[1], max_iy)
         min_iz = max(0, min_iz)
         max_iz = min(self.grid_size[2], max_iz)
-        
+
+        # 行人调试：记录边界框裁剪前后
+        is_walker = 'walker.pedestrian' in actor.type_id.lower()
+        if is_walker:
+            original_grid_indices = (min_ix, max_ix, min_iy, max_iy, min_iz, max_iz)
+
         if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
+            if is_walker:
+                print(f"  [行人调试] ID={actor.id} 在网格范围外被跳过 - Grid范围: ix=[{min_ix},{max_ix}), iy=[{min_iy},{max_iy}), iz=[{min_iz},{max_iz})")
             return
 
         # Prepare Sub-grid for OBB check
@@ -608,15 +645,28 @@ class GroundTruthVoxelGenerator:
             bb, occ_label, actor
         )
 
+        # 行人调试：记录extent信息
+        if is_walker:
+            print(f"  [行人调试] ID={actor.id} BBox原始extent=({bb.extent.x:.2f}, {bb.extent.y:.2f}, {bb.extent.z:.2f}), "
+                  f"自适应extent=({extent_x:.2f}, {extent_y:.2f}, {extent_z:.2f})")
+
         # Check Extents with adaptive shrinking
         in_x = np.abs(rel_x) <= extent_x
         in_y = np.abs(rel_y) <= extent_y
         in_z = np.abs(rel_z) <= extent_z
 
         mask_in = in_x & in_y & in_z
-        
+
+        voxel_count = np.sum(mask_in)
+
         if not np.any(mask_in):
+            if is_walker:
+                print(f"  [行人调试] ID={actor.id} 没有体素通过extent检查 - 潜在网格: {(max_ix - min_ix) * (max_iy - min_iy) * (max_iz - min_iz)} 个")
             return
+
+        # 行人调试：记录填充的体素数
+        if is_walker:
+            print(f"  [行人调试] ID={actor.id} ✓ 成功填充 {voxel_count} 个体素 (occupancy_label={occ_label})")
 
         # Fill (label already determined above)
         nx, ny, nz = max_ix - min_ix, max_iy - min_iy, max_iz - min_iz
@@ -664,79 +714,140 @@ class GroundTruthVoxelGenerator:
         ])
         points = np.frombuffer(lidar_data, dtype=dtype)
 
-        # 2. 提取可见的actor ID（动态物体）
-        visible_actor_ids = np.unique(points['obj_idx'])
-        visible_actor_ids_set = set(visible_actor_ids)
+        # 2. 提取可见的actor ID（动态物体）+ 基于点云密度的可见性判断
+        # ⭐ 关键改进：只有LiDAR点数足够多的actor才认为真正可见
+        # 避免通过建筑物缝隙扫到的远处车辆被标记为"可见"
+
+        dynamic_points = points[points['obj_idx'] > 0]  # 只看动态物体
+        unique_ids, counts = np.unique(dynamic_points['obj_idx'], return_counts=True)
+
+        # ⭐ 可见性阈值：降低到5点（极近距离的车辆可能被Hero车身严重遮挡）
+        # 行人、自行车等小物体可能只有5-10个点
+        # 如果阈值太高（10+），紧贴Hero车辆的车会被过滤
+        MIN_POINTS_THRESHOLD = 5  # 最少5个点才算真正可见
+
+        visible_actor_ids_set = set()
+        filtered_by_density = []
+
+        for actor_id, point_count in zip(unique_ids, counts):
+            if point_count >= MIN_POINTS_THRESHOLD:
+                visible_actor_ids_set.add(int(actor_id))
+            else:
+                filtered_by_density.append((int(actor_id), point_count))
 
         print(f"\n[可见性过滤] 激光雷达检测到 {len(points)} 点")
-        print(f"[可见性过滤] 可见Actor IDs (obj_idx): {sorted(list(visible_actor_ids))[:20]}...")
-        print(f"[可见性过滤] 可见Actor数量: {len(visible_actor_ids_set)}")
+        print(f"[可见性过滤] 动态物体点数统计: {len(unique_ids)} 个actor")
+        print(f"[可见性过滤] 点数充足（>={MIN_POINTS_THRESHOLD}点）: {len(visible_actor_ids_set)} 个")
+        print(f"[可见性过滤] 点数不足（<{MIN_POINTS_THRESHOLD}点）被过滤: {len(filtered_by_density)} 个")
+        if filtered_by_density:
+            # ⭐ 显示所有被过滤的actor，方便诊断
+            print(f"[可见性过滤] 点数不足的Actor（所有）: {filtered_by_density}")
 
         # ⭐ 强制保留Hero车辆（激光雷达在车顶扫不到自己）
         visible_actor_ids_set.add(ego_vehicle_id)
         print(f"[可见性过滤] 强制保留Hero车辆 ID={ego_vehicle_id}")
 
         # 3. 处理静态环境（obj_idx=0）：根据tag映射到虚拟ID
-        # CARLA语义标签(tag) → 虚拟ID映射
+        # ⭐⭐⭐ CRITICAL FIX：静态环境需要分类处理 ⭐⭐⭐
         #
-        # 映射逻辑：
-        #   激光雷达tag → 体素生成时使用的CityObjectLabel → occupancy_label → virtual_id=-(occ_label+1000)
+        # 问题：之前的逻辑无条件保留所有扫到的静态tag，导致：
+        #   - 扫到远处建筑tag=1 → 虚拟ID -1015 → **所有建筑**都可见（错误！）
+        #   - 扫到远处植被tag=9 → 虚拟ID -1016 → **所有植被**都可见（错误！）
         #
-        # 参考：
-        #   - CARLA语义标签：https://carla.readthedocs.io/en/latest/ref_sensors/#semantic-segmentation-camera
-        #   - 体素生成的static_types (Line 253-264)
+        # 新逻辑：
+        #   1. 地面类型（道路、人行道）→ 不添加到可见集合，后续通过occupancy类型判断
+        #   2. 大型静态物体（建筑、植被、墙）→ **不添加到可见集合**，让后续逻辑过滤
+        #   3. 小型静态物体（杆、标志、围栏）→ 基于点云密度判断
 
         tag_to_virtual_id = {
-            # 道路相关（特殊处理）
-            6: -1011,   # RoadLine (tag=6) → 道路虚拟ID
-            7: -1011,   # Road (tag=7) → 道路虚拟ID (Line 233)
-            8: -1013,   # SideWalk (tag=8) → 人行道虚拟ID (Line 246)
+            # 道路相关（不处理，后续通过occupancy类型保护）
+            # 6: -1011,   # RoadLine (tag=6) → 道路虚拟ID
+            # 7: -1011,   # Road (tag=7) → 道路虚拟ID
+            # 8: -1013,   # SideWalk (tag=8) → 人行道虚拟ID
 
-            # 地面/地形
-            14: -1012,  # Ground (tag=14) → other_flat(12) → -(12+1000)=-1012
-            21: -1012,  # Water (tag=21) → other_flat(12) → -(12+1000)=-1012
-            22: -1014,  # Terrain (tag=22) → terrain(14) → -(14+1000)=-1014
+            # 地面/地形（不处理，后续通过occupancy类型保护）
+            # 14: -1012,  # Ground (tag=14) → other_flat(12)
+            # 21: -1012,  # Water (tag=21) → other_flat(12)
+            # 22: -1014,  # Terrain (tag=22) → terrain(14)
 
-            # 建筑物、墙、杆、标志等 (manmade=15)
-            1: -1015,   # Building (tag=1) → Buildings → manmade(15) → -1015
+            # 建筑物、墙、植被（不添加，需要被过滤）
+            # 1: -1015,   # Building (tag=1) → 不添加，让遮挡的建筑被过滤
+            # 11: -1015,  # Wall (tag=11) → 不添加
+            # 9: -1016,   # Vegetation (tag=9) → 不添加
+
+            # 小型人造物体（需要点云密度判断）
             5: -1015,   # Pole (tag=5) → Poles → manmade(15) → -1015
-            11: -1015,  # Wall (tag=11) → Walls → manmade(15) → -1015
             12: -1015,  # TrafficSign (tag=12) → TrafficSigns → manmade(15) → -1015
             18: -1015,  # TrafficLight (tag=18) → TrafficLight → manmade(15) → -1015
 
-            # 围栏/栏杆 (barrier=1)
+            # 围栏/栏杆（需要点云密度判断）
             2: -1001,   # Fence (tag=2) → Fences → barrier(1) → -1001
             16: -1001,  # RailTrack (tag=16) → barrier(1) → -1001
             17: -1001,  # GuardRail (tag=17) → barrier(1) → -1001
 
-            # 植被 (vegetation=16)
-            9: -1016,   # Vegetation (tag=9) → Vegetation → vegetation(16) → -1016
-
-            # 其他 (general_object=17)
+            # 其他
             3: -1017,   # Other (tag=3) → Other → general_object(17) → -1017
             19: -1017,  # Static (tag=19) → Static → general_object(17) → -1017
             20: -1017,  # Dynamic (tag=20) → Dynamic → general_object(17) → -1017
 
-            # 桥梁 (construction=2) - 注意：Fence也是1，但Bridge是15(construction)
+            # 桥梁
             15: -1002,  # Bridge (tag=15) → construction(2) → -1002
         }
 
-        # 提取obj_idx=0的点的tag
+        # 提取obj_idx=0的点的tag，并统计每个tag的点数
         static_points = points[points['obj_idx'] == 0]
         if len(static_points) > 0:
-            visible_tags = np.unique(static_points['tag'])
-            print(f"[可见性过滤] 扫到的静态环境tag: {sorted(list(visible_tags))}")
+            unique_tags, tag_counts = np.unique(static_points['tag'], return_counts=True)
+            print(f"[可见性过滤] 扫到的静态环境tag: {sorted(list(unique_tags))}")
 
-            # 映射tag → 虚拟ID
-            for tag in visible_tags:
+            # ⭐ 基于点云密度判断静态物体可见性（阈值100点）
+            # 小型物体（杆、标志）需要足够的点数才认为可见
+            STATIC_MIN_POINTS = 100  # 静态物体至少100点
+
+            for tag, count in zip(unique_tags, tag_counts):
                 if tag in tag_to_virtual_id:
-                    virtual_id = tag_to_virtual_id[tag]
-                    visible_actor_ids_set.add(virtual_id)
+                    if count >= STATIC_MIN_POINTS:
+                        virtual_id = tag_to_virtual_id[tag]
+                        visible_actor_ids_set.add(virtual_id)
+                        print(f"[可见性过滤]   tag={tag} → virtual_id={virtual_id}, 点数={count} ✓")
+                    else:
+                        print(f"[可见性过滤]   tag={tag} 点数不足({count}<{STATIC_MIN_POINTS}) ✗")
 
             print(f"[可见性过滤] 保留的静态虚拟IDs: {sorted([x for x in visible_actor_ids_set if x < 0])}")
 
-        # 4. 创建可见性mask
-        visibility_mask = np.isin(actor_ids, list(visible_actor_ids_set))
+        # 4. 创建可见性mask - ⭐⭐⭐ 新逻辑：用户指定的简单可见性规则 ⭐⭐⭐
+        #
+        # 用户需求（2025-12-18）：
+        #   1. 所有体素初始值 visible = False
+        #   2. 地面类型(11,12,13,14) → visible = True（永久可见）
+        #   3. Hero车辆 → visible = True（永久可见）
+        #   4. 激光雷达检测到的ID → 该ID的所有体素 visible = True
+        #   5. 最终：visible = False 的 → occupancy = 0（空气）
+        #
+        # 这样可以：
+        #   - 过滤被遮挡的建筑物（静态环境也会被过滤）
+        #   - 保护地面不出现"坑"（通过occupancy类型判断）
+        #   - 保护Hero车辆（强制可见）
+
+        # 步骤1: 所有体素初始值 = False
+        visibility_mask = np.zeros(occupancy.shape, dtype=bool)
+
+        # 步骤2: 地面相关类型永久可见（避免地面出现"坑"）
+        # 11=driveable_surface, 12=other_flat, 13=sidewalk, 14=terrain
+        GROUND_LABELS = [11, 12, 13, 14]
+        ground_mask = np.isin(occupancy, GROUND_LABELS)
+        visibility_mask[ground_mask] = True
+
+        print(f"[可见性过滤] 地面体素（永久可见）: {np.sum(ground_mask)}")
+
+        # 步骤3: Hero车辆永久可见
+        hero_mask = (actor_ids == ego_vehicle_id)
+        visibility_mask[hero_mask] = True
+        print(f"[可见性过滤] Hero车辆体素（永久可见）: {np.sum(hero_mask)}")
+
+        # 步骤4: 激光雷达检测到的ID → 所有该ID的体素可见
+        lidar_detected_mask = np.isin(actor_ids, list(visible_actor_ids_set))
+        visibility_mask[lidar_detected_mask] = True
 
         # ⭐ 统计
         all_voxel_actor_ids = np.unique(actor_ids[actor_ids > 0])  # 正数ID（真实actors）
@@ -745,6 +856,18 @@ class GroundTruthVoxelGenerator:
         print(f"[可见性过滤] 体素中包含的真实Actor IDs: {sorted(list(all_voxel_actor_ids))}")
         print(f"[可见性过滤] 体素中真实Actor数量: {len(all_voxel_actor_ids)}")
         print(f"[可见性过滤] 体素中虚拟ID数量: {len(all_voxel_virtual_ids)}")
+
+        # ⭐ 详细统计：哪些动态Actor被过滤了
+        visible_dynamic_ids = [aid for aid in all_voxel_actor_ids if aid in visible_actor_ids_set]
+        invisible_dynamic_ids = [aid for aid in all_voxel_actor_ids if aid not in visible_actor_ids_set]
+        print(f"[可见性过滤] 激光雷达检测到的动态Actor IDs: {sorted(visible_dynamic_ids)}")
+        print(f"[可见性过滤] 将被过滤的动态Actor IDs: {sorted(invisible_dynamic_ids)}")
+
+        # 统计静态环境
+        visible_static_ids = sorted([vid for vid in all_voxel_virtual_ids if vid in visible_actor_ids_set])
+        invisible_static_ids = sorted([vid for vid in all_voxel_virtual_ids if vid not in visible_actor_ids_set])
+        print(f"[可见性过滤] 激光雷达检测到的静态虚拟IDs: {visible_static_ids}")
+        print(f"[可见性过滤] 将被过滤的静态虚拟IDs: {invisible_static_ids}")
 
         # 统计
         total_occupied = np.sum(occupancy > 0)
@@ -755,12 +878,34 @@ class GroundTruthVoxelGenerator:
         print(f"[可见性过滤] 可见体素: {visible_voxels}")
         print(f"[可见性过滤] 过滤掉: {filtered_voxels} ({filtered_voxels/total_occupied*100:.1f}%)")
 
-        # 5. 应用过滤：不可见的体素设为free (0)
+        # 步骤5: 最终过滤 - visible = False 的体素 → occupancy = 0（空气）
         filtered_occupancy = occupancy.copy()
         filtered_actor_ids = actor_ids.copy()
 
-        filtered_occupancy[~visibility_mask] = 0  # 不可见 → free
-        filtered_actor_ids[~visibility_mask] = 0  # 清除Actor ID
+        # ⭐⭐⭐ 关键：所有不可见的体素（无论动态还是静态）都变成空气 ⭐⭐⭐
+        # ⭐⭐⭐ CRITICAL FIX: 地面类型永远不删除，即使被车辆BBox覆盖 ⭐⭐⭐
+        invisible_mask = ~visibility_mask
+
+        # 地面保护：即使invisible，只要occupancy是地面类型，就不删除
+        # 这样可以避免车辆BBox底部与地面重叠时，地面被删除造成"坑"
+        GROUND_LABELS = [11, 12, 13, 14]
+        is_ground = np.isin(filtered_occupancy, GROUND_LABELS)
+
+        # 最终要删除的：不可见 且 不是地面
+        final_remove_mask = invisible_mask & (~is_ground)
+
+        filtered_occupancy[final_remove_mask] = 0  # 不可见且非地面 → 空气
+        filtered_actor_ids[final_remove_mask] = 0  # 清除Actor ID
+
+        # 分类统计
+        dynamic_filtered = np.sum(final_remove_mask & (actor_ids > 0))  # 动态物体被过滤
+        static_filtered = np.sum(final_remove_mask & (actor_ids < 0))   # 静态环境被过滤
+        ground_protected = np.sum(invisible_mask & is_ground)  # 不可见但因为是地面而保护
+
+        print(f"[可见性过滤] 过滤掉的动态物体体素: {dynamic_filtered}")
+        print(f"[可见性过滤] 过滤掉的静态环境体素（遮挡建筑等）: {static_filtered}")
+        print(f"[可见性过滤] 保留的地面体素: {np.sum(is_ground)}")
+        print(f"[可见性过滤] 地面被保护（不可见但保留）: {ground_protected}")
 
         return filtered_occupancy, filtered_actor_ids
 
