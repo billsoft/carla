@@ -40,21 +40,25 @@ def main():
     print("其他Actor类型")
     print("="*60)
 
-    # 自行车
-    bicycles = bp_lib.filter('vehicle.bh.crossbike') + bp_lib.filter('vehicle.diamondback.*') + bp_lib.filter('vehicle.gazelle.*')
-    if bicycles:
-        print("\n自行车 (Bicycles):")
-        for b in bicycles:
-            print(f"  {b.id}")
+    bicycles = list(bp_lib.filter('vehicle.bh.crossbike')) + list(bp_lib.filter('vehicle.diamondback.*')) + list(bp_lib.filter('vehicle.gazelle.*'))
+    motorcycles = list(bp_lib.filter('vehicle.harley*')) + list(bp_lib.filter('vehicle.kawasaki.*')) + list(bp_lib.filter('vehicle.yamaha.*')) + list(bp_lib.filter('vehicle.vespa.*'))
+    
+    print("  (Bicycles)")
+    for bp in bicycles:
+        print(f"  {bp.id}")
+        
+    print("\n  (Motorcycles)")
+    for bp in motorcycles:
+        print(f"  {bp.id}")
 
-    # 摩托车
-    motorcycles = bp_lib.filter('vehicle.harley*') + bp_lib.filter('vehicle.kawasaki*') + bp_lib.filter('vehicle.yamaha*')
-    if motorcycles:
-        print("\n摩托车 (Motorcycles):")
-        for m in motorcycles:
-            print(f"  {m.id}")
-
-    print()
+    # 3. 静态物体/Props (部分)
+    print("\n" + "="*60)
+    print("Props (部分示例)")
+    print("="*60)
+    props = bp_lib.filter('static.prop.*')
+    # 只列出前20个作为示例
+    for bp in list(props)[:20]:
+        print(f"  {bp.id}")
 
 if __name__ == '__main__':
     try:

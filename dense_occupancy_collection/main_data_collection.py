@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import argparse
+import shutil
 from pathlib import Path
 import numpy as np
 
@@ -65,6 +66,12 @@ def main():
     # Init
     client = carla.Client(args.host, args.port)
     client.set_timeout(30.0)
+    
+    # 清理旧数据
+    if os.path.exists(args.output):
+        print(f"清理旧数据目录: {args.output}")
+        shutil.rmtree(args.output)
+    
     world = client.load_world(args.town)
     world.set_weather(carla.WeatherParameters.ClearNoon)
     

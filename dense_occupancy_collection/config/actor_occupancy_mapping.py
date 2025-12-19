@@ -66,6 +66,7 @@ VEHICLE_MAPPING = {
     3: [
         'vehicle.volkswagen.t2',
         'vehicle.fuso.mitsubishi',  # 三菱Fuso (semantic_tag=16=Bus)
+        'vehicle.mitsubishi.fusorosa', # 别名
     ],
 
     # Truck (10) - 卡车/货车/特种车辆
@@ -75,6 +76,10 @@ VEHICLE_MAPPING = {
         'vehicle.ambulance.ford',        # 救护车 (semantic_tag=15=Truck)
         'vehicle.sprinter.mercedes',     # 奔驰货车 (semantic_tag=15=Truck)
         'vehicle.tesla.cybertruck',      # 赛博卡车
+        'vehicle.carlamotors.carlacola', # 别名
+        'vehicle.carlamotors.firetruck', # 别名
+        'vehicle.ford.ambulance',        # 别名
+        'vehicle.mercedes.sprinter',     # 别名
     ],
 
     # Bicycle (2) - 自行车
@@ -146,6 +151,7 @@ PROP_MAPPING = {
         'static.prop.chainbarriergate',
         'static.prop.warningconstruction',
         'static.prop.warningaccident',
+        'static.prop.chainbarrierend', # Add BarrierEnd
     ],
 
     # Manmade (15) - 人造物体
@@ -162,6 +168,11 @@ PROP_MAPPING = {
         'static.prop.phonebox',
         'static.prop.table',
         'static.prop.busstop',
+        'static.prop.atm',           # Add ATM
+        'static.prop.advertisement', # Add Ad
+        'static.prop.vendingmachine',# Add Vending
+        'static.prop.doghouse',      # Add Doghouse
+        'static.prop.barbeque',      # Add BBQ
     ],
 
     # Vegetation (16) - 植被
@@ -172,6 +183,7 @@ PROP_MAPPING = {
         'static.prop.plant01',
         'static.prop.plant02',
         'static.prop.plant03',
+        'static.prop.plantpot04',    # Add Plantpot
     ],
 
     # General Object (17) - 通用障碍物/其他
@@ -204,6 +216,11 @@ PROP_MAPPING = {
         'static.prop.brokentile02',
         'static.prop.brokentile03',
         'static.prop.brokentile04',
+        'static.prop.colacan',       # Add Cola
+        'static.prop.recycleorganic',# Add Recycle
+        'static.prop.platformgarbage01', # Add Garbage
+        'static.prop.dumpster',      # Add Dumpster
+        'static.prop.bike helmet',   # Add Helmet
     ],
 }
 

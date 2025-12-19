@@ -45,10 +45,10 @@ VEHICLE_MAPPING = {
 ### 2. 映射配置的三个部分
 
 #### A. 车辆映射 (VEHICLE_MAPPING)
-- Bus (3): VW T2面包车
-- Truck (10): 货车、消防车、救护车、Cybertruck等
-- Bicycle (2): 各种自行车
-- Motorcycle (6): 各种摩托车
+- Bus (3): VW T2面包车, Mitsubishi Fuso
+- Truck (10): 货车、消防车、救护车、Cybertruck, Sprinter, Carlacola
+- Bicycle (2): Crossbike, Diamondback, Gazelle
+- Motorcycle (6): Harley, Kawasaki, Yamaha, Vespa
 - Car (4): 其他所有轿车（默认）
 
 #### B. 行人映射 (WALKER_MAPPING)
@@ -56,10 +56,10 @@ VEHICLE_MAPPING = {
 
 #### C. Props映射 (PROP_MAPPING)
 - Traffic Cone (8): 交通锥桶
-- Barrier (1): 隔离栏、护栏
-- Manmade (15): 长椅、喷泉、路牌等
-- Vegetation (16): 灌木、植物
-- General Object (17): 垃圾桶、箱子、碎片等
+- Barrier (1): 隔离栏、护栏、施工警告
+- Manmade (15): 长椅、喷泉、路牌、ATM、广告牌、自动售货机、电话亭
+- Vegetation (16): 灌木、植物、花盆
+- General Object (17): 垃圾桶、箱子、碎片、可乐罐、头盔
 
 #### D. CityObjectLabel映射 (CITY_OBJECT_MAPPING)
 - 静态环境对象：建筑、道路、植被等
@@ -219,3 +219,4 @@ A:
 - 基于nuScenes标准
 - 支持CARLA UE5.5 / 0.10.0
 - 1对多关系表，易于维护
+

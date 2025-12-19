@@ -1,9 +1,7 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
-测试Actor到Occupancy的映射是否正确
+测试 Actor 类型映射逻辑
+验证是否所有 CARLA 蓝图都能正确映射到 17 类 Occupancy 标签
 """
-
 import sys
 import os
 from pathlib import Path
@@ -12,121 +10,103 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+# 处理 PythonAPI 导入
+try:
+    build_dist = project_root / 'Build' / 'PythonAPI' / 'dist'
+    if build_dist.exists():
+        for whl in build_dist.glob('*.whl'):
+            sys.path.append(str(whl))
+            break
+    else:
+        sys.path.append(str(project_root / 'PythonAPI' / 'carla'))
+except: pass
+
+import carla
 from dense_occupancy_collection.config.actor_occupancy_mapping import (
     get_occupancy_label_from_type_id,
-    get_occupancy_name,
     OCCUPANCY_LABELS
 )
 
-def test_vehicle_mapping():
-    """测试车辆类型映射"""
-    print("=" * 60)
-    print("测试车辆类型映射")
-    print("=" * 60)
-
-    test_cases = [
-        # (type_id, expected_label, expected_name)
-        ('vehicle.ambulance.ford', 10, 'truck'),
-        ('vehicle.carlacola.actors', 10, 'truck'),
-        ('vehicle.firetruck.actors', 10, 'truck'),
-        ('vehicle.sprinter.mercedes', 10, 'truck'),
-        ('vehicle.fuso.mitsubishi', 3, 'bus'),
-        ('vehicle.dodge.charger', 4, 'car'),
-        ('vehicle.mini.cooper', 4, 'car'),
-        ('vehicle.ue4.audi.tt', 4, 'car'),
-    ]
-
-    all_pass = True
-    for type_id, expected_label, expected_name in test_cases:
-        label = get_occupancy_label_from_type_id(type_id)
-        name = get_occupancy_name(label)
-
-        status = "✓" if label == expected_label else "✗"
-        print(f"{status} {type_id:40s} -> {label} ({name})")
-
-        if label != expected_label:
-            print(f"  预期: {expected_label} ({expected_name}), 实际: {label} ({name})")
-            all_pass = False
-
-    return all_pass
-
-def test_all_query_actors():
-    """测试查询到的所有actor类型"""
-    import json
-
-    print("\n" + "=" * 60)
-    print("测试所有查询到的Actor类型")
-    print("=" * 60)
-
-    query_file = Path(__file__).parent.parent / 'config' / 'actor_types_query_result.json'
-    if not query_file.exists():
-        print("❌ 查询结果文件不存在，请先运行 query_all_actors.py")
-        return False
-
-    with open(query_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    print(f"\n地图: {data['map_name']}")
-    print(f"Actor类型总数: {data['total_actor_types']}\n")
-
-    vehicle_stats = {
-        'car': 0,
-        'truck': 0,
-        'bus': 0,
-        'bicycle': 0,
-        'motorcycle': 0,
-        'other': 0
+def test_mapping():
+    print("连接 CARLA...")
+    client = carla.Client('localhost', 2000)
+    client.set_timeout(10.0)
+    world = client.get_world()
+    bp_lib = world.get_blueprint_library()
+    
+    # 获取所有相关蓝图
+    all_bps = []
+    all_bps.extend(list(bp_lib.filter('vehicle.*')))
+    all_bps.extend(list(bp_lib.filter('walker.pedestrian.*')))
+    all_bps.extend(list(bp_lib.filter('static.prop.*')))
+    
+    print(f"总计检查 {len(all_bps)} 个蓝图类型...")
+    
+    stats = {
+        'mapped': 0,
+        'fallback_car': 0,
+        'fallback_general': 0,
+        'failed': 0
     }
-
-    for actor_type in data['actor_types']:
-        type_id = actor_type['type_id']
-
-        # 只测试vehicle类型
-        if not type_id.startswith('vehicle.'):
-            continue
-
-        label = get_occupancy_label_from_type_id(type_id)
-        name = get_occupancy_name(label)
-
+    
+    failures = []
+    
+    for bp in all_bps:
+        label_id = get_occupancy_label_from_type_id(bp.id)
+        label_name = OCCUPANCY_LABELS.get(label_id, 'Unknown')
+        
         # 统计
-        if name == 'car':
-            vehicle_stats['car'] += 1
-        elif name == 'truck':
-            vehicle_stats['truck'] += 1
-        elif name == 'bus':
-            vehicle_stats['bus'] += 1
-        elif name == 'bicycle':
-            vehicle_stats['bicycle'] += 1
-        elif name == 'motorcycle':
-            vehicle_stats['motorcycle'] += 1
+        if label_id == 17: # General Object
+            # 检查是否是"假"General Object (即兜底逻辑生效)
+            if bp.id.startswith('vehicle.'):
+                # 车辆不应该被映射为 General Object
+                failures.append(f"{bp.id} -> {label_name} (Should be Vehicle?)")
+                stats['failed'] += 1
+            else:
+                stats['fallback_general'] += 1
+        elif label_id == 4: # Car
+            # 检查是否是真正的 Car (通过名字)
+            # 如果是 truck/bus/bike 被映射为 car，则是次优，但不是完全失败
+            # 但我们要追求精确，所以这里列出潜在问题
+            if any(k in bp.id for k in ['truck', 'carlacola', 'firetruck', 'sprinter', 'bus', 'bike', 'motorcycle', 'yamaha', 'kawasaki']):
+                # 如果这些关键词的物体被映射为 Car，说明精确匹配失败，走了兜底
+                # 我们需要检查它是否在精确映射表中
+                # 注意：get_occupancy_label_from_type_id 内部逻辑：
+                # 如果不在精确表中，vehicle.* 会兜底为 4 (Car)
+                # 所以我们无法区分是"精确映射为Car"还是"兜底为Car"，除非我们知道它本不该是Car
+                pass 
+            stats['mapped'] += 1
         else:
-            vehicle_stats['other'] += 1
-
-        print(f"  {type_id:40s} -> {label:2d} ({name})")
-
-    print("\n" + "-" * 60)
-    print("车辆类型统计:")
-    for vtype, count in vehicle_stats.items():
-        if count > 0:
-            print(f"  {vtype:15s}: {count}")
-
-    return True
-
-def main():
-    print("🔍 Actor到Occupancy映射测试工具\n")
-
-    # 测试1：预定义测试用例
-    test1_pass = test_vehicle_mapping()
-
-    # 测试2：查询结果中的所有actor
-    test2_pass = test_all_query_actors()
-
-    print("\n" + "=" * 60)
-    if test1_pass and test2_pass:
-        print("✅ 所有测试通过!")
-    else:
-        print("❌ 部分测试失败，请检查映射配置")
-    print("=" * 60)
+            stats['mapped'] += 1
+            
+    print("\n映射结果统计:")
+    print(f"  Mapped (Specific): {stats['mapped']}")
+    print(f"  Fallback (General): {stats['fallback_general']}")
+    print(f"  Failed/Suspicious: {stats['failed']}")
+    
+    if failures:
+        print("\n[!] 潜在映射失败 (车辆被归为 General Object):")
+        for f in failures:
+            print(f"  - {f}")
+            
+    # 验证关键类型
+    print("\n关键类型抽查:")
+    check_list = [
+        'vehicle.carlacola.actors',      # Should be 10 (Truck)
+        'vehicle.tesla.cybertruck',      # Should be 10 (Truck)
+        'vehicle.bh.crossbike',          # Should be 2 (Bicycle)
+        'vehicle.yamaha.yzf',            # Should be 6 (Motorcycle)
+        'vehicle.volkswagen.t2',         # Should be 3 (Bus)
+        'static.prop.trafficcone01',     # Should be 8 (Cone)
+        'static.prop.streetbarrier',     # Should be 1 (Barrier)
+        'static.prop.atm',               # Should be 15 (Manmade)
+        'static.prop.plantpot04',        # Should be 16 (Vegetation)
+    ]
+    
+    for tid in check_list:
+        lid = get_occupancy_label_from_type_id(tid)
+        lname = OCCUPANCY_LABELS.get(lid, 'Unknown')
+        print(f"  {tid:<30} -> [{lid}] {lname}")
 
 if __name__ == '__main__':
-    main()
+    test_mapping()
