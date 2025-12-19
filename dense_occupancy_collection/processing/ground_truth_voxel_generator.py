@@ -63,20 +63,21 @@ class GroundTruthVoxelGenerator:
         # 1. 填充静态环境 (地面、道路)
         self._fill_static_environment(occupancy, actor_ids, world, ego_transform)
 
-        # 2. 获取动态 Actors (车辆、行人)
+        # 2. 获取动态 Actors (车辆、行人、静态道具)
         actors = world.get_actors()
         vehicles = actors.filter('vehicle.*')
         walkers = actors.filter('walker.pedestrian.*')
-        all_actors = list(vehicles) + list(walkers)
+        props = actors.filter('static.prop.*')  # ⭐ 新增：获取锥桶、垃圾桶等 props
+        all_actors = list(vehicles) + list(walkers) + list(props)
 
-        print(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}")
+        print(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}, Props={len(props)}")
 
         # 3. 遍历 Actor，光栅化 Bounding Box
         filled_actor_ids = []
-        filled_by_type = {'vehicles': [], 'walkers': []}  # ⭐ 统计各类型
-        filtered_by_distance = {'vehicles': 0, 'walkers': 0}  # ⭐ 统计距离过滤
+        filled_by_type = {'vehicles': [], 'walkers': [], 'props': []}  # ⭐ 统计各类型
+        filtered_by_distance = {'vehicles': 0, 'walkers': 0, 'props': 0}
 
-        print(f"\n[行人调试] ========== 开始填充Actor到体素 ==========")
+        print(f"\n[调试] ========== 开始填充Actor到体素 ==========")
 
         for actor in all_actors:
             # 距离粗筛
@@ -84,19 +85,16 @@ class GroundTruthVoxelGenerator:
 
             # ⭐ 调试：记录actor类型
             is_walker = 'walker.pedestrian' in actor.type_id.lower()
+            is_prop = 'static.prop' in actor.type_id.lower()
 
             if dist > 60.0: # 略大于 grid 半径
                 if is_walker:
                     filtered_by_distance['walkers'] += 1
-                    print(f"  [行人调试] ID={actor.id} 距离过远被跳过 (dist={dist:.1f}m > 60m)")
+                elif is_prop:
+                    filtered_by_distance['props'] += 1
                 else:
                     filtered_by_distance['vehicles'] += 1
                 continue
-
-            # ⭐ 行人调试：记录处理的行人
-            if is_walker:
-                loc = actor.get_location()
-                print(f"  [行人调试] ID={actor.id} 开始填充 (dist={dist:.1f}m, world_loc=({loc.x:.1f}, {loc.y:.1f}, {loc.z:.1f}))")
 
             self._fill_actor_bb(occupancy, actor_ids, actor, ego_matrix, is_ego=(actor.id == ego_vehicle.id))
             filled_actor_ids.append(actor.id)
@@ -104,11 +102,13 @@ class GroundTruthVoxelGenerator:
             # ⭐ 按类型统计
             if is_walker:
                 filled_by_type['walkers'].append(actor.id)
+            elif is_prop:
+                filled_by_type['props'].append(actor.id)
             else:
                 filled_by_type['vehicles'].append(actor.id)
 
-        print(f"[行人调试] ========== 填充完成 ==========")
-        print(f"[行人调试] 距离过滤: 车辆 {filtered_by_distance['vehicles']} 个, 行人 {filtered_by_distance['walkers']} 个")
+        print(f"[调试] ========== 填充完成 ==========")
+        print(f"[调试] 距离过滤: 车辆 {filtered_by_distance['vehicles']}, 行人 {filtered_by_distance['walkers']}, Props {filtered_by_distance['props']}")
 
         # 4. 填充自车
         self._fill_actor_bb(occupancy, actor_ids, ego_vehicle, ego_matrix, is_ego=True)
@@ -118,10 +118,24 @@ class GroundTruthVoxelGenerator:
         print(f"[体素生成]   车辆: {len(filled_by_type['vehicles'])}个, 行人: {len(filled_by_type['walkers'])}个")
 
         # 5. 可见性过滤 (如果提供了激光雷达数据)
-        if visibility_lidar_data is not None:
-            occupancy, actor_ids = self._apply_visibility_filter(
-                occupancy, actor_ids, visibility_lidar_data, world, ego_vehicle.id
-            )
+        # 检查配置是否启用过滤
+        from dense_occupancy_collection.config.occupancy_config import VISIBILITY_CONFIG
+        enable_filter = VISIBILITY_CONFIG.get('enable_visibility_filter', True)
+        
+        if enable_filter:
+            if visibility_lidar_data is not None:
+                occupancy, actor_ids = self._apply_visibility_filter(
+                    occupancy, actor_ids, visibility_lidar_data, world, ego_vehicle.id
+                )
+        else:
+            print("\n[调试模式] ⭐ 可见性过滤已禁用 (God Mode)")
+            print("[调试模式] 保留所有在范围内的体素，用于验证光栅化完整性")
+            # 即使在God Mode，我们仍然需要处理一下地面和天空？
+            # 不，既然是 God Mode，就是直接展示所有填充的体素。
+            # 但我们需要确保没有被填充的体素依然是 Air (0)
+            pass
+
+        # 6. Mask (Ground Truth is fully observed)
 
         # 6. Mask (Ground Truth is fully observed)
         mask = np.ones_like(occupancy)
@@ -281,6 +295,19 @@ class GroundTruthVoxelGenerator:
         
         # 感兴趣的静态物体类型映射
         # Label -> Occupancy Label
+        # 补充缺失的类型: 
+        #   Vegetation(9) -> 16
+        #   TrafficLight(18) -> 15
+        #   TrafficSign(12) -> 15
+        #   Pole(5) -> 15
+        #   Fence(2) -> 1
+        #   Wall(11) -> 15
+        #   Bridge(15) -> 2
+        #   Roads/Lines -> 11 (driveable_surface)
+        #   Sidewalks -> 13 (sidewalk)
+        #   Terrain -> 14 (terrain)
+        #   Ground/Water -> 12 (other_flat)
+        #   Static Vehicles -> 对应语义类 (Car->4, Truck->10, etc.)
         static_type_mapping = {
             carla.CityObjectLabel.Buildings: 15,      # manmade
             carla.CityObjectLabel.Fences: 1,          # barrier
@@ -292,13 +319,48 @@ class GroundTruthVoxelGenerator:
             carla.CityObjectLabel.Other: 17,          # general_object
             carla.CityObjectLabel.Static: 17,         # general_object
             carla.CityObjectLabel.Dynamic: 17,        # general_object
-            carla.CityObjectLabel.Bridge: 2,          # construction (bridge -> 2/15?) 映射为 manmade 或 barrier? 这里选 15
+            carla.CityObjectLabel.Bridge: 2,          # construction
             carla.CityObjectLabel.GuardRail: 1,       # barrier
             carla.CityObjectLabel.RailTrack: 17,      # general_object
+            
+            # ⭐ 补全缺失的环境物体
+            carla.CityObjectLabel.RoadLines: 11,      # driveable_surface
+            carla.CityObjectLabel.Roads: 11,          # driveable_surface
+            carla.CityObjectLabel.Sidewalks: 13,      # sidewalk
+            carla.CityObjectLabel.Terrain: 14,        # terrain
+            carla.CityObjectLabel.Ground: 12,         # other_flat
+            carla.CityObjectLabel.Water: 12,          # other_flat
+            
+            # ⭐ 静态停放车辆 (Environment Objects)
+            carla.CityObjectLabel.Car: 4,             # car
+            carla.CityObjectLabel.Truck: 10,          # truck
+            carla.CityObjectLabel.Bus: 3,             # bus
+            carla.CityObjectLabel.Motorcycle: 6,      # motorcycle
+            carla.CityObjectLabel.Bicycle: 2,         # bicycle -> 2(bicycle)? Occupancy label for bicycle is 2.
         }
         
         # 获取所有环境物体
         env_objs = world.get_environment_objects(carla.CityObjectLabel.Any)
+        
+        # 调试：统计环境物体类型
+        type_counts = {}
+        skipped_types = set()
+        
+        for obj in env_objs:
+            if obj.type not in type_counts:
+                type_counts[obj.type] = 0
+            type_counts[obj.type] += 1
+            
+            if obj.type not in static_type_mapping:
+                skipped_types.add(obj.type)
+
+        print(f"\n[调试] 环境物体统计 (总数: {len(env_objs)}):")
+        for t, count in type_counts.items():
+            mapped = "✓" if t in static_type_mapping else "✗ (未映射)"
+            print(f"  - {t}: {count} 个 {mapped}")
+            
+        if skipped_types:
+            print(f"[警告] 发现未映射的物体类型: {skipped_types}")
         
         # 预计算 Ego 逆矩阵
         try:
@@ -318,7 +380,10 @@ class GroundTruthVoxelGenerator:
             # 2. 距离过滤
             # obj.transform.location 是世界坐标
             dist = obj.transform.location.distance(ego_location)
-            if dist > 60.0:
+            
+            # ⭐ 关键修改：增加到 100m 以覆盖整个体素网格范围 (此前为 60m)
+            # 网格范围通常是 [-50, 50] 或类似，100m 足够覆盖对角线
+            if dist > 100.0:
                 continue
                 
             # 3. 获取 Bounding Box 顶点 (World Frame)
@@ -356,8 +421,16 @@ class GroundTruthVoxelGenerator:
             
             if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
                 continue
+
+            # ⭐ 安全检查：防止异常巨大的物体导致 meshgrid 爆内存/卡死
+            # 100x100x100 = 1,000,000 个体素点
+            # 如果某个物体过大（如天空盒或错误BBox），这里会卡住
+            total_voxels = (max_ix - min_ix) * (max_iy - min_iy) * (max_iz - min_iz)
+            if total_voxels > 2000000: # 限制最大处理 200万体素/物体
+                # print(f"[警告] 跳过过大物体 ID={obj.id} Name={obj.name} Voxels={total_voxels}")
+                continue
                 
-            # 6. OBB 光栅化
+            # 6. OBB 光栅化 (改进版：保守光栅化 Conservative Rasterization)
             # 生成 Ego Grid Points
             lx = np.linspace(self.x_range[0] + (min_ix + 0.5)*self.resolution, 
                              self.x_range[0] + (max_ix - 0.5)*self.resolution, max_ix - min_ix)
@@ -382,9 +455,25 @@ class GroundTruthVoxelGenerator:
             # World AABB Check
             # bb.location is World Center
             diff = np.abs(sub_points_world - np.array([bb.location.x, bb.location.y, bb.location.z]))
-            in_x = diff[:, 0] <= bb.extent.x
-            in_y = diff[:, 1] <= bb.extent.y
-            in_z = diff[:, 2] <= bb.extent.z
+            
+            # ⭐ 关键改进：保守光栅化 (Conservative Rasterization)
+            # 只要体素与物体有任何重叠，就应该被选中。
+            # 简单的"中心点检测"对于细小物体（如杆子）会失败，因为体素中心可能恰好在杆子外面。
+            # 解决方案：将检测盒 (Bounding Box) 扩大半个分辨率。
+            # 这样，只要体素中心距离物体表面在 resolution/2 以内（即体素体积与物体相交），就会被选中。
+            
+            # 默认 padding
+            padding = self.resolution * 0.6  # 稍微多一点点以防浮点误差
+            
+            # 优化：对于非常大的物体（如道路、地形），不需要这么激进的 padding，以节省性能并防止过度膨胀
+            # 如果 extent 很大，减少 padding
+            if max(bb.extent.x, bb.extent.y) > 2.0:
+                padding = 0.0 # 大物体不需要额外 padding，中心点足够
+            
+            # 对于细小物体（Pole/Sign），我们希望它是"实心"的
+            in_x = diff[:, 0] <= (bb.extent.x + padding)
+            in_y = diff[:, 1] <= (bb.extent.y + padding)
+            in_z = diff[:, 2] <= (bb.extent.z + padding)
             
             mask_in = in_x & in_y & in_z
             
@@ -450,26 +539,29 @@ class GroundTruthVoxelGenerator:
         if occ_label == 15:
             # 检查是否是细长物体（杆、标志杆等）
             # 特征：Z向很高，XY向很小
+            # ⭐ 关键修复：不要收缩细小物体，反而要确保最小尺寸
             if original_z > 2.0 and max(original_x, original_y) < 0.5:
-                # 杆状物体：使用圆柱近似，收缩到半径
-                radius = max(original_x, original_y) * 0.5  # 收缩50%
+                # 杆状物体：确保最小半径 >= resolution/2
+                min_radius = self.resolution * 0.6  # 稍微大一点点 (e.g. 0.12m)
+                radius = max(max(original_x, original_y), min_radius)
                 return radius, radius, original_z
 
             # 交通标志：通常是薄板 + 杆
-            # 特征：某一维度特别薄
-            min_dim = min(original_x, original_y, original_z)
-            if min_dim < 0.1:
-                # 保持薄维度，其他维度收缩70%
-                return (
-                    original_x * 0.7 if original_x > 0.1 else original_x,
-                    original_y * 0.7 if original_y > 0.1 else original_y,
-                    original_z * 0.7 if original_z > 0.1 else original_z
-                )
+            # ⭐ 关键修复：确保薄维度不小于分辨率的一半
+            min_dim_val = self.resolution * 0.6
+            return (
+                max(original_x, min_dim_val),
+                max(original_y, min_dim_val),
+                max(original_z, min_dim_val)
+            )
 
         # 8: traffic_cone (交通锥)
         elif occ_label == 8:
-            # 锥形物体：底部圆形，收缩XY向
-            return original_x * 0.6, original_y * 0.6, original_z * 0.9
+            # 锥形物体：底部圆形
+            # ⭐ 关键修复：确保最小尺寸
+            min_radius = self.resolution * 0.6
+            radius = max(max(original_x, original_y), min_radius)
+            return radius, radius, original_z
 
         # 1: barrier (隔离栏)
         elif occ_label == 1:
@@ -770,6 +862,7 @@ class GroundTruthVoxelGenerator:
         # 这里只关注 obj_idx == 0 的点，去“激活”静态物体
         dynamic_points_mask = points['obj_idx'] > 0
         static_points_ego = points_ego[~dynamic_points_mask]
+        static_tags = points['tag'][~dynamic_points_mask]  # ⭐ Extract Tags
         
         if len(static_points_ego) > 0:
             # 3.3 批量计算 Grid Indices (Vectorized)
@@ -785,6 +878,7 @@ class GroundTruthVoxelGenerator:
             valid_ix = ix[valid_mask]
             valid_iy = iy[valid_mask]
             valid_iz = iz[valid_mask]
+            valid_tags = static_tags[valid_mask]  # ⭐ Valid Tags
             
             # 3.5 查表获取 Hit Actor IDs
             if len(valid_ix) > 0:
@@ -793,15 +887,35 @@ class GroundTruthVoxelGenerator:
                 # 3.6 提取静态 ID (负数)
                 # 忽略 -1011/-1012/-1013 (Road/Ground/Sidewalk)，它们由 GROUND_LABELS 保护
                 # 我们主要关心 Buildings, Fences, Poles 等
-                # 其实只要是负数都加进去也没关系，反正 Ground 也是永久可见
-                hit_static_ids = hit_ids[hit_ids < 0]
+                static_mask = hit_ids < 0
+                hit_static_ids = hit_ids[static_mask]
+                hit_static_tags = valid_tags[static_mask]  # ⭐ Corresponding Tags
                 
-                unique_static_ids = np.unique(hit_static_ids)
+                # Sort to group by ID for counting and tag lookup
+                sort_idx = np.argsort(hit_static_ids)
+                sorted_ids = hit_static_ids[sort_idx]
+                sorted_tags = hit_static_tags[sort_idx]
                 
-                # 更新可见集合
-                visible_actor_ids_set.update(unique_static_ids.tolist())
+                unique_static_ids, start_indices = np.unique(sorted_ids, return_index=True)
+                end_indices = np.append(start_indices[1:], len(sorted_ids))
+                counts = end_indices - start_indices
+                rep_tags = sorted_tags[start_indices]
                 
-                print(f"[可见性过滤] 几何匹配到的静态物体数: {len(unique_static_ids)}")
+                count_visible = 0
+                for uid, count, tag in zip(unique_static_ids, counts, rep_tags):
+                    # Default threshold (Buildings, etc.)
+                    current_threshold = 100 
+                    
+                    # Small objects (Pole=5, Sign=12, Light=18, Fence=2, Rail=16, GuardRail=17)
+                    if tag in [5, 12, 18, 2, 16, 17]:
+                        current_threshold = 2
+                        
+                    if count >= current_threshold:
+                        visible_actor_ids_set.add(uid)
+                        count_visible += 1
+                        # print(f"[可见性过滤] ID={uid} (tag={tag}) 点数={count} >= {current_threshold} ✓")
+                
+                print(f"[可见性过滤] 几何匹配到的静态物体数: {count_visible}/{len(unique_static_ids)}")
 
         # 4. 创建可见性mask - ⭐⭐⭐ 新逻辑：用户指定的简单可见性规则 ⭐⭐⭐
         #
