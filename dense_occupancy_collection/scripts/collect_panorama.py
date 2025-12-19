@@ -18,7 +18,32 @@ from pathlib import Path
 try:
     # 优先添加 PythonAPI/carla
     # 这是 UE5.5 CARLA 0.10.0 的源码路径
-    sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'PythonAPI/carla'))
+    # sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'PythonAPI/carla'))
+    
+    # ⭐ 源码构建版: 直接添加编译好的 .whl 文件 (Python 3.10)
+    # 路径: d:\code\carla\Build\PythonAPI\dist\carla-0.10.0-cp310-cp310-win_amd64.whl
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    build_dist_path = os.path.join(project_root, 'Build', 'PythonAPI', 'dist')
+    
+    found_whl = False
+    if os.path.exists(build_dist_path):
+        for file in os.listdir(build_dist_path):
+            if file.endswith('.whl'):
+                whl_path = os.path.join(build_dist_path, file)
+                print(f"[Import] Found CARLA wheel: {whl_path}")
+                sys.path.append(whl_path)
+                found_whl = True
+                break
+    
+    if not found_whl:
+        # Fallback to source path if no wheel found (might fail if .pyd not there)
+        src_path = os.path.join(project_root, 'PythonAPI', 'carla')
+        print(f"[Import] No wheel found, adding source path: {src_path}")
+        sys.path.append(src_path)
+
+    # 添加 PythonAPI 目录以支持 agents
+    agents_path = os.path.join(project_root, 'PythonAPI', 'carla')
+    sys.path.append(agents_path)
     
     # 移除 dist 下的 egg 文件添加，避免加载到错误的 0.9.16 版本
     # carla_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'PythonAPI/carla/dist')
@@ -44,7 +69,7 @@ from dense_occupancy_collection.processing.ground_truth_voxel_generator import G
 # from dense_occupancy_collection.processing.lidar_voxel_generator import LidarVoxelGenerator
 from dense_occupancy_collection.config.occupancy_config import (
     X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION, CARLA_TO_OCCUPANCY_MAPPING,
-    VISIBILITY_LIDAR_CONFIG  # ⭐ 新增：512线激光雷达配置
+    VISIBILITY_LIDAR_CONFIG, VISIBILITY_CONFIG, DEPTH_CAMERA_CONFIG  # ⭐ 新增配置
 )
 
 IMAGE_WIDTH = 1280
@@ -155,6 +180,77 @@ from dense_occupancy_collection.processing.ground_truth_voxel_generator import G
 from dense_occupancy_collection.processing.lidar_voxel_generator import LidarVoxelGenerator
 
 import queue
+
+
+class DepthCameraManager:
+    """管理6路 Cube Map 深度相机"""
+    def __init__(self, world, vehicle):
+        self.world = world
+        self.vehicle = vehicle
+        self.cameras = []
+        self.queues = {}
+        self.blueprint = self._setup_blueprint()
+        self._spawn_cameras()
+        
+    def _setup_blueprint(self):
+        bp = self.world.get_blueprint_library().find('sensor.camera.depth')
+        bp.set_attribute('image_size_x', str(DEPTH_CAMERA_CONFIG['width']))
+        bp.set_attribute('image_size_y', str(DEPTH_CAMERA_CONFIG['height']))
+        bp.set_attribute('fov', str(DEPTH_CAMERA_CONFIG['fov']))
+        return bp
+        
+    def _spawn_cameras(self):
+        print(f"\n[DepthCamera] 正在创建 6 路深度相机 (Cube Map)...")
+        for cam_conf in DEPTH_CAMERA_CONFIG['cameras']:
+            transform = carla.Transform(
+                carla.Location(**cam_conf['pos']),
+                carla.Rotation(**cam_conf['rot'])
+            )
+            sensor = self.world.spawn_actor(self.blueprint, transform, attach_to=self.vehicle)
+            q = queue.Queue()
+            sensor.listen(q.put)
+            
+            self.cameras.append(sensor)
+            self.queues[cam_conf['id']] = q
+            print(f"  - {cam_conf['id']} created")
+            
+    def get_data(self, timeout=2.0):
+        """获取所有深度图和相机变换"""
+        depth_maps = []
+        cam_transforms = []
+        
+        # 必须按顺序获取: Front, Right, Back, Left, Up, Down
+        cam_ids = [c['id'] for c in DEPTH_CAMERA_CONFIG['cameras']]
+        
+        for cid in cam_ids:
+            try:
+                image = self.queues[cid].get(timeout=timeout)
+                
+                # Decode Depth
+                # format: BGRA, float32
+                array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+                array = np.reshape(array, (image.height, image.width, 4))
+                
+                # (R + G*256 + B*256*256) / (256**3 - 1) * 1000
+                normalized = (array[:,:,2] + array[:,:,1]*256.0 + array[:,:,0]*256.0*256.0) / (256.0**3 - 1)
+                depth_meters = normalized * 1000.0
+                
+                depth_maps.append(depth_meters)
+                cam_transforms.append(image.transform.get_matrix())
+                
+            except queue.Empty:
+                print(f"[Error] Depth camera {cid} timeout")
+                return None
+                
+        return {
+            'depth_maps': np.stack(depth_maps), # (6, H, W)
+            'cam_transforms': np.stack(cam_transforms) # (6, 4, 4)
+        }
+        
+    def destroy(self):
+        for cam in self.cameras:
+            if cam.is_alive:
+                cam.destroy()
 
 
 def parse_args():
@@ -513,7 +609,7 @@ def main():
     world = None
     vehicle = None
     rgb_manager = None
-    # pano_manager = None
+    depth_manager = None
     lidar_sensor = None
     traffic_actors = []
 
@@ -581,9 +677,15 @@ def main():
         # 2. 全景相机 (CubeMap: 6个深度 + 6个语义)
         # pano_manager = PanoramaSensorManager(world, vehicle)
 
-        # 3. 512线语义激光雷达（用于可见性检测）
-        lidar_sensor = SemanticLidarSensor(world, vehicle, config=VISIBILITY_LIDAR_CONFIG)
-        lidar_sensor.listen_to_queue()
+        # 3. 可见性传感器 (LiDAR 或 Depth Camera)
+        filter_mode = VISIBILITY_CONFIG.get('filter_mode', 'lidar')
+        print(f"\n[Visibility] 使用过滤模式: {filter_mode}")
+
+        if filter_mode == 'lidar':
+            lidar_sensor = SemanticLidarSensor(world, vehicle, config=VISIBILITY_LIDAR_CONFIG)
+            lidar_sensor.listen_to_queue()
+        elif filter_mode == 'depth_camera':
+            depth_manager = DepthCameraManager(world, vehicle)
 
         # 等待传感器初始化
         print("\n⏳ 等待传感器初始化...", flush=True)
@@ -635,30 +737,35 @@ def main():
             #     print(f"⚠ 全景数据超时，跳过帧 {frame_idx}")
             #     continue
 
-            # 获取64线LiDAR数据（同时用于保存点云和可见性过滤）
-            visibility_lidar_data = None
+            # 获取可见性数据
+            visibility_data = None
             lidar_timestamp = 0.0
-            try:
-                lidar_data_dict = lidar_sensor.data_queue.get(timeout=2.0)
-                lidar_raw = lidar_data_dict['raw_data']
-                lidar_timestamp = lidar_data_dict['timestamp']
-                lidar_points, lidar_labels = lidar_sensor.parse_lidar_data(lidar_raw)
 
-                # 保存LiDAR点云数据
-                lidar_save_path = lidar_dir / f"{frame_idx:06d}.npz"
-                np.savez_compressed(
-                    lidar_save_path,
-                    points=lidar_points,
-                    labels=lidar_labels
-                )
-                # print(f"   ✓ LiDAR数据已保存")
+            if filter_mode == 'lidar':
+                try:
+                    lidar_data_dict = lidar_sensor.data_queue.get(timeout=2.0)
+                    lidar_raw = lidar_data_dict['raw_data']
+                    lidar_timestamp = lidar_data_dict['timestamp']
+                    lidar_points, lidar_labels = lidar_sensor.parse_lidar_data(lidar_raw)
 
-                # ⭐ 保存原始数据用于可见性过滤
-                visibility_lidar_data = lidar_raw
-
-            except queue.Empty:
-                print(f"⚠ LiDAR数据超时，跳过帧 {frame_idx}")
-                continue
+                    # 保存LiDAR点云数据
+                    lidar_save_path = lidar_dir / f"{frame_idx:06d}.npz"
+                    np.savez_compressed(
+                        lidar_save_path,
+                        points=lidar_points,
+                        labels=lidar_labels
+                    )
+                    
+                    visibility_data = lidar_raw
+                except queue.Empty:
+                    print(f"⚠ LiDAR数据超时，跳过帧 {frame_idx}")
+                    continue
+            
+            elif filter_mode == 'depth_camera':
+                visibility_data = depth_manager.get_data()
+                if visibility_data is None:
+                    print(f"⚠ Depth Camera数据超时，跳过帧 {frame_idx}")
+                    continue
 
             # 保存RGB图像 (8-bit)
             print(f"   [DEBUG] Saving RGB images...", flush=True)
@@ -700,12 +807,10 @@ def main():
 
             # print(f"   ✓ 全景语义图已保存")
 
-            # ⭐ 64线激光雷达数据已在上面获取，visibility_lidar_data变量已设置
-
             # 生成体素 (Ground Truth 方案 + 可见性过滤)
-            # ⭐ 传入激光雷达数据进行可见性过滤
+            # 传入 visibility_data (可能是 LiDAR RawData 或 Depth Map Dict)
             occupancy, actor_ids, mask = voxel_generator.generate(
-                world, vehicle, visibility_lidar_data=visibility_lidar_data
+                world, vehicle, visibility_data=visibility_data
             )
 
             voxel_stats = voxel_generator.get_statistics(occupancy, mask)
@@ -741,8 +846,8 @@ def main():
 
         if rgb_manager:
             rgb_manager.destroy()
-        # if pano_manager:
-        #     pano_manager.destroy()
+        if depth_manager:
+            depth_manager.destroy()
         if lidar_sensor:
             lidar_sensor.destroy()
         if vehicle:

@@ -10,7 +10,7 @@ import urllib.parse
 import mimetypes
 
 # 配置
-PORT = 8000
+PORT = 8085
 VIEWER_DIR = Path(__file__).parent.absolute()
 DATA_DIR = Path(r"d:\code\carla\dataset_output\occupancy")
 

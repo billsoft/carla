@@ -49,14 +49,34 @@ VISIBILITY_LIDAR_CONFIG = {
     'horizontal_fov': 360.0
 }
 
+# ⭐ 6路 Cube Map 深度相机配置 (用于高精度可见性过滤)
+# Front, Right, Back, Left, Up, Down
+# ⭐ 高度统一为 Z=2.2m (透波且不被车身遮挡)
+# ⭐ 垂直 FOV 调整为 60 度 (上30, 下30) 以匹配特斯拉方案
+DEPTH_CAMERA_CONFIG = {
+    'width': 512,
+    'height': 512,
+    'fov': 60.0,  # 垂直 60度
+    'cameras': [
+        {'id': 'depth_front', 'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 0, 'roll': 0}},
+        {'id': 'depth_right', 'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 90, 'roll': 0}},
+        {'id': 'depth_back',  'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 180, 'roll': 0}},
+        {'id': 'depth_left',  'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': -90, 'roll': 0}},
+        {'id': 'depth_up',    'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 90, 'yaw': 0, 'roll': 0}},
+        {'id': 'depth_down',  'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': -90, 'yaw': 0, 'roll': 0}}
+    ]
+}
+
 # 可见性过滤配置
 VISIBILITY_CONFIG = {
-    # 是否启用激光雷达可见性过滤
-    # True: 仅保留激光雷达扫到的体素 (模拟真实感知)
-    # False: 保留所有视锥内的体素 (上帝视角，用于调试光栅化是否完整)
-    'enable_visibility_filter': False,  # ⭐ 暂时关闭过滤，先验证光栅化是否完整
+    # 是否启用可见性过滤
+    'enable_visibility_filter': True,
+    
+    # 过滤模式: 'lidar' 或 'depth_camera'
+    'filter_mode': 'depth_camera',  # ⭐ 切换到深度相机模式
     
     'sensor_config': VISIBILITY_LIDAR_CONFIG,
+    'depth_config': DEPTH_CAMERA_CONFIG,
     'min_points_threshold': 5
 }
 
