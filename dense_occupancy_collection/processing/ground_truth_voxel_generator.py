@@ -276,22 +276,29 @@ class GroundTruthVoxelGenerator:
             actor_ids[ix_base:ix_end, iy_base:iy_end, :gz_max] = -1013  # 人行道虚拟ID
             
         # --- B. 静态物体 (建筑物, 交通标志, 杆等) ---
-        # 使用 world.get_level_bbs() 获取地图中的静态物体 BoundingBox
-        # 这可能返回大量数据，需要距离过滤
+        # 使用 world.get_environment_objects() 获取更详细的静态物体信息 (ID, Transform, BBox)
+        # 替代旧的 get_level_bbs，以支持实例级可见性过滤
         
-        # 感兴趣的静态物体类型
-        static_types = [
-            (carla.CityObjectLabel.Buildings, 15),      # Building -> manmade (15)
-            (carla.CityObjectLabel.Fences, 1),          # Fence -> barrier (1)
-            (carla.CityObjectLabel.TrafficLight, 15),   # TrafficLight -> manmade (15)
-            (carla.CityObjectLabel.TrafficSigns, 15),   # TrafficSign -> manmade (15)
-            (carla.CityObjectLabel.Poles, 15),          # Poles -> manmade (15)
-            (carla.CityObjectLabel.Vegetation, 16),     # Vegetation -> vegetation (16)
-            (carla.CityObjectLabel.Walls, 15),          # Walls -> manmade (15)
-            (carla.CityObjectLabel.Other, 17),          # Other -> general_object (17)
-            (carla.CityObjectLabel.Static, 17),         # Static -> general_object (17)
-            (carla.CityObjectLabel.Dynamic, 17),        # Dynamic -> general_object (17)
-        ]
+        # 感兴趣的静态物体类型映射
+        # Label -> Occupancy Label
+        static_type_mapping = {
+            carla.CityObjectLabel.Buildings: 15,      # manmade
+            carla.CityObjectLabel.Fences: 1,          # barrier
+            carla.CityObjectLabel.TrafficLight: 15,   # manmade
+            carla.CityObjectLabel.TrafficSigns: 15,   # manmade
+            carla.CityObjectLabel.Poles: 15,          # manmade
+            carla.CityObjectLabel.Vegetation: 16,     # vegetation
+            carla.CityObjectLabel.Walls: 15,          # manmade
+            carla.CityObjectLabel.Other: 17,          # general_object
+            carla.CityObjectLabel.Static: 17,         # general_object
+            carla.CityObjectLabel.Dynamic: 17,        # general_object
+            carla.CityObjectLabel.Bridge: 2,          # construction (bridge -> 2/15?) 映射为 manmade 或 barrier? 这里选 15
+            carla.CityObjectLabel.GuardRail: 1,       # barrier
+            carla.CityObjectLabel.RailTrack: 17,      # general_object
+        }
+        
+        # 获取所有环境物体
+        env_objs = world.get_environment_objects(carla.CityObjectLabel.Any)
         
         # 预计算 Ego 逆矩阵
         try:
@@ -299,155 +306,123 @@ class GroundTruthVoxelGenerator:
         except np.linalg.LinAlgError:
             return
 
-        for city_label, occ_label in static_types:
-            bbs = world.get_level_bbs(city_label)
+        count_filled = 0
+        
+        for i, obj in enumerate(env_objs):
+            # 1. 类型过滤
+            if obj.type not in static_type_mapping:
+                continue
+                
+            occ_label = static_type_mapping[obj.type]
             
-            for bb in bbs:
-                # bb.location 是世界坐标 (因为是 Level BB)
-                # 距离粗筛
-                dist = bb.location.distance(ego_location)
-                if dist > 60.0:
-                    continue
+            # 2. 距离过滤
+            # obj.transform.location 是世界坐标
+            dist = obj.transform.location.distance(ego_location)
+            if dist > 60.0:
+                continue
                 
-                # Level BB 的 rotation 也是世界坐标
-                # 我们需要构建一个假的 Actor 或者是直接用 BB 属性
-                # carla.BoundingBox 没有 get_transform() 方法
-                # get_world_vertices(transform) 需要传入 Transform
-                # 对于 Level BB，它们是 Axis Aligned 还是有 Rotation? 
-                # 文档说 Level BB 是 world coordinates.
-                # get_level_bbs returns list of carla.BoundingBox.
-                # 但 BoundingBox 自身只包含 local location 和 extent.
-                # 实际上对于 Level Objects，CARLA API 有点模糊。
-                # 通常 Level BB 是 AABB (Axis Aligned in World) 或者 OBB。
-                # get_level_bbs 返回的 BB，其 location 是世界坐标中心。
-                # 但是 rotation 呢？carla.BoundingBox 包含 rotation 吗？
-                # 0.9.10+ BoundingBox 有 rotation 属性吗？
-                # 查阅 API: BoundingBox(location, extent). No rotation.
-                # 这意味着 get_level_bbs 返回的通常是 AABB (Axis Aligned Bounding Box) 或者是已经变换过的？
-                # 实际上，get_level_bbs 返回的是局部坐标系的 BB 吗？
-                # 不，它是 "Bounding boxes of all the objects of a certain type in the level."
-                # 实际上，我们需要 Transform 才能确定位置。
-                # 但是 get_level_bbs 只返回 BB。
-                # 这是一个已知的 CARLA API 痛点。通常 Level BB 是假定 Rotation=(0,0,0) 的 AABB？
-                # 或者它们其实是 "World Space AABB"。
-                # 如果是 World Space AABB，那么 rotation=Identity, location=WorldCenter.
+            # 3. 获取 Bounding Box 顶点 (World Frame)
+            # 经过调试发现：UE5 CARLA 0.10.0 中，EnvironmentObject.bounding_box 已经是世界坐标 (World Space AABB)
+            # 与 get_level_bbs 返回的一致。
+            # 因此，不能再应用 obj.transform，否则会导致双重变换（物体飞到天上或消失）
+            bb = obj.bounding_box
+            
+            # 使用 Identity Transform 获取世界顶点 (因为 BB 已经是 World AABB)
+            verts_world = bb.get_world_vertices(carla.Transform())
+            
+            # 4. 转换到 Ego Frame
+            verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
+            verts_ego_np = ego_matrix_inv @ verts_world_np
+            
+            xs_ego = verts_ego_np[0, :]
+            ys_ego = verts_ego_np[1, :]
+            zs_ego = verts_ego_np[2, :]
+            
+            # 5. 计算 Grid 范围
+            min_ix = int(np.floor((np.min(xs_ego) - self.x_range[0]) / self.resolution))
+            max_ix = int(np.ceil((np.max(xs_ego) - self.x_range[0]) / self.resolution))
+            min_iy = int(np.floor((np.min(ys_ego) - self.y_range[0]) / self.resolution))
+            max_iy = int(np.ceil((np.max(ys_ego) - self.y_range[0]) / self.resolution))
+            min_iz = int(np.floor((np.min(zs_ego) - self.z_range[0]) / self.resolution))
+            max_iz = int(np.ceil((np.max(zs_ego) - self.z_range[0]) / self.resolution))
+            
+            # Clip
+            min_ix = max(0, min_ix)
+            max_ix = min(self.grid_size[0], max_ix)
+            min_iy = max(0, min_iy)
+            max_iy = min(self.grid_size[1], max_iy)
+            min_iz = max(0, min_iz)
+            max_iz = min(self.grid_size[2], max_iz)
+            
+            if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
+                continue
                 
-                # 让我们假设它是 World Space AABB。
-                # Construct a transform for the BB
-                # bb_transform = carla.Transform(bb.location, carla.Rotation(0,0,0))
-                # 但是 bb.location 是 center。
-                # extent 是半长。
-                
-                # 如果是 AABB，我们不需要复杂的旋转变换
-                # 直接转换 min/max 到 ego 坐标系 (带旋转)
-                
-                # 世界坐标系下的 8 个顶点
-                # min_v = bb.location - bb.extent
-                # max_v = bb.location + bb.extent
-                # 这只有在它是 AABB 时才成立。
-                
-                # 假设 Rotation=0 (AABB)
-                # bb_transform = carla.Transform(carla.Location(0,0,0), carla.Rotation(0,0,0))
-                # verts = bb.get_world_vertices(bb_transform) # 这会加上 bb.location?
-                # 不，get_world_vertices(tf): result = tf * (local_verts + bb.location)
-                # 如果 bb.location 已经是世界坐标，那么 tf 应该是 Identity?
-                # 实际上 get_level_bbs 返回的 BB，location 是世界坐标。
-                # 所以我们用 Identity Transform 来获取顶点
-                
-                identity_tf = carla.Transform() # (0,0,0), (0,0,0)
-                # 但是 bb.location 是 center。
-                # get_world_vertices 会做: point = transform.location + transform.rotation * (bb.location + extent * sign)
-                # 如果 transform 是 identity: point = bb.location + extent * sign
-                # 这正是我们想要的 World AABB vertices。
-                
-                verts_world = bb.get_world_vertices(identity_tf)
-                
-                # 现在有了 8 个世界坐标点，转换到 Ego 坐标系
-                verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
-                verts_ego_np = ego_matrix_inv @ verts_world_np
-                
-                xs_ego = verts_ego_np[0, :]
-                ys_ego = verts_ego_np[1, :]
-                zs_ego = verts_ego_np[2, :]
-                
-                # 找出 Grid 范围
-                min_ix = int(np.floor((np.min(xs_ego) - self.x_range[0]) / self.resolution))
-                max_ix = int(np.ceil((np.max(xs_ego) - self.x_range[0]) / self.resolution))
-                min_iy = int(np.floor((np.min(ys_ego) - self.y_range[0]) / self.resolution))
-                max_iy = int(np.ceil((np.max(ys_ego) - self.y_range[0]) / self.resolution))
-                min_iz = int(np.floor((np.min(zs_ego) - self.z_range[0]) / self.resolution))
-                max_iz = int(np.ceil((np.max(zs_ego) - self.z_range[0]) / self.resolution))
-                
-                # Clip
-                min_ix = max(0, min_ix)
-                max_ix = min(self.grid_size[0], max_ix)
-                min_iy = max(0, min_iy)
-                max_iy = min(self.grid_size[1], max_iy)
-                min_iz = max(0, min_iz)
-                max_iz = min(self.grid_size[2], max_iz)
-                
-                if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
-                    continue
-                
-                # 对于静态物体 (通常是长方体)，我们简单地填充其 3D 边界框覆盖的范围
-                # 由于它们是 AABB (World)，转到 Ego 后可能是 OBB
-                # 我们需要做 OBB 检查
-                
-                # 优化：对于建筑物等大物体，直接填充整个 Bounding Box 覆盖的范围 (Rasterize)
-                # 检查每个体素中心是否在 OBB 内
-                
-                # OBB Check: Point P in Box?
-                # Box is AABB in World Frame.
-                # So just check if P_world is in [min_world, max_world]
-                
-                # 生成 Ego Grid Points
-                lx = np.linspace(self.x_range[0] + (min_ix + 0.5)*self.resolution, 
-                                 self.x_range[0] + (max_ix - 0.5)*self.resolution, max_ix - min_ix)
-                ly = np.linspace(self.y_range[0] + (min_iy + 0.5)*self.resolution, 
-                                 self.y_range[0] + (max_iy - 0.5)*self.resolution, max_iy - min_iy)
-                lz = np.linspace(self.z_range[0] + (min_iz + 0.5)*self.resolution, 
-                                 self.z_range[0] + (max_iz - 0.5)*self.resolution, max_iz - min_iz)
-                
-                sub_xv, sub_yv, sub_zv = np.meshgrid(lx, ly, lz, indexing='ij')
-                sub_points_ego = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
-                
-                # Transform Ego -> World
-                # P_world = T_ego * P_ego
-                sub_points_world_h = sub_points_ego @ ego_matrix.T
-                sub_points_world = sub_points_world_h[:, :3]
-                
-                # Check AABB in World
-                # bb.contains(point, transform=Identity) works for AABB?
-                # Yes, if we use Identity transform.
-                # Or manual check: abs(p - center) < extent
-                
-                diff = np.abs(sub_points_world - np.array([bb.location.x, bb.location.y, bb.location.z]))
-                in_x = diff[:, 0] <= bb.extent.x
-                in_y = diff[:, 1] <= bb.extent.y
-                in_z = diff[:, 2] <= bb.extent.z
-                
-                mask_in = in_x & in_y & in_z
-                
-                if not np.any(mask_in):
-                    continue
-                
-                # Fill
-                nx, ny, nz = max_ix - min_ix, max_iy - min_iy, max_iz - min_iz
-                mask_reshaped = mask_in.reshape(nx, ny, nz)
-                
-                roi = occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
-                roi_ids = actor_ids[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
-
-                # 为静态物体分配虚拟Actor ID（使用负数+类别标签）
-                # 例如：Buildings都使用 -15，Vegetation都使用 -16
-                # 这样同类型的静态物体会被视为一个整体
-                virtual_actor_id = -(occ_label + 1000)  # 负数区分，避免与真实actor.id冲突
-
-                roi[mask_reshaped] = occ_label
-                roi_ids[mask_reshaped] = virtual_actor_id  # ⭐ 记录虚拟Actor ID
-
-                occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi
-                actor_ids[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi_ids
+            # 6. OBB 光栅化
+            # 生成 Ego Grid Points
+            lx = np.linspace(self.x_range[0] + (min_ix + 0.5)*self.resolution, 
+                             self.x_range[0] + (max_ix - 0.5)*self.resolution, max_ix - min_ix)
+            ly = np.linspace(self.y_range[0] + (min_iy + 0.5)*self.resolution, 
+                             self.y_range[0] + (max_iy - 0.5)*self.resolution, max_iy - min_iy)
+            lz = np.linspace(self.z_range[0] + (min_iz + 0.5)*self.resolution, 
+                             self.z_range[0] + (max_iz - 0.5)*self.resolution, max_iz - min_iz)
+            
+            sub_xv, sub_yv, sub_zv = np.meshgrid(lx, ly, lz, indexing='ij')
+            sub_points_ego = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
+            
+            # Ego -> World -> Local
+            # T_obj_inv * T_ego * P_ego
+            # 注意：由于 bb 已经是 World AABB，我们不需要转换到 Local Object Space
+            # 我们只需要检查 World Points 是否在 World AABB 内
+            # 也就是检查 abs(P_world - BB_Center) <= BB_Extent
+            
+            # Ego -> World
+            sub_points_world_h = sub_points_ego @ ego_matrix.T
+            sub_points_world = sub_points_world_h[:, :3]
+            
+            # World AABB Check
+            # bb.location is World Center
+            diff = np.abs(sub_points_world - np.array([bb.location.x, bb.location.y, bb.location.z]))
+            in_x = diff[:, 0] <= bb.extent.x
+            in_y = diff[:, 1] <= bb.extent.y
+            in_z = diff[:, 2] <= bb.extent.z
+            
+            mask_in = in_x & in_y & in_z
+            
+            if not np.any(mask_in):
+                continue
+            
+            # 7. 填充并应用地面保护
+            nx, ny, nz = max_ix - min_ix, max_iy - min_iy, max_iz - min_iz
+            mask_reshaped = mask_in.reshape(nx, ny, nz)
+            
+            roi = occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
+            roi_ids = actor_ids[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
+            
+            # =========================================================
+            # FIX: 地面保护机制 (Ground Protection for Static Objects)
+            # =========================================================
+            GROUND_LABELS = [11, 12, 13, 14]
+            is_ground = np.isin(roi, GROUND_LABELS)
+            final_mask = mask_reshaped & (~is_ground)
+            
+            if not np.any(final_mask):
+                continue
+            
+            # 8. 分配唯一虚拟 ID
+            # 使用 obj.id 会导致 int32 溢出 (CARLA EnvironmentObject ID 是 64位哈希)
+            # 这里使用枚举索引生成唯一的小整数 ID
+            # 加上 10000 偏移量，避免与潜在的小负数 ID 冲突
+            virtual_id = -(i + 10000)
+            
+            roi[final_mask] = occ_label
+            roi_ids[final_mask] = virtual_id
+            
+            occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi
+            actor_ids[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi_ids
+            
+            count_filled += 1
+            
+        print(f"[体素生成] 已填充静态环境物体: {count_filled} 个")
                 
         # --- C. 记录未映射物体 (Debug) ---
         # 记录每帧遇到的 CityObjectLabel 类型和 Actor 类型
@@ -678,8 +653,26 @@ class GroundTruthVoxelGenerator:
         roi = occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
         roi_ids = actor_ids_grid[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
 
-        roi[mask_reshaped] = occ_label
-        roi_ids[mask_reshaped] = current_actor_id  # ⭐ 记录Actor ID
+        # =========================================================
+        # FIX: 地面保护机制 (Ground Protection)
+        # 禁止 Actor BBox 覆盖已经是地面的体素
+        # 解决 BBox 侵入地下导致地面出现"坑洞"的问题
+        # =========================================================
+        # 地面相关标签: 11(driveable), 12(other_flat), 13(sidewalk), 14(terrain)
+        GROUND_LABELS = [11, 12, 13, 14]
+        
+        # 检查 ROI 区域内原本是否已经是地面
+        is_ground = np.isin(roi, GROUND_LABELS)
+        
+        # 最终掩码：在 BBox 范围内 且 原本不是地面
+        # 这样即使 BBox 插入地下，也不会破坏地面体素
+        final_mask = mask_reshaped & (~is_ground)
+        
+        if not np.any(final_mask):
+            return
+
+        roi[final_mask] = occ_label
+        roi_ids[final_mask] = current_actor_id  # ⭐ 记录Actor ID
 
         occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi
         actor_ids_grid[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi_ids
@@ -759,61 +752,56 @@ class GroundTruthVoxelGenerator:
         #   2. 大型静态物体（建筑、植被、墙）→ **不添加到可见集合**，让后续逻辑过滤
         #   3. 小型静态物体（杆、标志、围栏）→ 基于点云密度判断
 
-        tag_to_virtual_id = {
-            # 道路相关（不处理，后续通过occupancy类型保护）
-            # 6: -1011,   # RoadLine (tag=6) → 道路虚拟ID
-            # 7: -1011,   # Road (tag=7) → 道路虚拟ID
-            # 8: -1013,   # SideWalk (tag=8) → 人行道虚拟ID
+        # 3. 处理静态环境（基于几何的点云匹配）
+        # ⭐ 核心改进：解决静态物体无法区分实例的问题
+        # 方法：
+        #   1. 将 LiDAR 点云转换到 Ego 坐标系（体素网格坐标系）
+        #   2. 计算点云落在哪个体素中
+        #   3. 查询该体素当前的 actor_id
+        #   4. 如果 ID 是静态物体（负数），则认为该静态物体可见
+        
+        # 3.1 坐标转换 Sensor -> Ego
+        # Sensor 安装在 (0, 0, 1.5)，即 z += 1.5
+        points_xyz = np.stack([points['x'], points['y'], points['z']], axis=-1)
+        points_ego = points_xyz + np.array([0.0, 0.0, 1.5]) 
 
-            # 地面/地形（不处理，后续通过occupancy类型保护）
-            # 14: -1012,  # Ground (tag=14) → other_flat(12)
-            # 21: -1012,  # Water (tag=21) → other_flat(12)
-            # 22: -1014,  # Terrain (tag=22) → terrain(14)
-
-            # 建筑物、墙、植被（不添加，需要被过滤）
-            # 1: -1015,   # Building (tag=1) → 不添加，让遮挡的建筑被过滤
-            # 11: -1015,  # Wall (tag=11) → 不添加
-            # 9: -1016,   # Vegetation (tag=9) → 不添加
-
-            # 小型人造物体（需要点云密度判断）
-            5: -1015,   # Pole (tag=5) → Poles → manmade(15) → -1015
-            12: -1015,  # TrafficSign (tag=12) → TrafficSigns → manmade(15) → -1015
-            18: -1015,  # TrafficLight (tag=18) → TrafficLight → manmade(15) → -1015
-
-            # 围栏/栏杆（需要点云密度判断）
-            2: -1001,   # Fence (tag=2) → Fences → barrier(1) → -1001
-            16: -1001,  # RailTrack (tag=16) → barrier(1) → -1001
-            17: -1001,  # GuardRail (tag=17) → barrier(1) → -1001
-
-            # 其他
-            3: -1017,   # Other (tag=3) → Other → general_object(17) → -1017
-            19: -1017,  # Static (tag=19) → Static → general_object(17) → -1017
-            20: -1017,  # Dynamic (tag=20) → Dynamic → general_object(17) → -1017
-
-            # 桥梁
-            15: -1002,  # Bridge (tag=15) → construction(2) → -1002
-        }
-
-        # 提取obj_idx=0的点的tag，并统计每个tag的点数
-        static_points = points[points['obj_idx'] == 0]
-        if len(static_points) > 0:
-            unique_tags, tag_counts = np.unique(static_points['tag'], return_counts=True)
-            print(f"[可见性过滤] 扫到的静态环境tag: {sorted(list(unique_tags))}")
-
-            # ⭐ 基于点云密度判断静态物体可见性（阈值100点）
-            # 小型物体（杆、标志）需要足够的点数才认为可见
-            STATIC_MIN_POINTS = 100  # 静态物体至少100点
-
-            for tag, count in zip(unique_tags, tag_counts):
-                if tag in tag_to_virtual_id:
-                    if count >= STATIC_MIN_POINTS:
-                        virtual_id = tag_to_virtual_id[tag]
-                        visible_actor_ids_set.add(virtual_id)
-                        print(f"[可见性过滤]   tag={tag} → virtual_id={virtual_id}, 点数={count} ✓")
-                    else:
-                        print(f"[可见性过滤]   tag={tag} 点数不足({count}<{STATIC_MIN_POINTS}) ✗")
-
-            print(f"[可见性过滤] 保留的静态虚拟IDs: {sorted([x for x in visible_actor_ids_set if x < 0])}")
+        # 3.2 提取静态点 (obj_idx == 0)
+        # 其实所有点都可以用来 check，防止动态物体漏检，但动态物体已经由 obj_idx 处理了
+        # 这里只关注 obj_idx == 0 的点，去“激活”静态物体
+        dynamic_points_mask = points['obj_idx'] > 0
+        static_points_ego = points_ego[~dynamic_points_mask]
+        
+        if len(static_points_ego) > 0:
+            # 3.3 批量计算 Grid Indices (Vectorized)
+            ix = np.floor((static_points_ego[:, 0] - self.x_range[0]) / self.resolution).astype(int)
+            iy = np.floor((static_points_ego[:, 1] - self.y_range[0]) / self.resolution).astype(int)
+            iz = np.floor((static_points_ego[:, 2] - self.z_range[0]) / self.resolution).astype(int)
+            
+            # 3.4 过滤有效范围内的点
+            valid_mask = (ix >= 0) & (ix < self.grid_size[0]) & \
+                         (iy >= 0) & (iy < self.grid_size[1]) & \
+                         (iz >= 0) & (iz < self.grid_size[2])
+            
+            valid_ix = ix[valid_mask]
+            valid_iy = iy[valid_mask]
+            valid_iz = iz[valid_mask]
+            
+            # 3.5 查表获取 Hit Actor IDs
+            if len(valid_ix) > 0:
+                hit_ids = actor_ids[valid_ix, valid_iy, valid_iz]
+                
+                # 3.6 提取静态 ID (负数)
+                # 忽略 -1011/-1012/-1013 (Road/Ground/Sidewalk)，它们由 GROUND_LABELS 保护
+                # 我们主要关心 Buildings, Fences, Poles 等
+                # 其实只要是负数都加进去也没关系，反正 Ground 也是永久可见
+                hit_static_ids = hit_ids[hit_ids < 0]
+                
+                unique_static_ids = np.unique(hit_static_ids)
+                
+                # 更新可见集合
+                visible_actor_ids_set.update(unique_static_ids.tolist())
+                
+                print(f"[可见性过滤] 几何匹配到的静态物体数: {len(unique_static_ids)}")
 
         # 4. 创建可见性mask - ⭐⭐⭐ 新逻辑：用户指定的简单可见性规则 ⭐⭐⭐
         #
