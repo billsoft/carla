@@ -133,26 +133,26 @@ OCCUPANCY_LABELS = [
 ]
 
 # 可视化颜色映射 (RGB)
-# 尝试匹配常见标准
+# 适配 nuScenes / OpenOccupancy 标准
 OCCUPANCY_COLORS = [
     (0, 0, 0),        # 0: free
-    (200, 200, 200),  # 1: barrier
-    (128, 128, 0),    # 2: bicycle
-    (0, 0, 128),      # 3: bus
-    (0, 128, 0),      # 4: car
-    (128, 0, 128),    # 5: construction_vehicle
-    (128, 0, 0),      # 6: motorcycle
-    (255, 0, 0),      # 7: pedestrian
-    (255, 165, 0),    # 8: traffic_cone
-    (0, 128, 128),    # 9: trailer
-    (0, 0, 255),      # 10: truck
-    (100, 100, 100),  # 11: driveable_surface
-    (150, 150, 150),  # 12: other_flat
-    (255, 192, 203),  # 13: sidewalk
-    (0, 255, 0),      # 14: terrain
-    (255, 255, 0),    # 15: manmade
-    (0, 255, 128),    # 16: vegetation
-    (255, 0, 255),    # 17: general_object
+    (200, 200, 200),  # 1: barrier (灰白)
+    (128, 128, 0),    # 2: bicycle (深黄)
+    (0, 0, 128),      # 3: bus (深蓝)
+    (0, 128, 0),      # 4: car (绿色)
+    (128, 0, 128),    # 5: construction_vehicle (紫色)
+    (128, 0, 0),      # 6: motorcycle (深红)
+    (255, 0, 0),      # 7: pedestrian (红色)
+    (255, 165, 0),    # 8: traffic_cone (橙色)
+    (0, 128, 128),    # 9: trailer (青色)
+    (0, 0, 255),      # 10: truck (蓝色)
+    (100, 100, 100),  # 11: driveable_surface (深灰)
+    (150, 150, 150),  # 12: other_flat (浅灰)
+    (255, 192, 203),  # 13: sidewalk (粉色)
+    (0, 255, 0),      # 14: terrain (亮绿)
+    (255, 255, 0),    # 15: manmade (黄色)
+    (0, 255, 128),    # 16: vegetation (春绿)
+    (255, 0, 255),    # 17: general_object (洋红)
 ]
 
 
