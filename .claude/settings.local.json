@@ -60,7 +60,16 @@
       "Bash(C:Usersbills.condaenvscarlapython.exe dense_occupancy_collectionscriptscollect_panorama.py --frames 1)",
       "Bash(C:Usersbills.condaenvscarlapython.exe d:codecarladense_occupancy_collectionscriptstest_visibility.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe dense_occupancy_collection/scripts/collect_panorama.py --frames 1)",
-      "Bash(C:Usersbills.condaenvscarlapython.exe -u dense_occupancy_collectionscriptscollect_panorama.py --frames 1)"
+      "Bash(C:Usersbills.condaenvscarlapython.exe -u dense_occupancy_collectionscriptscollect_panorama.py --frames 1)",
+      "Bash(cat:*)",
+      "Bash(netstat:*)",
+      "Bash(tasklist:*)",
+      "Bash(du -sh:*)",
+      "Bash(where:*)",
+      "Bash(if exist \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" echo Community edition found)",
+      "Bash(if exist \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\VC\\Auxiliary\\Build\\vcvarsall.bat\" echo Professional edition found)",
+      "Bash(if exist \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" echo Enterprise edition found)",
+      "Bash(taskkill:*)"
     ],
     "deny": [],
     "ask": []

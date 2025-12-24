@@ -20,3 +20,4 @@ PythonAPI/examples/cache/
 carla_data_collection/dataset_output/
 dataset_output/
 .log
+server/
