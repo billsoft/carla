@@ -210,6 +210,17 @@
             </div>
 
             <div class="section">
+                <div class="section-title">▶ 播放控制</div>
+                <button id="playBtn" style="background: #27ae60;">▶ 自动播放</button>
+                <div style="margin-top: 10px;">
+                    <label style="font-size: 12px; color: #aaa;">播放速度: <span id="speedValue">1000ms</span></label>
+                    <input type="range" id="speedSlider" min="100" max="3000" value="1000" step="100"
+                           style="width: 100%; margin-top: 5px; accent-color: #27ae60;">
+                </div>
+                <div class="info" style="margin-top: 8px;">提示: 播放时不显示加载提示</div>
+            </div>
+
+            <div class="section">
                 <div class="section-title">📷 视图控制</div>
                 <div class="controls">
                     <button onclick="viewer.setView('top')">俯视图</button>

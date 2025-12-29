@@ -19,10 +19,15 @@ class ScenarioManager:
         self.bp_lib = world.get_blueprint_library()
         self.spawn_points = world.get_map().get_spawn_points()
 
-    def spawn_hero(self, filter_pattern='vehicle.lincoln.mkz*'):
-        """生成 Hero 车辆"""
+    def spawn_hero(self, filter_pattern='vehicle.lincoln.mkz*', enable_autopilot=True):
+        """生成 Hero 车辆并启用自动驾驶
+
+        Args:
+            filter_pattern: 车辆蓝图过滤模式
+            enable_autopilot: 是否启用自动驾驶（默认 True）
+        """
         print(f"\n[Scenario] 正在生成 Hero 车辆 ({filter_pattern})...")
-        
+
         # 1. 选择蓝图
         bp = self.bp_lib.filter(filter_pattern)[0]
         if bp.has_attribute('role_name'):
@@ -38,20 +43,26 @@ class ScenarioManager:
             self.hero_vehicle = self.world.try_spawn_actor(bp, point)
             if self.hero_vehicle:
                 # 物理稳定
-                for _ in range(10): 
+                for _ in range(10):
                     self.world.tick()
-                
+
                 loc = self.hero_vehicle.get_location()
                 print(f"  ✓ Hero 生成成功: ID={self.hero_vehicle.id}, Loc=({loc.x:.1f}, {loc.y:.1f})")
-                
+
                 # 再次检查是否被弹回原点
                 if abs(loc.x) < 1.0 and abs(loc.y) < 1.0:
                     print("  ⚠ 警告: Hero 位于原点，可能发生碰撞，重试...")
                     self.hero_vehicle.destroy()
                     self.hero_vehicle = None
                     continue
+
+                # 启用自动驾驶
+                if enable_autopilot:
+                    self.hero_vehicle.set_autopilot(True, self.tm_port)
+                    print(f"  ✓ 自动驾驶已启用 (TM Port: {self.tm_port})")
+
                 return self.hero_vehicle
-        
+
         raise RuntimeError("无法生成 Hero 车辆")
 
     def spawn_npcs(self, num_vehicles=30, num_walkers=10):

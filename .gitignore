@@ -19,5 +19,9 @@ Help.md
 PythonAPI/examples/cache/
 carla_data_collection/dataset_output/
 dataset_output/
+dataset_10k/
+occ_network/
+occ_network_lite/
 .log
 server/
+nul

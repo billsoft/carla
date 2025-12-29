@@ -11,9 +11,11 @@ class DataSaver:
         self.output_dir = Path(output_dir)
         self.cameras_dir = self.output_dir / 'cameras'
         self.occupancy_dir = self.output_dir / 'occupancy'
-        
+        self.camera_params_dir = self.output_dir / 'camera_params'
+
         self.cameras_dir.mkdir(parents=True, exist_ok=True)
         self.occupancy_dir.mkdir(parents=True, exist_ok=True)
+        self.camera_params_dir.mkdir(parents=True, exist_ok=True)
 
     def save_rgb(self, frame_idx, data_dict):
         """
@@ -57,7 +59,7 @@ class DataSaver:
     def save_voxel(self, frame_idx, occupancy, actor_ids, mask, metadata=None):
         """保存体素数据 (npz)"""
         path = self.occupancy_dir / f"{frame_idx:06d}.npz"
-        
+
         save_dict = {
             'occupancy': occupancy,
             'actor_ids': actor_ids,
@@ -65,6 +67,30 @@ class DataSaver:
         }
         if metadata:
             save_dict.update(metadata)
-            
+
         np.savez_compressed(path, **save_dict)
+        return path
+
+    def save_camera_params(self, frame_idx, camera_configs, intrinsics, extrinsics):
+        """
+        保存相机参数
+
+        Args:
+            frame_idx: 帧索引
+            camera_configs: 相机配置列表（8个相机）
+            intrinsics: [8, 3, 3] 内参矩阵
+            extrinsics: [8, 4, 4] 外参矩阵（世界 -> 相机）
+        """
+        path = self.camera_params_dir / f"{frame_idx:06d}.npz"
+
+        # 保存配置为 JSON 字符串（方便阅读）
+        configs_json = json.dumps(camera_configs, indent=2)
+
+        np.savez_compressed(
+            path,
+            intrinsics=intrinsics.astype(np.float32),
+            extrinsics=extrinsics.astype(np.float32),
+            configs=configs_json  # JSON 字符串
+        )
+
         return path

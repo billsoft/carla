@@ -1,27 +1,29 @@
 // CARLA Occupancy 3D 体素查看器
 // 使用 Three.js 渲染体素网格
+// 更新时间: 2025-12-29
+// 新功能: 自动播放、颜色对齐 actor_occupancy_mapping.py
 
 // Occupancy 类别颜色映射 (Hex)
-// 严格匹配 config/occupancy_config.py 中的 OCCUPANCY_COLORS
+// 严格匹配 dense_occupancy_collection/config/actor_occupancy_mapping.py 中的 OCCUPANCY_COLORS
 const OCCUPANCY_COLORS = [
-    0x000000,  // 0: free
-    0xC8C8C8,  // 1: barrier (200, 200, 200)
-    0x808000,  // 2: bicycle (128, 128, 0)
-    0x000080,  // 3: bus (0, 0, 128)
-    0x008000,  // 4: car (0, 128, 0)
-    0x800080,  // 5: construction_vehicle (128, 0, 128)
-    0x800000,  // 6: motorcycle (128, 0, 0)
-    0xFF0000,  // 7: pedestrian (255, 0, 0)
-    0xFFA500,  // 8: traffic_cone (255, 165, 0)
-    0x008080,  // 9: trailer (0, 128, 128)
-    0x0000FF,  // 10: truck (0, 0, 255)
-    0x646464,  // 11: driveable_surface (100, 100, 100)
-    0x969696,  // 12: other_flat (150, 150, 150)
-    0xFFC0CB,  // 13: sidewalk (255, 192, 203)
-    0x00FF00,  // 14: terrain (0, 255, 0)
-    0xFFFF00,  // 15: manmade (255, 255, 0)
-    0x00FF80,  // 16: vegetation (0, 255, 128)
-    0xFF00FF,  // 17: general_object (255, 0, 255)
+    0x000000,  // 0: free (0, 0, 0)
+    0x708090,  // 1: barrier (112, 128, 144) - 灰蓝色
+    0xFF3D63,  // 2: bicycle (255, 61, 99) - 粉红色
+    0xDC143C,  // 3: bus (220, 20, 60) - 深红色
+    0xFF9E00,  // 4: car (255, 158, 0) - 橙色
+    0xE99646,  // 5: construction_vehicle (233, 150, 70) - 土黄色
+    0xFF00FF,  // 6: motorcycle (255, 0, 255) - 品红色
+    0x1E90FF,  // 7: pedestrian (30, 144, 255) - 道奇蓝
+    0xFF7F50,  // 8: traffic_cone (255, 127, 80) - 珊瑚橙
+    0xFF8C00,  // 9: trailer (255, 140, 0) - 暗橙色
+    0xB4A5B4,  // 10: truck (180, 165, 180) - 紫灰色
+    0x804080,  // 11: driveable_surface (128, 64, 128) - 深紫色
+    0xF423E8,  // 12: other_flat (244, 35, 232) - 洋红色
+    0x6B8E23,  // 13: sidewalk (107, 142, 35) - 橄榄绿
+    0x98FB98,  // 14: terrain (152, 251, 152) - 淡绿色
+    0x464646,  // 15: manmade (70, 70, 70) - 深灰色
+    0x00FF00,  // 16: vegetation (0, 255, 0) - 绿色
+    0xFFFFFF,  // 17: general_object (255, 255, 255) - 白色
 ];
 
 const OCCUPANCY_NAMES = [
@@ -40,6 +42,12 @@ class OccupancyViewer {
         this.voxelGroup = null;
         this.currentData = null;
         this.frames = [];
+
+        // 自动播放状态
+        this.isPlaying = false;
+        this.currentFrameIndex = 0;
+        this.playInterval = null;
+        this.playSpeed = 1000; // 默认 1 秒/帧
 
         this.init();
     }
@@ -106,10 +114,106 @@ class OccupancyViewer {
         // 初始化图例
         this.initLegend();
 
+        // 初始化播放控制
+        this.initPlayControls();
+
         // 尝试加载默认数据集
         this.loadDefaultDataset();
 
         console.log('✓ Occupancy Viewer initialized');
+    }
+
+    initPlayControls() {
+        console.log('🎮 Initializing play controls...');
+
+        // 创建播放控制按钮
+        const playBtn = document.getElementById('playBtn');
+        const speedSlider = document.getElementById('speedSlider');
+        const speedValue = document.getElementById('speedValue');
+
+        console.log('playBtn found:', !!playBtn);
+        console.log('speedSlider found:', !!speedSlider);
+        console.log('speedValue found:', !!speedValue);
+
+        if (playBtn) {
+            playBtn.addEventListener('click', () => {
+                console.log('🖱️ Play button clicked!');
+                this.togglePlay();
+            });
+            console.log('✓ Play button event listener attached');
+        } else {
+            console.error('❌ playBtn element not found!');
+        }
+
+        if (speedSlider) {
+            speedSlider.addEventListener('input', (e) => {
+                this.playSpeed = parseInt(e.target.value);
+                if (speedValue) {
+                    speedValue.textContent = `${this.playSpeed}ms`;
+                }
+
+                // 如果正在播放，重启播放器以应用新速度
+                if (this.isPlaying) {
+                    this.stopPlay();
+                    this.startPlay();
+                }
+            });
+            console.log('✓ Speed slider event listener attached');
+        }
+    }
+
+    togglePlay() {
+        console.log('🔄 togglePlay called, isPlaying:', this.isPlaying);
+        console.log('   frames.length:', this.frames.length);
+        if (this.isPlaying) {
+            this.stopPlay();
+        } else {
+            this.startPlay();
+        }
+    }
+
+    startPlay() {
+        console.log('▶️ startPlay called');
+        console.log('   frames.length:', this.frames.length);
+
+        if (this.frames.length === 0) {
+            console.warn('⚠️ No frames loaded!');
+            alert('请先加载数据集！');
+            return;
+        }
+
+        this.isPlaying = true;
+        const playBtn = document.getElementById('playBtn');
+        if (playBtn) {
+            playBtn.textContent = '⏸ 暂停播放';
+            playBtn.style.background = '#e74c3c';
+            console.log('✓ Button updated to pause state');
+        }
+
+        // 从当前帧开始播放
+        this.playInterval = setInterval(() => {
+            this.currentFrameIndex = (this.currentFrameIndex + 1) % this.frames.length;
+            console.log(`  Playing frame ${this.currentFrameIndex}/${this.frames.length}`);
+            this.loadFrame(this.currentFrameIndex);
+        }, this.playSpeed);
+
+        console.log(`✅ 开始自动播放 (速度: ${this.playSpeed}ms/帧)`);
+    }
+
+    stopPlay() {
+        this.isPlaying = false;
+        if (this.playInterval) {
+            clearInterval(this.playInterval);
+            this.playInterval = null;
+        }
+
+        const playBtn = document.getElementById('playBtn');
+        if (playBtn) {
+            playBtn.textContent = '▶ 自动播放';
+            playBtn.style.background = '#27ae60';
+        }
+
+        console.log('停止自动播放');
     }
 
     async loadDefaultDataset() {
@@ -120,11 +224,11 @@ class OccupancyViewer {
                 console.log('API not available (static mode?)');
                 return;
             }
-            
+
             const files = await response.json();
             if (files.length > 0) {
                 console.log(`Auto-loading ${files.length} frames from server`);
-                this.frames = files; // 此时 frames 是文件名字符串数组
+                this.frames = files;
                 this.updateFrameList();
                 await this.loadFrame(0);
             }
@@ -137,7 +241,7 @@ class OccupancyViewer {
         const legendContainer = document.getElementById('legend');
         legendContainer.innerHTML = '';
 
-        for (let i = 1; i < OCCUPANCY_COLORS.length; i++) { // 跳过 empty
+        for (let i = 1; i < OCCUPANCY_COLORS.length; i++) {
             const item = document.createElement('div');
             item.className = 'legend-item';
 
@@ -173,7 +277,6 @@ class OccupancyViewer {
         loading.textContent = '正在加载数据集...';
 
         try {
-            // 筛选 .npz 文件
             this.frames = Array.from(files).filter(f => f.name.endsWith('.npz'));
 
             if (this.frames.length === 0) {
@@ -182,15 +285,10 @@ class OccupancyViewer {
                 return;
             }
 
-            // 按文件名排序
             this.frames.sort((a, b) => a.name.localeCompare(b.name));
-
             console.log(`Found ${this.frames.length} frames`);
 
-            // 更新帧列表
             this.updateFrameList();
-
-            // 加载第一帧
             await this.loadFrame(0);
 
             loading.style.display = 'none';
@@ -208,48 +306,45 @@ class OccupancyViewer {
         this.frames.forEach((file, index) => {
             const item = document.createElement('div');
             item.className = 'frame-item';
-            // 处理 File 对象或字符串
             const name = (typeof file === 'string') ? file : file.name;
             item.textContent = `Frame ${index}: ${name}`;
-            item.onclick = () => this.loadFrame(index);
+            item.onclick = () => {
+                this.currentFrameIndex = index;
+                this.loadFrame(index);
+            };
             frameList.appendChild(item);
         });
 
-        // 默认选中第一帧
         if (frameList.children.length > 0) {
             frameList.children[0].classList.add('active');
         }
     }
 
     async loadFrame(index) {
+        // 自动播放模式下不显示加载提示（避免影响观察）
         const loading = document.getElementById('loading');
-        loading.style.display = 'block';
-        loading.textContent = `正在加载 Frame ${index}...`;
+        if (!this.isPlaying) {
+            loading.style.display = 'block';
+            loading.textContent = `正在加载 Frame ${index}...`;
+        }
 
         try {
             const fileOrName = this.frames[index];
             let arrayBuffer;
 
             if (typeof fileOrName === 'string') {
-                // 从服务器加载
                 const url = `/data/${fileOrName}`;
-                console.log(`Fetching ${url}...`);
                 const response = await fetch(url);
                 if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
                 arrayBuffer = await response.arrayBuffer();
             } else {
-                // 从本地文件对象加载
                 arrayBuffer = await fileOrName.arrayBuffer();
             }
 
-            // 使用 fflate 解压 .npz
             const data = await this.parseNPZ(arrayBuffer);
 
-            console.log('Loaded NPZ data:', Object.keys(data));
-
-            // 提取 occupancy, actor_ids 和 mask
             const occupancy = data['occupancy'];
-            const actor_ids = data['actor_ids'];  // ⭐ 新增：读取Actor ID数组
+            const actor_ids = data['actor_ids'];
             const mask = data['mask'];
 
             if (!occupancy) {
@@ -264,19 +359,12 @@ class OccupancyViewer {
                 y_range: Array.from(data['y_range']?.data || [-50, 50]),
                 z_range: Array.from(data['z_range']?.data || [-4, 4]),
                 resolution: data['resolution']?.data?.[0] || 0.2,
-                grid_size: Array.from(data['grid_size']?.data || [500, 500, 40]) // 默认值修正为当前配置
+                grid_size: Array.from(data['grid_size']?.data || [500, 500, 40])
             };
 
-            console.log('Occupancy shape:', this.currentData.grid_size);
-            console.log('Resolution:', this.currentData.resolution);
-
-            // 渲染体素
             this.renderVoxels();
-
-            // 更新统计
             this.updateStats();
 
-            // 更新选中状态
             const frameList = document.getElementById('frameList');
             Array.from(frameList.children).forEach((item, i) => {
                 item.classList.toggle('active', i === index);
@@ -285,13 +373,14 @@ class OccupancyViewer {
             loading.style.display = 'none';
         } catch (error) {
             console.error('Error loading frame:', error);
-            alert('加载帧失败: ' + error.message);
+            if (!this.isPlaying) {
+                alert('加载帧失败: ' + error.message);
+            }
             loading.style.display = 'none';
         }
     }
 
     async parseNPZ(arrayBuffer) {
-        // 使用 fflate 解压 NPZ (ZIP 格式)
         const uint8Array = new Uint8Array(arrayBuffer);
         const decompressed = fflate.unzipSync(uint8Array);
 
@@ -308,28 +397,16 @@ class OccupancyViewer {
     }
 
     parseNPY(data) {
-        // 简化的 NPY 解析器
         const view = new DataView(data.buffer);
 
-        // NPY 格式规范:
-        // Magic (6) + Version (2) + HeaderLen (2) + HeaderString
-        
-        // 跳过 magic (6) + version (2) = 8 bytes
         let offset = 8;
-
-        // 读取 header length (2 bytes, little-endian)
         const headerLen = view.getUint16(offset, true);
         offset += 2;
 
-        // 读取 header (Python dict string)
         const headerBytes = data.slice(offset, offset + headerLen);
         const headerStr = new TextDecoder().decode(headerBytes).trim();
         offset += headerLen;
 
-        console.log('NPY Header:', headerStr);
-
-        // 解析 shape 和 dtype
-        // 增强正则以支持空 shape (), 单元素元组 (10,)
         const shapeMatch = headerStr.match(/['"]shape['"]\s*:\s*\(([^)]*)\)/);
         const dtypeMatch = headerStr.match(/['"]descr['"]\s*:\s*['"]([^'"]+)['"]/);
 
@@ -340,21 +417,19 @@ class OccupancyViewer {
         const shapeStr = shapeMatch[1].trim();
         let shape;
         if (shapeStr === '' || shapeStr === ',') {
-            shape = []; // 标量
+            shape = [];
         } else {
             shape = shapeStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
         }
-        
+
         const dtype = dtypeMatch[1];
 
-        // 读取数据
         const dataBytes = data.slice(offset);
         let array;
 
         if (dtype.includes('u1')) {
             array = new Uint8Array(dataBytes);
         } else if (dtype.includes('u4') || dtype.includes('<u4')) {
-            // ⭐ 新增：支持uint32类型（actor_ids使用）
             array = new Uint32Array(dataBytes.buffer, dataBytes.byteOffset, dataBytes.byteLength / 4);
         } else if (dtype.includes('f4') || dtype.includes('<f4')) {
             array = new Float32Array(dataBytes.buffer, dataBytes.byteOffset, dataBytes.byteLength / 4);
@@ -373,7 +448,6 @@ class OccupancyViewer {
     }
 
     renderVoxels() {
-        // 清空现有体素
         while (this.voxelGroup.children.length > 0) {
             const child = this.voxelGroup.children[0];
             if (child.geometry) child.geometry.dispose();
@@ -384,70 +458,42 @@ class OccupancyViewer {
         const { occupancy, actor_ids, grid_size, resolution } = this.currentData;
         const [gridX, gridY, gridZ] = grid_size;
 
-        console.log(`Rendering voxels: ${gridX} × ${gridY} × ${gridZ}`);
-        console.log(`Total voxel cells: ${(gridX * gridY * gridZ).toLocaleString()}`);
-        console.log(`Actor IDs available: ${actor_ids ? 'Yes' : 'No'}`);  // ⭐ Debug信息
-
-        // 性能警告
-        const totalCells = gridX * gridY * gridZ;
-        if (totalCells > 20000000) {
-            console.warn(`⚠️ 体素数量过大 (${(totalCells/1000000).toFixed(1)}M), 可能导致浏览器卡顿!`);
-            alert(`警告: 体素网格过大 (${(totalCells/1000000).toFixed(1)}M 个单元)，加载可能需要较长时间。\n建议使用更大的分辨率 (如 0.2m 或 0.25m)。`);
-        }
-
-        // 创建实例化网格 (性能优化)
         const voxelSize = resolution;
         const geometry = new THREE.BoxGeometry(voxelSize, voxelSize, voxelSize);
 
-        // 按类别分组渲染
         const instancesByClass = {};
 
         for (let label = 1; label < OCCUPANCY_COLORS.length; label++) {
             instancesByClass[label] = [];
         }
 
-        // 遍历体素网格
         let totalVoxels = 0;
-        let filteredVoxels = 0;  // ⭐ 统计被可见性过滤的体素
         for (let x = 0; x < gridX; x++) {
             for (let y = 0; y < gridY; y++) {
                 for (let z = 0; z < gridZ; z++) {
                     const idx = x * (gridY * gridZ) + y * gridZ + z;
                     const label = occupancy.data[idx];
 
-                    // ⭐ 可见性过滤：只渲染actor_id非0的体素
-                    // 如果没有actor_ids数据，则渲染所有label>0的体素（兼容旧数据）
                     const actorId = actor_ids ? actor_ids.data[idx] : 1;
                     const isVisible = !actor_ids || (actorId !== 0);
 
-                    if (label > 0) {
-                        if (isVisible) {
-                            // 计算世界坐标 (以车辆为中心)
-                            const worldX = (x - gridX/2) * voxelSize;
-                            const worldY = (y - gridY/2) * voxelSize;
-                            const worldZ = (z - gridZ/2) * voxelSize;
+                    if (label > 0 && isVisible) {
+                        const worldX = (x - gridX/2) * voxelSize;
+                        const worldY = (y - gridY/2) * voxelSize;
+                        const worldZ = (z - gridZ/2) * voxelSize;
 
-                            if (label < OCCUPANCY_COLORS.length) {
-                                instancesByClass[label].push({
-                                    position: new THREE.Vector3(worldX, worldZ, worldY) // 注意: Y-up
-                                });
-                            }
-
-                            totalVoxels++;
-                        } else {
-                            filteredVoxels++;  // ⭐ 统计被过滤的不可见体素
+                        if (label < OCCUPANCY_COLORS.length) {
+                            instancesByClass[label].push({
+                                position: new THREE.Vector3(worldX, worldZ, worldY)
+                            });
                         }
+
+                        totalVoxels++;
                     }
                 }
             }
         }
 
-        console.log(`Non-empty voxels: ${totalVoxels}`);
-        if (actor_ids) {
-            console.log(`Filtered (invisible) voxels: ${filteredVoxels}`);  // ⭐ 输出过滤统计
-        }
-
-        // 为每个类别创建实例化网格
         for (const [label, instances] of Object.entries(instancesByClass)) {
             if (instances.length === 0) continue;
 
@@ -463,11 +509,8 @@ class OccupancyViewer {
 
             instancedMesh.instanceMatrix.needsUpdate = true;
             this.voxelGroup.add(instancedMesh);
-
-            console.log(`Class ${label} (${OCCUPANCY_NAMES[label]}): ${instances.length} voxels`);
         }
 
-        // 居中相机
         this.controls.target.set(0, 0, 0);
         this.controls.update();
     }
@@ -498,22 +541,22 @@ class OccupancyViewer {
         const distance = 120;
 
         switch (viewName) {
-            case 'top': // 俯视图
+            case 'top':
                 this.camera.position.set(0, distance, 0);
                 this.camera.lookAt(0, 0, 0);
                 this.controls.target.set(0, 0, 0);
                 break;
-            case 'front': // 前视图
+            case 'front':
                 this.camera.position.set(0, distance * 0.3, distance);
                 this.camera.lookAt(0, 0, 0);
                 this.controls.target.set(0, 0, 0);
                 break;
-            case 'side': // 侧视图
+            case 'side':
                 this.camera.position.set(distance, distance * 0.3, 0);
                 this.camera.lookAt(0, 0, 0);
                 this.controls.target.set(0, 0, 0);
                 break;
-            case 'free': // 自由视角
+            case 'free':
                 this.camera.position.set(80, 80, 80);
                 this.camera.lookAt(0, 0, 0);
                 this.controls.target.set(0, 0, 0);
@@ -524,10 +567,8 @@ class OccupancyViewer {
     }
 }
 
-// 初始化查看器
 const viewer = new OccupancyViewer();
 
-// 文件选择器事件
 document.getElementById('folderInput').addEventListener('change', (e) => {
     const files = e.target.files;
     if (files.length > 0) {
@@ -535,4 +576,4 @@ document.getElementById('folderInput').addEventListener('change', (e) => {
     }
 });
 
-console.log('✓ Occupancy Viewer loaded');
+console.log('✓ Occupancy Viewer loaded (Updated 2025-12-29)');

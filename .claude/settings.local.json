@@ -69,7 +69,12 @@
       "Bash(if exist \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" echo Community edition found)",
       "Bash(if exist \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\VC\\Auxiliary\\Build\\vcvarsall.bat\" echo Professional edition found)",
       "Bash(if exist \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" echo Enterprise edition found)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarladense_occupancy_collectionscriptstest_camera_params.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe scriptsverify_fixes.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaocc_network_nanoscriptsverify_fixes.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe check_system.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlacheck_system.py)"
     ],
     "deny": [],
     "ask": []

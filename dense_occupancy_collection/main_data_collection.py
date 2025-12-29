@@ -52,6 +52,7 @@ from dense_occupancy_collection.core.depth_suite import DepthSuite
 from dense_occupancy_collection.core.voxel_generator import VoxelGenerator
 from dense_occupancy_collection.core.visibility_filter import VisibilityFilter
 from dense_occupancy_collection.utils.data_saver import DataSaver
+from dense_occupancy_collection.utils.camera_utils import compute_camera_params
 
 
 def setup_world(client, town_name, no_load=False):
@@ -119,6 +120,10 @@ def main():
     parser.add_argument('--output', default='dataset_output', help='输出目录')
     parser.add_argument('--no-load', action='store_true',
                         help='不加载地图，使用当前已加载的地图（用于打包 exe）')
+    parser.add_argument('--resume', action='store_true',
+                        help='增量模式：继续在已有数据集上追加数据，不清空目录')
+    parser.add_argument('--num-vehicles', type=int, default=30, help='NPC车辆数量（默认30）')
+    parser.add_argument('--num-walkers', type=int, default=10, help='NPC行人数量（默认10）')
     args = parser.parse_args()
 
     print("\n" + "="*70)
@@ -128,18 +133,35 @@ def main():
     # 连接服务器
     print(f"连接服务器: {args.host}:{args.port}")
     client = carla.Client(args.host, args.port)
-    client.set_timeout(30.0)
+    client.set_timeout(30.0)  # 增加超时时间到 30秒
 
     try:
-        server_version = client.get_server_version()
-        print(f"服务器版本: {server_version}")
-    except:
-        print("⚠️  无法获取服务器版本")
+        print(f"服务器版本: {client.get_server_version()}")
+    except Exception as e:
+        print(f"⚠️  无法获取服务器版本: {e}")
 
-    # 清理旧数据
+    # 检查并处理输出目录
+    start_frame_idx = 0
     if os.path.exists(args.output):
-        print(f"清理旧数据目录: {args.output}")
-        shutil.rmtree(args.output)
+        if args.resume:
+            # 增量模式：查找已有的最大帧索引
+            existing_frames = []
+            occupancy_dir = Path(args.output) / 'occupancy'
+            if occupancy_dir.exists():
+                existing_frames = [int(f.stem) for f in occupancy_dir.glob('*.npz')]
+
+            if existing_frames:
+                start_frame_idx = max(existing_frames) + 1
+                print(f"📂 增量模式: 检测到已有 {len(existing_frames)} 帧数据")
+                print(f"   从帧 {start_frame_idx} 开始继续采集")
+            else:
+                print(f"📂 增量模式: 输出目录存在但为空，从帧 0 开始")
+        else:
+            # 覆盖模式：清空旧数据
+            print(f"🗑️  清理旧数据目录: {args.output}")
+            shutil.rmtree(args.output)
+    else:
+        print(f"📁 创建新输出目录: {args.output}")
 
     # 设置世界
     world = setup_world(client, args.town, no_load=args.no_load)
@@ -166,8 +188,8 @@ def main():
         hero = scenario.spawn_hero()
         print(f"  生成主车: {hero.type_id}")
 
-        scenario.spawn_npcs(num_vehicles=30, num_walkers=10)
-        print(f"  生成 NPC: 30 辆车, 10 个行人")
+        scenario.spawn_npcs(num_vehicles=args.num_vehicles, num_walkers=args.num_walkers)
+        print(f"  生成 NPC: {args.num_vehicles} 辆车, {args.num_walkers} 个行人")
 
         # 2. Setup Sensors
         print("\n[2/4] 设置传感器...")
@@ -206,12 +228,16 @@ def main():
 
         # 5. Loop
         print(f"\n{'='*70}")
-        print(f"开始采集 {args.frames} 帧".center(70))
+        if start_frame_idx > 0:
+            print(f"继续采集: 帧 {start_frame_idx} 到 {start_frame_idx + args.frames - 1} (共 {args.frames} 帧)".center(70))
+        else:
+            print(f"开始采集 {args.frames} 帧".center(70))
         print(f"{'='*70}\n")
 
-        for frame in range(args.frames):
+        for i in range(args.frames):
+            frame_idx = start_frame_idx + i
             world.tick()
-            print(f"\n[Frame {frame+1}/{args.frames}]")
+            print(f"\n[Frame {frame_idx} ({i+1}/{args.frames})]")
 
             # Get Data
             rgb_data = rgb_suite.get_data()
@@ -244,9 +270,19 @@ def main():
             filter_rate = kept_voxels / total_voxels * 100 if total_voxels > 0 else 0
             print(f"  ✅ 过滤后体素: {kept_voxels}/{total_voxels} ({filter_rate:.1f}%)")
 
+            # 计算相机参数
+            intrinsics, extrinsics = compute_camera_params(
+                camera_configs=TESLA_CONFIGS,
+                ego_transform=ego_trans,
+                image_width=640,
+                image_height=384
+            )
+            print(f"  ✅ 相机参数: 8 个相机")
+
             # Save
-            saver.save_rgb(frame, rgb_data)
-            saver.save_depth(frame, depth_data)
+            saver.save_rgb(frame_idx, rgb_data)
+            saver.save_depth(frame_idx, depth_data)
+            saver.save_camera_params(frame_idx, TESLA_CONFIGS, intrinsics, extrinsics)
 
             # 保存网格配置
             meta = {
@@ -257,7 +293,7 @@ def main():
                 'resolution': np.array([RESOLUTION]),
                 'grid_size': np.array(GRID_SIZE)
             }
-            saver.save_voxel(frame, occ_filtered, aids_filtered, mask, metadata=meta)
+            saver.save_voxel(frame_idx, occ_filtered, aids_filtered, mask, metadata=meta)
             print(f"  ✅ 数据已保存")
 
     finally:
