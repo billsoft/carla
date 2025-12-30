@@ -33,16 +33,24 @@ from dense_occupancy_collection.config.occupancy_config import (
     CARLA_TO_OCCUPANCY_MAPPING, DEPTH_CAMERA_CONFIG
 )
 
-# Tesla Style Config
+# Tesla Style Config (1280x960 分辨率, 12-bit Bayer RGGB RAW)
 TESLA_CONFIGS = [
-    {'id': 'cam_front_main', 'fov': 50, 'x': 1.0, 'y': 0.0, 'z': 1.6, 'pitch': 0, 'yaw': 0, 'roll': 0},
-    {'id': 'cam_front_wide', 'fov': 120, 'x': 1.0, 'y': 0.0, 'z': 1.6, 'pitch': 0, 'yaw': 0, 'roll': 0},
-    {'id': 'cam_front_narrow', 'fov': 35, 'x': 1.0, 'y': 0.0, 'z': 1.6, 'pitch': 0, 'yaw': 0, 'roll': 0},
-    {'id': 'cam_left_pillar', 'fov': 80, 'x': 0.0, 'y': -0.9, 'z': 1.7, 'pitch': 0, 'yaw': -60, 'roll': 0},
-    {'id': 'cam_right_pillar', 'fov': 80, 'x': 0.0, 'y': 0.9, 'z': 1.7, 'pitch': 0, 'yaw': 60, 'roll': 0},
-    {'id': 'cam_left_repeater', 'fov': 100, 'x': 1.2, 'y': -0.9, 'z': 1.0, 'pitch': 0, 'yaw': -160, 'roll': 0},
-    {'id': 'cam_right_repeater', 'fov': 100, 'x': 1.2, 'y': 0.9, 'z': 1.0, 'pitch': 0, 'yaw': 160, 'roll': 0},
-    {'id': 'cam_rear', 'fov': 120, 'x': -2.5, 'y': 0.0, 'z': 1.2, 'pitch': -5, 'yaw': 180, 'roll': 0}
+    {'id': 'cam_front_main', 'fov': 50, 'x': 1.0, 'y': 0.0, 'z': 1.6, 'pitch': 0, 'yaw': 0, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12},
+    {'id': 'cam_front_wide', 'fov': 120, 'x': 1.0, 'y': 0.0, 'z': 1.6, 'pitch': 0, 'yaw': 0, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12},
+    {'id': 'cam_front_narrow', 'fov': 35, 'x': 1.0, 'y': 0.0, 'z': 1.6, 'pitch': 0, 'yaw': 0, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12},
+    {'id': 'cam_left_pillar', 'fov': 80, 'x': 0.0, 'y': -0.9, 'z': 1.7, 'pitch': 0, 'yaw': -60, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12},
+    {'id': 'cam_right_pillar', 'fov': 80, 'x': 0.0, 'y': 0.9, 'z': 1.7, 'pitch': 0, 'yaw': 60, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12},
+    {'id': 'cam_left_repeater', 'fov': 100, 'x': 1.2, 'y': -0.9, 'z': 1.0, 'pitch': 0, 'yaw': -160, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12},
+    {'id': 'cam_right_repeater', 'fov': 100, 'x': 1.2, 'y': 0.9, 'z': 1.0, 'pitch': 0, 'yaw': 160, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12},
+    {'id': 'cam_rear', 'fov': 120, 'x': -2.5, 'y': 0.0, 'z': 1.2, 'pitch': -5, 'yaw': 180, 'roll': 0,
+     'raw_type': 'bayer_rggb', 'image_size_x': 1280, 'image_size_y': 960, 'bit_depth': 12}
 ]
 
 # Core Modules
@@ -270,17 +278,23 @@ def main():
             filter_rate = kept_voxels / total_voxels * 100 if total_voxels > 0 else 0
             print(f"  ✅ 过滤后体素: {kept_voxels}/{total_voxels} ({filter_rate:.1f}%)")
 
-            # 计算相机参数
+            # 计算相机参数（使用 Tesla 标准分辨率）
             intrinsics, extrinsics = compute_camera_params(
                 camera_configs=TESLA_CONFIGS,
                 ego_transform=ego_trans,
-                image_width=640,
-                image_height=384
+                image_width=1280,
+                image_height=960
             )
             print(f"  ✅ 相机参数: 8 个相机")
 
             # Save
-            saver.save_rgb(frame_idx, rgb_data)
+            # 1. 保存单通道 Bayer RAW DNG（用于 occ_network_nano）
+            saver.save_bayer_as_dng(frame_idx, rgb_data, camera_configs=TESLA_CONFIGS)
+            
+            # 2. 保存彩色 RGB PNG（用于 occ_network_lite）
+            saver.save_rgb_preview(frame_idx, rgb_data)
+
+            # 3. 保存深度图和相机参数
             saver.save_depth(frame_idx, depth_data)
             saver.save_camera_params(frame_idx, TESLA_CONFIGS, intrinsics, extrinsics)
 

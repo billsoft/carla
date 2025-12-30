@@ -12,6 +12,7 @@
 #include "Carla/Sensor/InertialMeasurementUnit.h"
 #include "Carla/Sensor/LidarDescription.h"
 #include "Carla/Sensor/SceneCaptureSensor.h"
+#include "Carla/Sensor/SceneCaptureCamera.h" // Added
 #include "Carla/Sensor/ShaderBasedSensor.h"
 #include "Carla/Util/ScopedStack.h"
 #include "BlueprintLibary/PostProcessJsonUtils.h"
@@ -1366,6 +1367,17 @@ void UActorBlueprintFunctionLibrary::SetCamera(
       RetrieveActorAttributeToInt("image_size_y", Description.Variations, 600));
   Camera->SetFOVAngle(
       RetrieveActorAttributeToFloat("fov", Description.Variations, 90.0f));
+
+  // ========== 新增: 设置 RawType ==========
+  if (Description.Variations.Contains("raw_type"))
+  {
+    auto* SceneCaptureCamera = Cast<ASceneCaptureCamera>(Camera);
+    if (SceneCaptureCamera)
+    {
+      SceneCaptureCamera->RawType = RetrieveActorAttributeToString("raw_type", Description.Variations, TEXT("uint8"));
+    }
+  }
+
   if (Description.Variations.Contains("enable_postprocess_effects"))
   {
     Camera->EnablePostProcessingEffects(

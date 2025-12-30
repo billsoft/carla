@@ -74,7 +74,17 @@
       "Bash(C:Usersbills.condaenvscarlapython.exe scriptsverify_fixes.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaocc_network_nanoscriptsverify_fixes.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe check_system.py)",
-      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlacheck_system.py)"
+      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlacheck_system.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe \"D:\\\\code\\\\carla\\\\test_dng_support.py\")",
+      "Bash(C:Usersbills.condaenvscarlapython.exe models/backbone/mobilenet_v2_raw.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe train.py --help)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe -m py_compile D:codecarlaocc_network_nanotrain.py)",
+      "Bash(conda run -n carla python -c \"import os, shutil; files=[''D:/code/carla/occ_network_nano/models/backbone/mobilenet_v2_raw.py'', ''D:/code/carla/occ_network_nano/models/backbone/backbone_factory.py'', ''D:/code/carla/occ_network_nano/utils/raw_utils.py'', ''D:/code/carla/occ_network_nano/data/carla_dataset_raw.py'', ''D:/code/carla/occ_network_nano/train.py'', ''D:/code/carla/occ_network_nano/test_dataset.py'', ''D:/code/carla/occ_network_nano/verify_dataset.py'']; [os.remove\\(f\\) if os.path.exists\\(f\\) else None for f in files]; dirs=[''D:/code/carla/occ_network_nano/data/__pycache__'', ''D:/code/carla/occ_network_nano/utils/__pycache__'']; [shutil.rmtree\\(d\\) if os.path.exists\\(d\\) else None for d in dirs]; print\\(''✅ 清理完成''\\)\")",
+      "Bash(C:Usersbills.condaenvscarlapython.exe -c \"import os, shutil; files=[''D:/code/carla/occ_network_nano/models/backbone/mobilenet_v2_raw.py'', ''D:/code/carla/occ_network_nano/models/backbone/backbone_factory.py'', ''D:/code/carla/occ_network_nano/utils/raw_utils.py'', ''D:/code/carla/occ_network_nano/data/carla_dataset_raw.py'', ''D:/code/carla/occ_network_nano/train.py'', ''D:/code/carla/occ_network_nano/test_dataset.py'', ''D:/code/carla/occ_network_nano/verify_dataset.py'']; removed = [os.remove\\(f\\) or f for f in files if os.path.exists\\(f\\)]; dirs=[''D:/code/carla/occ_network_nano/data/__pycache__'', ''D:/code/carla/occ_network_nano/utils/__pycache__'']; [shutil.rmtree\\(d\\) for d in dirs if os.path.exists\\(d\\)]; print\\(f''✅ 删除 {len\\(removed\\)} 个文件''\\)\")",
+      "Bash(C:Usersbills.condaenvscarlapython.exe verify_bayer_network.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlacompress_code_for_ai.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe models/backbone/mobilenet_v2_bayer.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe occ_network_nanoverify_bayer_network.py)"
     ],
     "deny": [],
     "ask": []

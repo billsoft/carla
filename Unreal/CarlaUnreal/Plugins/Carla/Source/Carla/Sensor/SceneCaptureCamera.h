@@ -37,6 +37,19 @@ protected:
   void BeginPlay() override;
   void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
   void PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaSeconds) override;
+
+public:
+  // ========== 新增: HDR 支持 ==========
+
+  /// 像素格式枚举（用于蓝图属性解析）
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Settings")
+  FString RawType = TEXT("uint8");  // "uint8", "uint16", "float32"
+
+protected:
+  /// HDR 数据发送函数
+  void SendHDRDataToClient(
+    const TArrayView<const FLinearColor>& Pixels,
+    uint64 FrameIndex);
   
   virtual void OnFirstClientConnected() override;
   virtual void OnLastClientDisconnected() override;

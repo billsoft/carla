@@ -8,6 +8,7 @@
 
 #include "carla/Memory.h"
 #include "carla/sensor/RawData.h"
+// #include "carla/sensor/data/Image.h" // Removed to avoid circular dependency
 
 #include <cstdint>
 #include <cstring>
@@ -16,6 +17,10 @@ namespace carla {
 namespace sensor {
 
   class SensorData;
+
+namespace data {
+  enum class EPixelFormat : uint8_t; // Forward declaration
+}
 
 namespace s11n {
 
@@ -28,10 +33,12 @@ namespace s11n {
       uint32_t width;
       uint32_t height;
       float fov_angle;
+      uint8_t pixel_format; // Added
+      uint8_t reserved[3];  // Added padding
     };
 #pragma pack(pop)
 
-    static_assert (sizeof(ImageHeader) == sizeof(uint32_t) * 3);
+    static_assert (sizeof(ImageHeader) == sizeof(uint32_t) * 4); // Updated size check (16 bytes)
 
     constexpr static auto header_offset = sizeof(ImageHeader);
 
@@ -42,20 +49,34 @@ namespace s11n {
     template <typename Sensor>
     static Buffer Serialize(Sensor&& sensor, Buffer&& bitmap);
 
+    // ========== New Serialize Overload (Declaration) ==========
+    template <typename SensorT>
+    static Buffer Serialize(
+        const SensorT &sensor,
+        uint64_t frame,
+        Buffer &&data,
+        const uint8_t* raw_data,
+        size_t data_size,
+        uint32_t width,
+        uint32_t height,
+        data::EPixelFormat pixel_format);
+
     static SharedPtr<SensorData> Deserialize(RawData &&data);
   };
 
   template <typename Sensor>
   inline Buffer ImageSerializer::Serialize(
     Sensor&& sensor,
-    Buffer&& bitmap) 
+    Buffer&& bitmap)
   {
     DEBUG_ASSERT(bitmap.size() > sizeof(ImageHeader));
 
     ImageHeader header = {
       sensor.GetImageWidth(),
       sensor.GetImageHeight(),
-      sensor.GetFOVAngle()
+      sensor.GetFOVAngle(),
+      0u, // pixel_format = BGRA_U8 (0)
+      {0u, 0u, 0u} // reserved
     };
 
     std::memcpy(
@@ -64,6 +85,45 @@ namespace s11n {
       sizeof(header));
     
     return std::move(bitmap);
+  }
+
+  // ========== New Serialize Overload Implementation (HDR/Raw Support) ==========
+  template <typename SensorT>
+  inline Buffer ImageSerializer::Serialize(
+      const SensorT &sensor,
+      uint64_t frame,
+      Buffer &&buffer,
+      const uint8_t* raw_data,
+      size_t data_size,
+      uint32_t width,
+      uint32_t height,
+      data::EPixelFormat pixel_format)
+  {
+    DEBUG_ASSERT(raw_data != nullptr);
+    DEBUG_ASSERT(data_size > 0);
+
+    // 1. Calculate total size (ImageHeader + Pixel Data)
+    // Note: SensorHeader is handled by the caller (DataStream)
+    const size_t total_size = sizeof(ImageHeader) + data_size;
+
+    // 2. Reset buffer
+    buffer.reset(total_size);
+
+    // 3. Write Image Header
+    ImageHeader header = {
+      width,
+      height,
+      sensor.GetFOVAngle(),
+      static_cast<uint8_t>(pixel_format),
+      {0u, 0u, 0u}  // reserved
+    };
+
+    std::memcpy(buffer.data(), &header, sizeof(ImageHeader));
+
+    // 4. Write Pixel Data
+    std::memcpy(buffer.data() + sizeof(ImageHeader), raw_data, data_size);
+
+    return std::move(buffer);
   }
 
 } // namespace s11n

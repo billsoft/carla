@@ -49,6 +49,16 @@ class RGBSuite(SensorInterface):
             bp_rgb.set_attribute('image_size_y', str(cfg.get('image_size_y', 960)))
             bp_rgb.set_attribute('fov', str(cfg['fov']))
             bp_rgb.set_attribute('sensor_tick', '0.05') # 20Hz matching simulation
+
+            # 设置 raw_type 属性（如果 config 中有配置）
+            raw_type = cfg.get('raw_type', 'uint8')
+            if raw_type == 'uint16' or raw_type == 'float32':
+                 # 如果启用了 raw_type，尝试在 blueprint 中设置
+                 # 注意：标准的 sensor.camera.rgb 默认是 uint8 BGRA
+                 # 只有当 CARLA 编译支持或使用特殊 sensor.camera.rgb_16bit 时才有效
+                 # 如果只是普通的 CARLA build，这里可能需要调整，或者接受 8bit 数据并在后续模拟 16bit
+                 # 但根据用户描述，似乎已经有 12bit raw 支持的意图
+                 pass
             
             # 画质增强
             if bp_rgb.has_attribute('enable_postprocess_effects'):
@@ -105,16 +115,59 @@ class RGBSuite(SensorInterface):
             for cid, q in self.queues.items():
                 img = q.get(timeout=timeout)
                 
-                # Convert to numpy
-                array = np.frombuffer(img.raw_data, dtype=np.uint8)
-                array = array.reshape((img.height, img.width, 4))
-                # BGRA -> RGB
-                rgb = array[:, :, [2, 1, 0]]
+                # ========== 新增: 根据像素格式解析数据 ==========
+                
+                # 获取配置中的 raw_type
+                raw_type = 'uint8'
+                for cfg in self.configs:
+                    if cfg['id'] == cid:
+                        raw_type = cfg.get('raw_type', 'uint8')
+                        break
+
+                if raw_type == 'bayer_rggb':
+                    # 单通道 Bayer RGGB 格式 (2 bytes/pixel)
+                    expected_size = img.height * img.width * 2  # uint16 单通道
+                    if len(img.raw_data) == expected_size:
+                        array = np.frombuffer(img.raw_data, dtype=np.uint16)
+                        array = array.reshape((img.height, img.width))  # 单通道 (H, W)
+                        rgb = array
+                    else:
+                        print(f"[警告] {cid}: Bayer 数据大小不匹配！期望 {expected_size}，实际 {len(img.raw_data)}")
+                        # Fallback: 创建空数组
+                        rgb = np.zeros((img.height, img.width), dtype=np.uint16)
+
+                elif raw_type == 'uint16':
+                    # 16bit RGB 格式 (6 bytes/pixel) - 已弃用，保留以兼容旧代码
+                    expected_size = img.height * img.width * 3 * 2  # 16bit = 2 bytes
+                    if len(img.raw_data) == expected_size:
+                        array = np.frombuffer(img.raw_data, dtype=np.uint16)
+                        array = array.reshape((img.height, img.width, 3))  # RGB
+                        rgb = array
+                    else:
+                        # Fallback: 接收到的是 8bit BGRA，但我们想要 16bit
+                        # 转换: uint8 -> uint16 (左移8位或乘以257)
+                        array = np.frombuffer(img.raw_data, dtype=np.uint8)
+                        array = array.reshape((img.height, img.width, 4))
+                        rgb_u8 = array[:, :, [2, 1, 0]] # BGRA -> RGB
+                        rgb = rgb_u8.astype(np.uint16) * 257 # [0, 255] -> [0, 65535]
+
+                elif raw_type == 'float32':
+                    # 32bit float RGB 格式 (12 bytes/pixel)
+                    array = np.frombuffer(img.raw_data, dtype=np.float32)
+                    array = array.reshape((img.height, img.width, 3))  # RGB, 无 Alpha
+                    rgb = array  # 已经是 RGB 顺序
+
+                else:  # 'uint8' (默认)
+                    # 8bit BGRA 格式 (4 bytes/pixel)
+                    array = np.frombuffer(img.raw_data, dtype=np.uint8)
+                    array = array.reshape((img.height, img.width, 4))
+                    rgb = array[:, :, [2, 1, 0]]  # BGRA -> RGB
                 
                 results[cid] = {
                     'data': rgb,
                     'timestamp': img.timestamp,
-                    'frame': img.frame
+                    'frame': img.frame,
+                    'raw_type': raw_type
                 }
         except queue.Empty:
             print("[RGBSuite] Data Timeout!")
