@@ -84,7 +84,10 @@
       "Bash(C:Usersbills.condaenvscarlapython.exe verify_bayer_network.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlacompress_code_for_ai.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe models/backbone/mobilenet_v2_bayer.py)",
-      "Bash(C:Usersbills.condaenvscarlapython.exe occ_network_nanoverify_bayer_network.py)"
+      "Bash(C:Usersbills.condaenvscarlapython.exe occ_network_nanoverify_bayer_network.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe d:codecarlacheck_class_distribution.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe check_class_distribution.py)",
+      "Bash(conda run:*)"
     ],
     "deny": [],
     "ask": []

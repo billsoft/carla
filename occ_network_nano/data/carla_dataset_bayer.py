@@ -167,6 +167,10 @@ class CARLADatasetBayer(Dataset):
         intrinsics = cam_params['intrinsics']  # [8, 3, 3]
         extrinsics = cam_params['extrinsics']  # [8, 4, 4]
 
+        # 4. 验证时间戳对齐 (如果元数据中有)
+        # 注意: 当前数据生成代码未在 npz 中保存时间戳，后续可改进。
+        # 这里假设文件名 ID 严格对应。
+        
         # 数据增强（简单版本）
         if self.augment:
             images, occupancy = self._augment(images, occupancy)

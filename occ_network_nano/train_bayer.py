@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from models import build_bayer_occ_net
 from data.carla_dataset_bayer import build_dataloader
+from utils.loss import MaskedWeightedCELoss, get_default_class_weights
 
 
 def setup_logging(save_dir: str) -> logging.Logger:
@@ -108,12 +109,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, 
         # 混合精度前向传播
         with autocast(enabled=args.amp):
             outputs = model(images)
-            # 简化损失（仅演示）
-            loss = nn.functional.cross_entropy(
-                outputs.view(-1, args.num_classes),
-                occupancy.view(-1).long(),
-                reduction='mean'
-            )
+            # 使用 MaskedWeightedCELoss
+            loss = criterion(outputs, occupancy.long(), mask)
 
         # 反向传播
         optimizer.zero_grad()
@@ -223,7 +220,10 @@ def main():
     logger.info(f'  Total:            {params_summary["total"]:.2f}M')
 
     # 损失函数
-    criterion = nn.CrossEntropyLoss()
+    # 使用带权重和掩码的损失函数
+    class_weights = get_default_class_weights()
+    criterion = MaskedWeightedCELoss(class_weights=class_weights).to(device)
+    logger.info(f"Using MaskedWeightedCELoss with class weights.")
 
     # 优化器
     optimizer = optim.AdamW(
