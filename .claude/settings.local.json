@@ -87,7 +87,11 @@
       "Bash(C:Usersbills.condaenvscarlapython.exe occ_network_nanoverify_bayer_network.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe d:codecarlacheck_class_distribution.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe check_class_distribution.py)",
-      "Bash(conda run:*)"
+      "Bash(conda run:*)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe verify_network_shapes.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaverify_network_shapes.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaverify_fixes.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe verify_fixes.py)"
     ],
     "deny": [],
     "ask": []

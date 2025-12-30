@@ -213,7 +213,7 @@ def build_dataloader(
     batch_size: int = 4,
     num_workers: int = 4,
     shuffle: bool = True,
-    img_size: Tuple[int, int] = (384, 640),
+    img_size: Tuple[int, int] = (960, 1280),
     augment: bool = False,
 ) -> DataLoader:
     """
@@ -257,7 +257,7 @@ if __name__ == '__main__':
     try:
         dataset = CARLADatasetBayer(
             root='../dataset_10k',  # 需要先生成数据集
-            img_size=(384, 640),
+            img_size=(960, 1280),
             augment=True,
         )
 

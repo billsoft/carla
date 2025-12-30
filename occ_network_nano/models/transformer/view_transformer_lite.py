@@ -65,8 +65,8 @@ class LiteViewTransformer(nn.Module):
         feat_width=80,
         bev_height=100,
         bev_width=100,
-        num_depth_bins=32,
-        d_bound=(2.0, 50.0, 1.5),  # (min_depth, max_depth, step)
+        num_depth_bins=64,  # 增加深度分辨率: 32 → 64
+        d_bound=(2.0, 100.0, 1.5),  # 扩展深度范围: 50m → 100m (自动驾驶常用范围)
         x_bound=(-25.0, 25.0, 0.5),  # (min_x, max_x, resolution)
         y_bound=(-25.0, 25.0, 0.5),  # (min_y, max_y, resolution)
     ):
@@ -109,6 +109,15 @@ class LiteViewTransformer(nn.Module):
             nn.ReLU(inplace=True),
         )
 
+        # 改进: 可学习的相机融合权重 (替代简单 mean)
+        # 让网络学习不同相机的重要性
+        self.camera_attention = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels // 4, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels // 4, 1, 1),
+            nn.Sigmoid()
+        )
+
     def forward(self, features, camera_extrinsics=None):
         """
         Args:
@@ -134,26 +143,37 @@ class LiteViewTransformer(nn.Module):
         # 将深度加权的特征投影到 BEV
 
         # Lift: 将 2D 特征提升到 3D（深度加权）
-        # [B*N, C, H, W] × [B*N, D, H, W] -> [B*N, C*D, H, W]
+        # [B*N, C, H, W] × [B*N, D, H, W] -> [B*N, C, D, H, W]
         D = depth.shape[1]
         feat_3d = feat.unsqueeze(2) * depth.unsqueeze(1)  # [B*N, C, D, H, W]
-        feat_3d = feat_3d.view(B * N, C * D, H, W)
+
+        # 改进: 深度加权池化 (替代简单平均)
+        # 对每个深度bin赋予不同权重,远处深度权重降低
+        depth_weights = depth.mean(dim=[2, 3], keepdim=True)  # [B*N, D, 1, 1]
+        feat_3d_weighted = feat_3d * depth_weights.unsqueeze(1)  # [B*N, C, D, H, W]
+
+        # 深度维度加权求和 (而非平均)
+        feat_2d_proj = feat_3d_weighted.sum(dim=2)  # [B*N, C, H, W]
 
         # Splat: 投影到 BEV（简化版：使用自适应池化）
         # 实际应根据相机内外参进行几何投影
-        bev_feat_flat = F.adaptive_avg_pool2d(feat_3d, (self.bev_height, self.bev_width))
-
-        # 降维回原通道数
-        bev_feat_flat = F.avg_pool1d(
-            bev_feat_flat.view(B * N, C, D, -1).mean(dim=2),  # 先平均深度维度
-            kernel_size=1
-        ).view(B * N, C, self.bev_height, self.bev_width)
+        bev_feat_flat = F.adaptive_avg_pool2d(feat_2d_proj, (self.bev_height, self.bev_width))
 
         # Reshape 回批次维度
         bev_feat = bev_feat_flat.view(B, N, self.out_channels, self.bev_height, self.bev_width)
 
-        # 4. 融合多相机（平均或最大池化）
-        bev_feat = bev_feat.mean(dim=1)  # [B, C_out, BEV_H, BEV_W]
+        # 4. 改进的多相机融合 (attention-weighted)
+        # 为每个相机生成注意力权重
+        attn_weights = []
+        for i in range(N):
+            attn = self.camera_attention(bev_feat[:, i])  # [B, 1, H, W]
+            attn_weights.append(attn)
+
+        attn_weights = torch.stack(attn_weights, dim=1)  # [B, N, 1, H, W]
+        attn_weights = F.softmax(attn_weights, dim=1)  # 归一化权重
+
+        # 加权融合
+        bev_feat = (bev_feat * attn_weights).sum(dim=1)  # [B, C_out, BEV_H, BEV_W]
 
         # 5. BEV 编码
         bev_feat = self.bev_encode(bev_feat)

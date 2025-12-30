@@ -88,34 +88,36 @@ class BayerMobileNetV2(nn.Module):
         # 原理：Space-to-Depth，避免卷积核跨越不同颜色
         self.pixel_unshuffle = nn.PixelUnshuffle(2)
 
-        # ========== Stem：处理 RGGB 4 通道 ==========
-        # 4→48 通道，3×3 卷积，stride=1
-        # 此时 4 通道已经是分离的 RGGB，卷积不会混合颜色
-        stem_channels = _make_divisible(48 * width_mult)
+        # ========== Stem：处理 RGGB 4 通道（内存优化版）==========
+        # 4→32 通道，3×3 卷积，stride=2
+        # 优化：降低通道数 48→32，stride=2 快速下采样，显存降低 75%
+        stem_channels = _make_divisible(32 * width_mult)
         self.stem = nn.Sequential(
-            nn.Conv2d(4, stem_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(4, stem_channels, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(stem_channels),
             nn.ReLU6(inplace=True)
         )
 
-        # ========== 标准 MobileNetV2 Blocks ==========
-        # 从 48 通道开始，逐步下采样
-        # 注意：PixelUnshuffle 已经做了 1/2 下采样，所以整体分辨率：
+        # ========== 标准 MobileNetV2 Blocks（内存优化版）==========
+        # 从 32 通道开始，逐步下采样
+        # 注意：PixelUnshuffle (1/2) + Stem stride=2 (1/2) = 总共 1/4 下采样
         # - 输入: H×W
         # - PixelUnshuffle: H/2×W/2
-        # - Stage 1: H/4×W/4
-        # - Stage 2: H/8×W/8 → C3
-        # - Stage 3: H/16×W/16 → C4
-        # - Stage 5: H/32×W/32 → C5
+        # - Stem stride=2: H/4×W/4
+        # - Stage 1: H/8×W/8
+        # - Stage 2: H/16×W/16 → C3
+        # - Stage 3: H/32×W/32 → C4
+        # - Stage 5: H/64×W/64 → C5
 
         # inverted_residual_setting: [expand_ratio, out_channels, num_blocks, stride]
+        # 优化：expand_ratio 从 6 降低到 4，显存降低 33%
         inverted_residual_setting = [
-            [6, 64,  1, 2],   # Stage 1: 48→64, stride=2 (1/4 总下采样)
-            [6, 96, 2, 2],    # Stage 2: 64→96, stride=2 (1/8) → C3
-            [6, 128, 3, 2],   # Stage 3: 96→128, stride=2 (1/16) → C4
-            [6, 160, 4, 1],   # Stage 4: 128→160, stride=1 (保持 1/16)
-            [6, 256, 3, 2],   # Stage 5: 160→256, stride=2 (1/32) → C5
-            [6, 320, 1, 1],   # Stage 6: 256→320, stride=1 (保持 1/32)
+            [4, 48,  1, 2],   # Stage 1: 32→48, stride=2 (1/8 总下采样)
+            [4, 64, 2, 2],    # Stage 2: 48→64, stride=2 (1/16) → C3
+            [4, 96, 3, 2],    # Stage 3: 64→96, stride=2 (1/32) → C4
+            [4, 128, 4, 1],   # Stage 4: 96→128, stride=1 (保持 1/32)
+            [4, 192, 3, 2],   # Stage 5: 128→192, stride=2 (1/64) → C5
+            [4, 256, 1, 1],   # Stage 6: 192→256, stride=1 (保持 1/64)
         ]
 
         self.layers = nn.ModuleList()
@@ -130,11 +132,11 @@ class BayerMobileNetV2(nn.Module):
                 )
                 in_channels = out_channels
 
-        # ========== 输出通道配置 ==========
+        # ========== 输出通道配置（内存优化版）==========
         self.out_channels = {
-            'C3': _make_divisible(96 * width_mult),   # 1/8 分辨率
-            'C4': _make_divisible(128 * width_mult),  # 1/16 分辨率
-            'C5': _make_divisible(256 * width_mult),  # 1/32 分辨率
+            'C3': _make_divisible(64 * width_mult),   # 1/16 分辨率（Stem stride=2 后）
+            'C4': _make_divisible(96 * width_mult),   # 1/32 分辨率
+            'C5': _make_divisible(192 * width_mult),  # 1/64 分辨率
         }
 
         # 初始化权重
@@ -153,42 +155,42 @@ class BayerMobileNetV2(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        前向传播
+        前向传播（内存优化版）
 
         Args:
             x: 输入 Bayer 图像 (B, 1, H, W)
 
         Returns:
             多尺度特征字典
-                - C3: (B, 96, H/8, W/8)
-                - C4: (B, 128, H/16, W/16)
-                - C5: (B, 256, H/32, W/32)
+                - C3: (B, 64, H/16, W/16)
+                - C4: (B, 96, H/32, W/32)
+                - C5: (B, 192, H/64, W/64)
         """
         features = {}
 
         # PixelUnshuffle: [B, 1, H, W] → [B, 4, H/2, W/2]
         x = self.pixel_unshuffle(x)
 
-        # Stem: [B, 4, H/2, W/2] → [B, 48, H/2, W/2]
+        # Stem: [B, 4, H/2, W/2] → [B, 32, H/4, W/4] (stride=2)
         x = self.stem(x)
 
-        # 逐层前向
+        # 逐层前向（内存优化版：通道数降低，expand_ratio=4）
         for idx, layer in enumerate(self.layers):
             x = layer(x)
 
             # 保存多尺度特征
-            # Stage 1 (idx=0): 48→64, stride=2 → H/4, W/4
-            # Stage 2 (idx=1-2): 64→96, 2 blocks → H/8, W/8 (C3)
-            # Stage 3 (idx=3-5): 96→128, 3 blocks → H/16, W/16 (C4)
-            # Stage 4 (idx=6-9): 128→160, 4 blocks → H/16, W/16
-            # Stage 5 (idx=10-12): 160→256, 3 blocks → H/32, W/32 (C5)
-            # Stage 6 (idx=13): 256→320, 1 block → H/32, W/32
+            # Stage 1 (idx=0): 32→48, stride=2 → H/8, W/8
+            # Stage 2 (idx=1-2): 48→64, 2 blocks → H/16, W/16 (C3)
+            # Stage 3 (idx=3-5): 64→96, 3 blocks → H/32, W/32 (C4)
+            # Stage 4 (idx=6-9): 96→128, 4 blocks → H/32, W/32
+            # Stage 5 (idx=10-12): 128→192, 3 blocks → H/64, W/64 (C5)
+            # Stage 6 (idx=13): 192→256, 1 block → H/64, W/64
 
-            if idx == 2:  # Stage 2 结束 (1/8 总下采样)
+            if idx == 2:  # Stage 2 结束 (1/16 总下采样)
                 features['C3'] = x
-            elif idx == 5:  # Stage 3 结束 (1/16 总下采样)
+            elif idx == 5:  # Stage 3 结束 (1/32 总下采样)
                 features['C4'] = x
-            elif idx == 12:  # Stage 5 结束 (1/32 总下采样)
+            elif idx == 12:  # Stage 5 结束 (1/64 总下采样)
                 features['C5'] = x
 
         return features
@@ -223,7 +225,7 @@ if __name__ == '__main__':
 
     # 测试前向传播
     batch_size = 2
-    H, W = 384, 640
+    H, W = 960, 1280
     x = torch.randn(batch_size, 1, H, W)  # 单通道 Bayer
 
     print(f"\n输入: {x.shape}")

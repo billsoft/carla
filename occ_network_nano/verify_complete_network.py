@@ -23,7 +23,7 @@ def verify_complete_network():
 
     # 配置
     B, N_cam = 2, 8
-    H, W = 384, 640
+    H, W = 960, 1280
     num_classes = 18
     grid_size = (200, 200, 16)
 

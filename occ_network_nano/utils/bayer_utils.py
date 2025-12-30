@@ -36,16 +36,44 @@ def load_bayer_image(path: str, is_12bit: bool = True) -> np.ndarray:
 
     # 读取图像（单通道灰度模式）
     # 尝试读取 DNG/TIFF
+    img = None
+    error_msgs = []
+
+    # 方法1: 使用 rawpy（推荐，支持 DNG）
     try:
         import rawpy
         with rawpy.imread(path) as raw:
              img = raw.raw_image_visible.copy()
-        
-    except Exception:
-        # 降级使用 OpenCV
-        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED | cv2.IMREAD_GRAYSCALE)
+    except ImportError:
+        error_msgs.append("rawpy 未安装")
+    except Exception as e:
+        error_msgs.append(f"rawpy 失败: {e}")
 
-    assert img is not None, f"无法加载图像: {path}"
+    # 方法2: 使用 OpenCV（降级方案）
+    if img is None:
+        try:
+            img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED | cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                error_msgs.append("OpenCV 无法读取（返回 None）")
+        except Exception as e:
+            error_msgs.append(f"OpenCV 失败: {e}")
+
+    # 方法3: 使用 imageio（最后的尝试）
+    if img is None:
+        try:
+            import imageio
+            img = imageio.imread(path)
+            # 确保是灰度图
+            if len(img.shape) == 3:
+                img = img[:, :, 0]  # 取第一个通道
+        except ImportError:
+            error_msgs.append("imageio 未安装")
+        except Exception as e:
+            error_msgs.append(f"imageio 失败: {e}")
+
+    if img is None:
+        error_msg = f"无法加载图像: {path}\n尝试的方法:\n" + "\n".join(f"  - {msg}" for msg in error_msgs)
+        raise RuntimeError(error_msg)
     # assert img.dtype == np.uint16, f"图像不是 16-bit: {img.dtype}" # PIL 读出来可能是 int32 (I mode)
     if img.dtype == np.int32 or img.dtype == np.uint32:
         img = img.astype(np.uint16)

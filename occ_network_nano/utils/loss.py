@@ -62,54 +62,64 @@ class MaskedWeightedCELoss(nn.Module):
 
 def get_default_class_weights():
     """
-    获取默认的类别权重 (基于 occ_loss.py)
-    
-    背景类 (0) 权重较低 (0.5)
-    稀有类 (自行车、摩托车等) 权重较高 (5.0-10.0)
-    常见类 (汽车、路面) 权重中等 (1.0-2.0)
+    获取默认的类别权重 (基于 nuScenes 18类标准)
+
+    权重策略:
+    - 空白类 (free): 权重 1.0 (重要! 提供场景几何信息,不可忽略)
+    - 稀有但关键的类 (自行车、摩托车、行人、交通锥): 权重 3.0-5.0
+    - 中等重要的类 (车辆、护栏): 权重 2.0
+    - 常见类 (路面、植被): 权重 1.0
+
+    ⚠️ 修改历史:
+    - 2025-12-30: 对齐 dense_occupancy_collection 的 18类映射 (nuScenes 标准)
+    - 2025-12-30: Class 0 权重 0.1 → 1.0 (修复网络完全忽略空白类的问题)
+
+    类别定义表 (基于 dense_occupancy_collection/config/actor_occupancy_mapping.py):
+    ┌──────┬──────────────────────┬────────┬─────────────────────────────────┐
+    │ ID   │ 类别名称             │ 权重   │ 说明                            │
+    ├──────┼──────────────────────┼────────┼─────────────────────────────────┤
+    │  0   │ free                 │  1.0   │ 自由空间 (几何信息)             │
+    │  1   │ barrier              │  2.0   │ 隔离栏/护栏                     │
+    │  2   │ bicycle              │  5.0   │ 自行车 (稀有且重要)             │
+    │  3   │ bus                  │  2.0   │ 公交车                          │
+    │  4   │ car                  │  2.0   │ 小汽车 (重要目标)               │
+    │  5   │ construction_vehicle │  3.0   │ 工程车 (较稀有)                 │
+    │  6   │ motorcycle           │  5.0   │ 摩托车 (稀有且重要)             │
+    │  7   │ pedestrian           │  5.0   │ 行人 (最重要的目标)             │
+    │  8   │ traffic_cone         │  3.0   │ 交通锥桶 (较稀有)               │
+    │  9   │ trailer              │  2.0   │ 拖车                            │
+    │ 10   │ truck                │  2.0   │ 卡车                            │
+    │ 11   │ driveable_surface    │  1.0   │ 可行驶路面                      │
+    │ 12   │ other_flat           │  1.0   │ 其他平坦表面                    │
+    │ 13   │ sidewalk             │  1.0   │ 人行道                          │
+    │ 14   │ terrain              │  1.0   │ 地形 (草地、泥地)               │
+    │ 15   │ manmade              │  1.0   │ 人造物体 (建筑、标志)           │
+    │ 16   │ vegetation           │  1.0   │ 植被 (树、草)                   │
+    │ 17   │ general_object       │  1.0   │ 通用障碍物/其他                 │
+    └──────┴──────────────────────┴────────┴─────────────────────────────────┘
+
+    Returns:
+        List[float]: 18个类别的权重列表
     """
-    # 假设 18 个类别 (0-17)
-    # 0: Unlabeled/Free (背景)
-    # 1: Building
-    # 2: Fence
-    # 3: Other
-    # 4: Pedestrian
-    # 5: Pole
-    # 6: RoadLine
-    # 7: Road
-    # 8: Sidewalk
-    # 9: Vegetation
-    # 10: Vehicles (Car)
-    # 11: Wall
-    # 12: TrafficSign
-    # 13: Sky (通常被过滤掉)
-    # 14: Ground
-    # 15: Bridge
-    # 16: RailTrack
-    # 17: GuardRail
-    # ... 以及其他可能映射的类别
-    
-    # 这里定义一个简化的权重列表，基于常见频率
-    # 修复: Class 0 权重从 0.1 提高到 1.0, 避免网络完全忽略空白类
     weights = [
-        1.0,  # 0: Free/Unlabeled (空白类,重要的几何信息!)
-        1.0,  # 1: Building
-        1.0,  # 2: Fence
-        1.0,  # 3: Other
-        5.0,  # 4: Pedestrian (稀有且重要)
-        2.0,  # 5: Pole
-        2.0,  # 6: RoadLine
-        1.0,  # 7: Road
-        1.0,  # 8: Sidewalk
-        1.0,  # 9: Vegetation
-        2.0,  # 10: Vehicles (重要)
-        1.0,  # 11: Wall
-        5.0,  # 12: TrafficSign
-        0.5,  # 13: Sky (降低权重,通常在视野外)
-        1.0,  # 14: Ground
-        1.0,  # 15: Bridge
-        1.0,  # 16: RailTrack
-        1.0,  # 17: GuardRail
+        1.0,  # 0: free - 自由空间 (重要几何信息!)
+        2.0,  # 1: barrier - 隔离栏/护栏
+        5.0,  # 2: bicycle - 自行车 (稀有且重要)
+        2.0,  # 3: bus - 公交车
+        2.0,  # 4: car - 小汽车 (重要目标)
+        3.0,  # 5: construction_vehicle - 工程车 (较稀有)
+        5.0,  # 6: motorcycle - 摩托车 (稀有且重要)
+        5.0,  # 7: pedestrian - 行人 (最重要!)
+        3.0,  # 8: traffic_cone - 交通锥桶 (较稀有)
+        2.0,  # 9: trailer - 拖车
+        2.0,  # 10: truck - 卡车
+        1.0,  # 11: driveable_surface - 可行驶路面
+        1.0,  # 12: other_flat - 其他平坦表面
+        1.0,  # 13: sidewalk - 人行道
+        1.0,  # 14: terrain - 地形 (草地、泥地)
+        1.0,  # 15: manmade - 人造物体 (建筑、标志)
+        1.0,  # 16: vegetation - 植被
+        1.0,  # 17: general_object - 通用障碍物/其他
     ]
-    
+
     return weights

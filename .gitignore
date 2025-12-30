@@ -16,14 +16,17 @@ CMakeSettings.json
 
 Help.md
 
+
 PythonAPI/examples/cache/
 carla_data_collection/dataset_output/
 dataset_output/
 dataset_10k/
 outputs/
+inference_results/
 .log
 .pth
 server/
 nul
 occ_network/checkpoints/
 occ_network_lite/checkpoints_lite/
+code_summary_for_ai.txt

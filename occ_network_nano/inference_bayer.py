@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--num-samples', type=int, default=10, help='推理样本数量')
     parser.add_argument('--output-dir', type=str, default='inference_results', help='输出目录')
     parser.add_argument('--device', type=str, default='cuda', help='设备')
-    parser.add_argument('--img-size', type=int, nargs=2, default=[384, 640], help='图像尺寸')
+    parser.add_argument('--img-size', type=int, nargs=2, default=[960, 1280], help='图像尺寸 (特斯拉标准)')
 
     return parser.parse_args()
 
@@ -150,7 +150,28 @@ def main():
     # 加载检查点
     print(f"\n加载检查点: {args.checkpoint}")
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
-    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    try:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    except RuntimeError as e:
+        if 'Missing key(s) in state_dict: "view_transformer.camera_attention' in str(e):
+            print("\n⚠️ 警告: 检查点不包含相机注意力层权重 (可能是旧版本模型)。")
+            print("   正在尝试以兼容模式加载 (使用平均融合)...")
+            
+            # 1. 允许非严格加载 (忽略缺失的 keys)
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            
+            # 2. 初始化注意力层为零 (使其输出 0 -> sigmoid(0)=0.5 -> softmax后为均匀分布 -> 平均融合)
+            # 这样可以模拟旧模型的行为
+            for m in model.view_transformer.camera_attention.modules():
+                if isinstance(m, torch.nn.Conv2d):
+                    torch.nn.init.constant_(m.weight, 0)
+                    if m.bias is not None:
+                        torch.nn.init.constant_(m.bias, 0)
+            
+            print("   ✅ 已初始化注意力层为零 (模拟平均融合)")
+        else:
+            raise e
     model.eval()
 
     epoch = checkpoint.get('epoch', 'unknown')

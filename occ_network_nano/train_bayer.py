@@ -71,7 +71,7 @@ def parse_args():
     parser.add_argument('--num-workers', type=int, default=4)
 
     # 模型配置
-    parser.add_argument('--img-size', type=int, nargs=2, default=[384, 640], help='图像尺寸 H W')
+    parser.add_argument('--img-size', type=int, nargs=2, default=[960, 1280], help='图像尺寸 H W (特斯拉标准)')
     parser.add_argument('--width-mult', type=float, default=1.0, help='Backbone 宽度乘数')
 
     # 训练技巧

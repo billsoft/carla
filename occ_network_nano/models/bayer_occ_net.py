@@ -39,7 +39,7 @@ class BayerOccNet(nn.Module):
         self,
         num_classes=18,
         grid_size=(200, 200, 16),
-        img_size=(384, 640),
+        img_size=(960, 1280),
         backbone_width_mult=1.0,
         fpn_channels=128,
         bev_size=(100, 100),
@@ -62,7 +62,8 @@ class BayerOccNet(nn.Module):
         )
 
         # 3. View Transformer: 2D → BEV
-        feat_h, feat_w = img_size[0] // 8, img_size[1] // 8  # 1/8 分辨率
+        # FPN 输出分辨率为 1/8 (PixelUnshuffle 1/2 + Stem stride=2 → 1/4, 但 FPN 使用 C3 特征在 1/8)
+        feat_h, feat_w = img_size[0] // 8, img_size[1] // 8  # FPN 实际输出: 120×160
         self.view_transformer = LiteViewTransformer(
             in_channels=fpn_channels,
             out_channels=fpn_channels,
@@ -70,7 +71,7 @@ class BayerOccNet(nn.Module):
             feat_width=feat_w,
             bev_height=bev_size[0],
             bev_width=bev_size[1],
-            num_depth_bins=32
+            num_depth_bins=64  # 提高深度分辨率以匹配扩展的深度范围 (2-100m)
         )
 
         # 4. BEV Encoder: 增强 BEV 特征
@@ -90,7 +91,7 @@ class BayerOccNet(nn.Module):
 
     def forward(self, images, camera_extrinsics=None):
         """
-        前向传播
+        前向传播（内存优化版：逐相机处理）
 
         Args:
             images: [B, N_cam, 1, H, W] Bayer 图像
@@ -101,25 +102,36 @@ class BayerOccNet(nn.Module):
         """
         B, N_cam, C, H, W = images.shape
 
-        # 1. Backbone: 提取多尺度特征
-        # 展平批次和相机维度
-        images_flat = images.view(B * N_cam, C, H, W)
-        features = self.backbone(images_flat)  # {'C3', 'C4', 'C5'}
+        # 1. Backbone + FPN: 逐相机处理（节省内存）
+        # 原方案：images.view(B*N_cam, C, H, W) 一次性处理所有相机
+        # 问题：batch_size=2, N_cam=8, 960×1280 → 峰值显存爆炸
+        # 新方案：循环处理每个相机，内存降低 8 倍
+        fpn_features_list = []
 
-        # 2. FPN: 融合多尺度特征
-        fpn_feat = self.fpn(features)  # [B*N_cam, fpn_C, H/8, W/8]
+        for cam_idx in range(N_cam):
+            # 提取当前相机的图像 [B, 1, H, W]
+            cam_images = images[:, cam_idx]  # [B, 1, H, W]
 
-        # 3. Reshape 回多相机维度
-        _, fpn_C, feat_H, feat_W = fpn_feat.shape
-        fpn_feat = fpn_feat.view(B, N_cam, fpn_C, feat_H, feat_W)
+            # Backbone 特征提取（共享权重）
+            features = self.backbone(cam_images)  # {'C3': [B,96,H/8,W/8], 'C4', 'C5'}
 
-        # 4. View Transformer: 2D → BEV
+            # FPN 融合多尺度特征
+            fpn_feat = self.fpn(features)  # [B, fpn_C, H/8, W/8]
+
+            # 保存当前相机的特征
+            fpn_features_list.append(fpn_feat)
+
+        # 2. 堆叠所有相机的 FPN 特征
+        # List of [B, fpn_C, H/8, W/8] × N_cam → [B, N_cam, fpn_C, H/8, W/8]
+        fpn_feat = torch.stack(fpn_features_list, dim=1)
+
+        # 3. View Transformer: 2D → BEV
         bev_feat = self.view_transformer(fpn_feat, camera_extrinsics)  # [B, fpn_C, BEV_H, BEV_W]
 
-        # 5. BEV Encoder: 增强 BEV 特征
+        # 4. BEV Encoder: 增强 BEV 特征
         bev_feat = self.bev_encoder(bev_feat)  # [B, fpn_C, BEV_H, BEV_W]
 
-        # 6. Occupancy Decoder: BEV → 3D 体素
+        # 5. Occupancy Decoder: BEV → 3D 体素
         occ_logits = self.occ_decoder(bev_feat)  # [B, num_classes, X, Y, Z]
 
         return occ_logits
@@ -166,7 +178,7 @@ if __name__ == '__main__':
 
     # 模拟输入
     B, N_cam = 2, 8
-    H, W = 384, 640
+    H, W = 960, 1280
     images = torch.randn(B, N_cam, 1, H, W)
 
     # 创建模型
