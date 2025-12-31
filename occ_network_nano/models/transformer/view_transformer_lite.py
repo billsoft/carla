@@ -14,6 +14,10 @@ class DepthNet(nn.Module):
     深度预测网络
 
     从 2D 特征预测每个像素的深度分布
+
+    ⚠️ 数值稳定性改进 (2025-12-30):
+    - 初始化最后一层为小值,防止初期梯度爆炸
+    - Logits clamp 防止 FP16 softmax 溢出
     """
     def __init__(self, in_channels, depth_channels=64, num_depth_bins=32):
         super().__init__()
@@ -37,6 +41,11 @@ class DepthNet(nn.Module):
             depth: [B*N, D, H, W] 深度分布（softmax 归一化）
         """
         depth_logits = self.depth_conv(x)  # [B*N, D, H, W]
+
+        # ✅ 数值稳定性: clamp 防止 FP16 exp() 溢出
+        # FP16 最大值 ~65504, exp(10) ≈ 22026, exp(15) ≈ 3.3e6 (会溢出)
+        depth_logits = torch.clamp(depth_logits, min=-10.0, max=10.0)
+
         depth = F.softmax(depth_logits, dim=1)  # 归一化为概率分布
         return depth
 

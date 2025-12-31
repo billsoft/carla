@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Bayer RAW Occupancy Network 训练脚本
+Standard 版本 Occupancy Network 训练脚本
 
-python occ_network_nano/train_bayer.py --dataset dataset_10k --batch-size 2 --epochs 50 --device cuda --amp
-
-专为单通道 Bayer RGGB 输入优化，数据量降低 66%。
-
-用法:
-    python train_bayer.py --dataset ../dataset_10k --epochs 50 --batch-size 4
+配置:
+- Batch Size: 2 (显存充足时)
+- Mixed Precision (AMP)
+- Gradient Clipping
+- Checkpointing (可选)
 """
 
 import os
@@ -26,7 +25,7 @@ from torch.cuda.amp import GradScaler, autocast
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models import build_bayer_occ_net
+from models import TransformerOccNet
 from data.carla_dataset_bayer import build_dataloader
 from utils.loss import MaskedWeightedCELoss, get_default_class_weights
 
@@ -35,7 +34,7 @@ def setup_logging(save_dir: str) -> logging.Logger:
     """设置日志"""
     os.makedirs(save_dir, exist_ok=True)
 
-    logger = logging.getLogger('BayerOccNet')
+    logger = logging.getLogger('StandardOccNet')
     logger.setLevel(logging.INFO)
 
     # 清除已有处理器
@@ -58,28 +57,30 @@ def setup_logging(save_dir: str) -> logging.Logger:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train Bayer RAW Occupancy Network')
+    parser = argparse.ArgumentParser(description='Train Standard Occupancy Network')
 
     # 数据
     parser.add_argument('--dataset', type=str, required=True, help='数据集根目录')
 
     # 训练
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch-size', type=int, default=4)
-    parser.add_argument('--lr', type=float, default=5e-5, help='初始学习率 (大分辨率+BS=1建议极低)')
-    parser.add_argument('--weight-decay', type=float, default=0.05, help='权重衰减')
+    parser.add_argument('--batch-size', type=int, default=2)
+    parser.add_argument('--lr', type=float, default=1e-4, help='初始学习率')
+    parser.add_argument('--weight-decay', type=float, default=0.01, help='权重衰减')
     parser.add_argument('--num-workers', type=int, default=4)
 
     # 模型配置
-    parser.add_argument('--img-size', type=int, nargs=2, default=[960, 1280], help='图像尺寸 H W (特斯拉标准)')
-    parser.add_argument('--width-mult', type=float, default=1.0, help='Backbone 宽度乘数')
+    parser.add_argument('--img-size', type=int, nargs=2, default=[960, 1280], help='图像尺寸 H W')
+    parser.add_argument('--embed-dim', type=int, default=256, help='Embedding 维度')
+    parser.add_argument('--patch-size', type=int, default=16, help='Patch 大小')
+    parser.add_argument('--use-checkpoint', action='store_true', help='使用梯度检查点')
 
     # 训练技巧
-    parser.add_argument('--amp', action='store_true', help='混合精度训练 (大分辨率+BS=1建议关闭)')
+    parser.add_argument('--amp', action='store_true', help='混合精度训练')
     parser.add_argument('--grad-clip', type=float, default=5.0, help='梯度裁剪阈值')
 
     # 保存
-    parser.add_argument('--save-dir', type=str, default='outputs/bayer_raw')
+    parser.add_argument('--save-dir', type=str, default='outputs/standard_occ')
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--log-interval', type=int, default=20)
 
@@ -88,19 +89,9 @@ def parse_args():
     return parser.parse_args()
 
 
-# 使用完整的 BayerOccNet 网络
-# 包括: Backbone → FPN → View Transformer → BEV Encoder → Occ Decoder
-
-
 def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, epoch, args, logger):
     """训练一个 epoch"""
     model.train()
-
-    # 如果 Batch Size 为 1, 再次冻结 BN (因为 model.train() 会解冻)
-    if args.batch_size == 1:
-        for m in model.modules():
-            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d):
-                m.eval()
 
     total_loss = 0
     num_batches = len(dataloader)
@@ -118,7 +109,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, 
             # 使用 MaskedWeightedCELoss
             loss = criterion(outputs, occupancy.long(), mask)
 
-        # ✅ NaN 检测: 如果 loss 是 NaN/Inf,跳过此 batch
+        # ✅ NaN 检测
         if torch.isnan(loss) or torch.isinf(loss):
             logger.warning(f'Epoch [{epoch}][{batch_idx+1}/{num_batches}] Loss is NaN/Inf, skipping batch...')
             optimizer.zero_grad()
@@ -126,21 +117,25 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, 
 
         # 反向传播
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
+        if args.amp:
+            scaler.scale(loss).backward()
+            
+            # ✅ 梯度检测
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
-        # ✅ 梯度检测: unscale 后检查梯度是否正常
-        scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            if torch.isnan(grad_norm) or grad_norm > 100.0:
+                logger.warning(f'Epoch [{epoch}][{batch_idx+1}/{num_batches}] Gradient exploded (norm={grad_norm:.2f}), skipping batch...')
+                optimizer.zero_grad()
+                scaler.update()
+                continue
 
-        # 如果梯度爆炸,跳过此 batch (但必须先 update scaler 以重置状态)
-        if torch.isnan(grad_norm) or grad_norm > 100.0:
-            logger.warning(f'Epoch [{epoch}][{batch_idx+1}/{num_batches}] Gradient exploded (norm={grad_norm:.2f}), skipping batch...')
-            optimizer.zero_grad()
-            scaler.update()  # ✅ 关键: 必须 update 才能重置 scaler 状态
-            continue
-
-        scaler.step(optimizer)
-        scaler.update()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
 
         if scheduler is not None:
             scheduler.step()
@@ -155,7 +150,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, 
             # 显存使用
             if args.device == 'cuda':
                 mem = torch.cuda.max_memory_allocated() / 1e9
-                mem_str = f'Mem: {mem:.1f}GB'
+                mem_str = f'Mem: {mem:.2f}GB'
             else:
                 mem_str = ''
 
@@ -178,15 +173,12 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, path):
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-        'scaler_state_dict': scaler.state_dict(),
+        'scaler_state_dict': scaler.state_dict() if scaler else None,
     }, path)
 
 
 def main():
     args = parse_args()
-
-    # 添加 num_classes 参数
-    args.num_classes = 18
 
     # 保存目录
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -219,41 +211,29 @@ def main():
 
     logger.info(f'Train: {len(train_loader.dataset)} samples')
 
-    # 构建完整的 Bayer Occupancy Network
-    logger.info('Building complete Bayer Occupancy Network...')
-    model = build_bayer_occ_net(
+    # 构建 Standard Network
+    logger.info('Building Standard Occupancy Network...')
+    model = TransformerOccNet(
+        num_cameras=8,
+        img_size=img_size,
+        patch_size=args.patch_size,
+        embed_dim=args.embed_dim,
+        encoder_layers=6,
+        decoder_layers=6,
+        num_heads=8,
+        query_grid_size=(50, 50, 8),
+        output_grid_size=(200, 200, 16),
         num_classes=18,
-        grid_size=(200, 200, 16),
-        img_size=tuple(args.img_size),
-        backbone_width_mult=args.width_mult,
-        fpn_channels=128,
-        bev_size=(100, 100),
-        hidden_channels=64
+        use_checkpoint=args.use_checkpoint
     ).to(device)
-
-    # 关键修复: 如果 Batch Size 为 1, 必须冻结 BN 层!
-    # 否则 BN 会使用单样本统计量, 导致训练极其不稳定
-    if args.batch_size == 1:
-        logger.warning("Batch Size is 1! Freezing BatchNorm layers to prevent instability.")
-        for m in model.modules():
-            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d):
-                m.eval()
-                # 也可以选择关闭梯度更新
-                # for p in m.parameters():
-                #     p.requires_grad = False
 
     # 参数统计
     params_summary = model.get_params_summary()
     logger.info(f'Parameters Summary:')
-    logger.info(f'  Backbone:         {params_summary["backbone"]:.2f}M')
-    logger.info(f'  FPN:              {params_summary["fpn"]:.2f}M')
-    logger.info(f'  View Transformer: {params_summary["view_transformer"]:.2f}M')
-    logger.info(f'  BEV Encoder:      {params_summary["bev_encoder"]:.2f}M')
-    logger.info(f'  Occ Decoder:      {params_summary["occ_decoder"]:.2f}M')
-    logger.info(f'  Total:            {params_summary["total"]:.2f}M')
+    for name, value in params_summary.items():
+        logger.info(f'  {name}: {value:.2f}M')
 
     # 损失函数
-    # 使用带权重和掩码的损失函数
     class_weights = get_default_class_weights()
     criterion = MaskedWeightedCELoss(class_weights=class_weights).to(device)
     logger.info(f"Using MaskedWeightedCELoss with class weights.")
@@ -281,7 +261,8 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         if ckpt['scheduler_state_dict']:
             scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-        scaler.load_state_dict(ckpt['scaler_state_dict'])
+        if args.amp and ckpt['scaler_state_dict']:
+            scaler.load_state_dict(ckpt['scaler_state_dict'])
         start_epoch = ckpt['epoch'] + 1
 
     # 训练循环

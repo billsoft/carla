@@ -107,6 +107,17 @@ class OccupancyViewer {
         // 窗口大小调整
         window.addEventListener('resize', () => this.onWindowResize());
 
+        // 监听网格尺寸配置变化
+        const gridProfile = document.getElementById('gridProfile');
+        if (gridProfile) {
+            gridProfile.addEventListener('change', () => {
+                console.log('Grid profile changed, reloading current frame...');
+                if (this.currentData) {
+                    this.loadFrame(this.currentFrameIndex);
+                }
+            });
+        }
+
         // 开始动画
         loading.style.display = 'none';
         this.animate();
@@ -351,15 +362,72 @@ class OccupancyViewer {
                 throw new Error('occupancy 数据不存在!');
             }
 
+            // 获取用户选择的默认配置
+            const profileSelect = document.getElementById('gridProfile');
+            const profileValue = profileSelect ? profileSelect.value : '40';
+            const defaultGrid = profileValue === '16' ? [200, 200, 16] : [500, 500, 40];
+            const defaultRes = profileValue === '16' ? 0.5 : 0.2;
+
+            // 1. 优先使用保存的 grid_size
+            let gridSize = data['grid_size']?.data;
+
+            // 2. 否则尝试从 occupancy shape 获取 (仅当它是3D数组时)
+            if (!gridSize && occupancy.shape && occupancy.shape.length === 3) {
+                gridSize = occupancy.shape;
+                console.log('Using occupancy shape for grid_size:', gridSize);
+            }
+
+            // 3. 最后使用用户选择的默认值
+            if (!gridSize) {
+                gridSize = defaultGrid;
+                console.log('Using user-selected fallback grid_size:', gridSize);
+            }
+            gridSize = Array.from(gridSize);
+
+            // 如果实际网格尺寸与下拉列表不一致，尝试同步更新下拉列表
+            if (gridSize.length === 3 && profileSelect) {
+                // 判断当前是哪种配置
+                let detectedProfile = null;
+                if (gridSize[0] === 200 && gridSize[1] === 200 && gridSize[2] === 16) {
+                    detectedProfile = '16';
+                } else if (gridSize[0] === 500 && gridSize[1] === 500 && gridSize[2] === 40) {
+                    detectedProfile = '40';
+                }
+
+                // 如果检测到标准配置且与当前选择不一致，则更新下拉列表
+                // 注意：为了避免触发 change 事件导致死循环，这里只修改 value 而不触发事件
+                if (detectedProfile && profileSelect.value !== detectedProfile) {
+                    console.log(`Auto-updating dropdown to match detected grid size: ${detectedProfile}`);
+                    profileSelect.value = detectedProfile;
+                }
+            }
+
+            // 分辨率处理
+            let resolution = data['resolution']?.data?.[0];
+            
+            // 如果没有分辨率，根据 grid_size[2] (Z轴) 智能匹配，或使用默认值
+            if (!resolution) {
+                if (gridSize[2] === 16) {
+                    resolution = 0.5;
+                } else if (gridSize[2] === 40) {
+                    resolution = 0.2;
+                } else {
+                    resolution = defaultRes;
+                }
+                console.log('Using inferred/default resolution:', resolution);
+            }
+
+            const xRange = Array.from(data['x_range']?.data || [-50, 50]);
+
             this.currentData = {
                 occupancy: occupancy,
                 actor_ids: actor_ids,
                 mask: mask,
-                x_range: Array.from(data['x_range']?.data || [-50, 50]),
+                x_range: xRange,
                 y_range: Array.from(data['y_range']?.data || [-50, 50]),
                 z_range: Array.from(data['z_range']?.data || [-4, 4]),
-                resolution: data['resolution']?.data?.[0] || 0.2,
-                grid_size: Array.from(data['grid_size']?.data || [500, 500, 40])
+                resolution: resolution,
+                grid_size: gridSize
             };
 
             this.renderVoxels();
