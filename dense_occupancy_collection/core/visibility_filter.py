@@ -170,7 +170,9 @@ class VisibilityFilter:
         filtered_occupancy = occupancy.copy()
         filtered_ids = actor_ids.copy()
         
-        # Remove invisible AND not ground
+        # 核心修改：不可见区域直接设为 0 (Free/Air)
+        # 这保证了数据集中的 "不可见" == "Free"，避免模型混淆
+        # 同时保留 final_mask 供后续可能的 mask loss 使用（如果需要区分未观测区域）
         remove_mask = (~final_mask)
         
         filtered_occupancy[remove_mask] = 0

@@ -672,3 +672,415 @@ pip install rawpy
 - Class 0 缺失 ❌
 
 **原因**: Class 0 权重过低 (0.1), 已修复为 1.0, 需要重新训练。
+
+---
+
+## Occupancy Transformer 项目说明 (occ_transformer)
+
+### 项目概述
+
+`occ_transformer` 是基于 **纯 Transformer 架构** 的 3D 占用网格预测网络,将多视角 2D 图像直接"翻译"为 3D 体素。
+
+**核心思想**:
+```
+多视角 2D 像素序列 → Transformer → 3D 体素序列
+     (源语言)                      (目标语言)
+```
+
+**关键创新**:
+- 相机参数作为位置编码: 射线方向 + 相机位置作为几何先验
+- Cross-Attention 学习像素-体素对应: 自动学习投影关系,无需显式几何投影
+
+### 三个版本对比
+
+| 版本 | 参数量 | BEV尺寸 | 序列长度 | Decoder层数 | 推荐场景 |
+|------|--------|---------|----------|------------|---------|
+| **Nano** | ~10M | 25×25 | 600 tokens | 2层 | 快速实验 |
+| **Standard** | ~30M | 100×100 | 10,000 tokens | 6层 | 高精度 |
+| **Balanced** ⭐ | ~20M | 50×50 | 2,500 tokens | 3层 | **推荐** |
+
+### 快速开始 (Balanced 版本)
+
+**环境要求**: `deepsys` (包含 PyTorch + CUDA)
+
+```bash
+# 用户在 PowerShell 中手动激活环境:
+conda activate deepsys
+
+# 训练:
+python occ_transformer/train_balanced.py \
+    --dataset dataset_10k \
+    --batch-size 2 \
+    --epochs 50 \
+    --lr 1e-4 \
+    --amp
+
+# 推理:
+python occ_transformer/inference_transformer.py \
+    --checkpoint outputs/transformer_balanced/xxx/best.pth \
+    --dataset dataset_10k \
+    --model-type balanced
+
+# 验证网络结构:
+python occ_transformer/verify_balanced_net.py
+```
+
+### 网络架构 (Balanced 版)
+
+```
+Input: [B, 8, 1, 960, 1280]  # 8相机 Bayer RAW
+
+    ↓ BayerPatchEmbed (patch_size=16)
+    → PixelUnshuffle(2) + Conv
+    → 输出: [B, N_patches, 512]
+
+    ↓ CameraPositionEncoding
+    → 射线方向 (dx, dy, dz)
+    → 相机位置 (cx, cy, cz)
+    → 像素坐标 (u, v)
+
+    ↓ TransformerEncoder (4层)
+    → Self-Attention (多头注意力)
+    → FFN (前馈网络)
+    → 输出: [B, N_patches, 512]
+
+    ↓ BEVQueries (50×50)
+    → 可学习查询 + 2D位置编码
+    → 输出: [B, 2500, 512]
+
+    ↓ TransformerDecoder (3层)
+    → Self-Attention
+    → Deformable Cross-Attention (像素→体素)
+    → FFN
+    → 输出: [B, 2500, 512]
+
+    ↓ 高度扩展 + 上采样
+    → Reshape: [B, 50, 50, 512]
+    → 高度扩展: [B, 50, 50, 8, 256]
+    → 上采样: [B, 200, 200, 16, 256]
+    → 分类头: [B, 18, 200, 200, 16]
+```
+
+### 关键模块
+
+**位置编码** ([position_encoding.py](occ_transformer/models/transformer_occ/position_encoding.py)):
+- `CameraPositionEncoding`: 相机几何编码 (射线方向 + 相机位置)
+- `Voxel3DPositionEncoding`: 3D 体素位置编码
+- `Spatial2DPositionEncoding`: 2D BEV 位置编码
+
+**注意力机制** ([attention.py](occ_transformer/models/transformer_occ/attention.py)):
+- `MultiHeadAttention`: 标准多头注意力
+- `DeformableAttention`: 可变形注意力 (节省显存)
+
+**体素查询** ([voxel_query.py](occ_transformer/models/transformer_occ/voxel_query.py)):
+- `BEVQueries`: 2D BEV 查询 + 高度扩展
+
+### 训练参数说明
+
+- `--model-type`: 模型版本 (nano/standard/balanced)
+- `--dataset`: 数据集路径
+- `--batch-size`: 批量大小 (推荐 1-2)
+- `--epochs`: 训练轮数 (推荐 50-100)
+- `--lr`: 学习率 (推荐 1e-4)
+- `--amp`: 混合精度训练
+- `--grad-clip`: 梯度裁剪 (推荐 1.0)
+
+---
+
+## 数据采集系统
+
+### carla_data_collection (轻量级方案)
+
+**目标**: 8 相机 RGB + 语义激光雷达 → 占用网格数据对
+
+**快速开始**:
+```bash
+# 1. 启动 CARLA 服务器
+cmake --build Build --target launch
+
+# 2. 运行采集脚本 (采集 5 帧演示)
+cd carla_data_collection
+python scripts/collect_5_frames.py
+```
+
+**输出结构**:
+```
+dataset_output/town10_test/
+├── cameras/              # 8 相机 RGB 图像 (PNG)
+│   ├── cam_front_main/   # 前置主摄 (50° FOV)
+│   ├── cam_front_wide/   # 前置广角 (120° 鱼眼)
+│   ├── cam_front_narrow/ # 前置长焦 (35° FOV)
+│   ├── cam_left_pillar/  # 左侧 B 柱
+│   ├── cam_right_pillar/ # 右侧 B 柱
+│   ├── cam_left_repeater/# 左侧翼子板
+│   ├── cam_right_repeater/# 右侧翼子板
+│   └── cam_rear/         # 后置相机 (120° 鱼眼)
+├── occupancy/            # 3D 体素标签 (NPZ)
+│   └── 000000.npz        # occupancy, mask, actor_ids
+└── camera_params/        # 相机内外参 (NPZ)
+    └── 000000.npz        # intrinsics, extrinsics
+```
+
+**关键配置文件**:
+- [camera_config.py](carla_data_collection/config/camera_config.py) - Tesla 8 相机布局参数
+- [occupancy_config.py](carla_data_collection/config/occupancy_config.py) - 体素空间参数
+
+**数据验证**:
+```bash
+python carla_data_collection/scripts/verify_occupancy.py
+```
+
+### dense_occupancy_collection (高质量方案)
+
+**目标**: CubeMap 深度图 + 保守光栅化 → nuScenes 17 类标准体素
+
+**特性**:
+- 6 深度相机 CubeMap (前/后/左/右/上/下)
+- 保守光栅化 (Conservative Rasterization)
+- 实例级补全 (Instance Completion)
+- nuScenes 17 类语义标签
+
+**运行**:
+```bash
+python dense_occupancy_collection/main_data_collection.py --frames 10
+```
+
+**语义映射** ([actor_occupancy_mapping.py](dense_occupancy_collection/config/actor_occupancy_mapping.py)):
+- 详细的 CARLA Actor → nuScenes 类别映射表
+- 支持 17 类标准标签 (free, car, pedestrian, truck, etc.)
+
+---
+
+## 数据可视化工具 (occupancy_viewer)
+
+### 概述
+
+基于 **Three.js** 的交互式 3D 体素可视化工具,支持推理结果和真值标签的实时渲染。
+
+### 快速开始
+
+```bash
+# 启动 viewer (自动加载 inference_results)
+python occupancy_viewer/run_viewer.py
+
+# 浏览器访问:
+http://localhost:8085/
+```
+
+### 功能特性
+
+- ✅ 鼠标旋转/缩放/平移
+- ✅ 多视角切换 (俯视/前视/侧视/自由)
+- ✅ 帧浏览切换 (上一帧/下一帧)
+- ✅ 实时体素统计 (总数/非空数/类别分布)
+- ✅ 自动播放功能
+- ✅ 18 类语义颜色映射
+
+### 数据格式要求
+
+NPZ 文件必须包含以下字段:
+```python
+{
+    'occupancy': (X, Y, Z) uint8      # 体素类别 [0-17]
+    'mask': (X, Y, Z) bool            # 可见性掩码
+    'x_range': [xmin, xmax]           # X 轴范围
+    'y_range': [ymin, ymax]           # Y 轴范围
+    'z_range': [zmin, zmax]           # Z 轴范围
+    'resolution': float               # 体素分辨率 (米)
+    'grid_size': (int, int, int)      # 网格尺寸
+}
+```
+
+### 配置
+
+修改 [run_viewer.py](occupancy_viewer/run_viewer.py) 中的 `DATA_DIR` 变量:
+```python
+DATA_DIR = "inference_results"  # 推理结果
+# 或
+DATA_DIR = "dataset_10k/occupancy"  # 真值标签
+```
+
+---
+
+## 完整工作流
+
+### 1. 数据采集
+
+```bash
+# 启动 CARLA 服务器
+cmake --build Build --target launch
+
+# 采集数据 (选择一种方案)
+python carla_data_collection/scripts/collect_5_frames.py
+# 或
+python dense_occupancy_collection/main_data_collection.py --frames 100
+```
+
+### 2. 数据验证
+
+```bash
+# 验证数据集完整性
+python carla_data_collection/scripts/verify_occupancy.py
+
+# 可视化检查
+python occupancy_viewer/run_viewer.py
+# 修改 DATA_DIR 指向数据集目录
+```
+
+### 3. 网络训练
+
+**选择网络架构** (二选一):
+
+**A. Bayer RAW 网络** (轻量级, 6.08M 参数):
+```bash
+conda activate deepsys
+python occ_network_nano/train_bayer.py \
+    --dataset dataset_10k \
+    --batch-size 2 \
+    --epochs 50 \
+    --amp
+```
+
+**B. Transformer 网络** (Balanced 版, ~20M 参数):
+```bash
+conda activate deepsys
+python occ_transformer/train_balanced.py \
+    --dataset dataset_10k \
+    --batch-size 2 \
+    --epochs 50 \
+    --lr 1e-4 \
+    --amp
+```
+
+### 4. 推理与评估
+
+```bash
+# Bayer 网络推理
+python occ_network_nano/inference_bayer.py \
+    --checkpoint outputs/bayer_raw/xxx/epoch_049.pth \
+    --dataset dataset_10k \
+    --num-samples 10
+
+# Transformer 网络推理
+python occ_transformer/inference_transformer.py \
+    --checkpoint outputs/transformer_balanced/xxx/best.pth \
+    --dataset dataset_10k \
+    --model-type balanced
+```
+
+### 5. 可视化结果
+
+```bash
+# 启动 viewer (自动加载 inference_results)
+python occupancy_viewer/run_viewer.py
+# 浏览器访问: http://localhost:8085/
+```
+
+---
+
+## 语义类别定义
+
+### carla_data_collection 和 occ_network_nano (18 类)
+
+```
+0:  Free/Unlabeled (空白空间) ⭐ 权重=1.0
+1:  Building
+2:  Fence
+3:  Other
+4:  Pedestrian (权重=5.0)
+5:  Pole
+6:  RoadLine
+7:  Road
+8:  Sidewalk
+9:  Vegetation
+10: Vehicle (权重=2.0)
+11: Wall
+12: TrafficSign (权重=5.0)
+13: Sky
+14: Ground
+15: Bridge
+16: RailTrack
+17: GuardRail
+```
+
+### dense_occupancy_collection (17 类 nuScenes 标准)
+
+```
+0:  free (空白空间)
+1:  barrier (护栏)
+2:  bicycle
+3:  bus
+4:  car (最重要)
+5:  construction_vehicle
+6:  motorcycle
+7:  pedestrian (重要)
+8:  traffic_cone
+9:  trailer
+10: truck (重要)
+11: driveable_surface (强制保留)
+12: other_flat
+13: sidewalk (强制保留)
+14: terrain
+15: manmade
+16: vegetation
+17: general_object
+```
+
+---
+
+## 常见问题排查
+
+### Q1: CARLA 服务器无法启动?
+
+**检查**:
+```bash
+# 确认 CARLA_UNREAL_ENGINE_PATH 环境变量
+echo %CARLA_UNREAL_ENGINE_PATH%
+
+# 尝试手动启动
+cmake --build Build --target launch
+```
+
+### Q2: DNG 文件无法加载?
+
+**错误**: `OpenCV TIFF: Sorry, can not handle PhotometricInterpretation=32803`
+
+**解决**:
+```bash
+pip install --proxy http://192.168.100.182:7890 rawpy
+```
+
+### Q3: 训练时显存不足?
+
+**解决方案**:
+1. 减小 batch_size (推荐 1-2)
+2. 启用混合精度训练 (`--amp`)
+3. 使用更小的模型 (nano 版本)
+4. 降低图像分辨率
+
+### Q4: 推理结果全是实心/红色?
+
+**原因**: 网络没有学会预测 Class 0 (空白)
+
+**检查**:
+1. 确认损失函数中 Class 0 权重 >= 1.0
+2. 检查数据集是否包含 Class 0
+3. 重新训练模型
+
+### Q5: Viewer 无法显示结果?
+
+**检查**:
+1. `run_viewer.py` 中 `DATA_DIR` 是否正确
+2. NPZ 文件格式是否符合要求
+3. `mask` 数据类型是否为 `bool`
+4. `resolution` 和 `grid_size` 是否正确
+
+### Q6: 训练过程中梯度爆炸?
+
+**解决**:
+```bash
+# 添加梯度裁剪
+python occ_transformer/train_balanced.py \
+    --grad-clip 1.0 \
+    --lr 5e-5  # 降低学习率
+```

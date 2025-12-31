@@ -19,7 +19,8 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models.transformer_occ import build_unified_transformer_occ
+from models.transformer_occ import build_transformer_occ_net
+from models import TransformerOccNetBalanced
 from data.carla_dataset_bayer import CARLADatasetBayer
 
 
@@ -31,7 +32,7 @@ def parse_args():
     parser.add_argument('--output-dir', type=str, default='inference_results_transformer')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--img-size', type=int, nargs=2, default=[960, 1280])
-    parser.add_argument('--model-type', type=str, default='lite', choices=['standard', 'lite'])
+    parser.add_argument('--model-type', type=str, default='lite', choices=['standard', 'lite', 'balanced'])
     return parser.parse_args()
 
 
@@ -93,12 +94,28 @@ def main():
     
     # 模型
     print(f"\n构建 {args.model_type} 模型...")
-    model = build_unified_transformer_occ(
-        lite=(args.model_type == 'lite'),
-        num_classes=18,
-        img_size=tuple(args.img_size),
-        grid_size=(200, 200, 16)
-    ).to(device)
+    if args.model_type == 'balanced':
+        # Balanced-Pro 配置 (需与 train_balanced.py 一致)
+        model = TransformerOccNetBalanced(
+            num_cameras=8,
+            img_size=tuple(args.img_size),
+            embed_dim=256,
+            encoder_layers=5,
+            decoder_layers=4,
+            num_heads=8,
+            bev_size=(50, 50),
+            num_height_levels=8,
+            num_deform_points=6,
+            output_grid_size=(200, 200, 16),
+            use_checkpoint=False  # 推理时不需 checkpoint
+        ).to(device)
+    else:
+        model = build_transformer_occ_net(
+            model_type=args.model_type,
+            num_classes=18,
+            img_size=tuple(args.img_size),
+            output_grid_size=(200, 200, 16)
+        ).to(device)
     
     # 加载权重
     print(f"加载检查点: {args.checkpoint}")

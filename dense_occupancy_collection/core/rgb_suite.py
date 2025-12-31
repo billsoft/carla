@@ -125,15 +125,41 @@ class RGBSuite(SensorInterface):
                         break
 
                 if raw_type == 'bayer_rggb':
-                    # 单通道 Bayer RGGB 格式 (2 bytes/pixel)
-                    expected_size = img.height * img.width * 2  # uint16 单通道
-                    if len(img.raw_data) == expected_size:
+                    # 单通道 Bayer RGGB 格式
+                    expected_size_uint16 = img.height * img.width * 2  # uint16 单通道
+                    expected_size_bgra = img.height * img.width * 4   # BGRA fallback
+
+                    if len(img.raw_data) == expected_size_uint16:
+                        # 理想情况: 直接收到 uint16 单通道
                         array = np.frombuffer(img.raw_data, dtype=np.uint16)
-                        array = array.reshape((img.height, img.width))  # 单通道 (H, W)
+                        array = array.reshape((img.height, img.width))
                         rgb = array
+                    elif len(img.raw_data) == expected_size_bgra:
+                        # Fallback: CARLA 返回了 BGRA,需要转换为 Bayer RGGB
+                        # BGRA uint8 -> Bayer RGGB uint8 -> uint16
+                        bgra = np.frombuffer(img.raw_data, dtype=np.uint8)
+                        bgra = bgra.reshape((img.height, img.width, 4))
+                        
+                        # 创建 Bayer 容器
+                        bayer = np.zeros((img.height, img.width), dtype=np.uint8)
+                        
+                        # RGGB 采样:
+                        # R: (0,0), (0,2)... -> bgra[..., 2]
+                        # G: (0,1), (1,0)... -> bgra[..., 1]
+                        # B: (1,1), (1,3)... -> bgra[..., 0]
+                        
+                        # Row 0, 2, ... (Even rows)
+                        bayer[0::2, 0::2] = bgra[0::2, 0::2, 2] # R
+                        bayer[0::2, 1::2] = bgra[0::2, 1::2, 1] # G
+                        
+                        # Row 1, 3, ... (Odd rows)
+                        bayer[1::2, 0::2] = bgra[1::2, 0::2, 1] # G
+                        bayer[1::2, 1::2] = bgra[1::2, 1::2, 0] # B
+                        
+                        # 转为 uint16 (左移 8 位)
+                        rgb = bayer.astype(np.uint16) << 8
                     else:
-                        print(f"[警告] {cid}: Bayer 数据大小不匹配！期望 {expected_size}，实际 {len(img.raw_data)}")
-                        # Fallback: 创建空数组
+                        print(f"[错误] {cid}: Bayer 数据大小异常！期望 {expected_size_uint16} 或 {expected_size_bgra}，实际 {len(img.raw_data)}")
                         rgb = np.zeros((img.height, img.width), dtype=np.uint16)
 
                 elif raw_type == 'uint16':

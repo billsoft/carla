@@ -8,11 +8,18 @@ import os
 from pathlib import Path
 import urllib.parse
 import mimetypes
+import argparse
 
 # 配置
 PORT = 8085
 VIEWER_DIR = Path(__file__).parent.absolute()
 DATA_DIR = Path(r"d:\code\carla\inference_results")
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Occupancy Viewer Server')
+    parser.add_argument('--data', type=str, help='Data directory containing .npz files')
+    parser.add_argument('--port', type=int, default=8085, help='Server port')
+    return parser.parse_args()
 
 class ViewerHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
@@ -107,4 +114,9 @@ def run_server():
             print("\nServer stopped.")
 
 if __name__ == '__main__':
+    args = parse_args()
+    if args.data:
+        DATA_DIR = Path(args.data)
+    if args.port:
+        PORT = args.port
     run_server()

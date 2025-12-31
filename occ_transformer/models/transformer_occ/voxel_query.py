@@ -210,6 +210,19 @@ class BEVQueries(nn.Module):
         H, W = bev_size
         x = torch.linspace(0, 1, H)
         y = torch.linspace(0, 1, W)
+        
+        # 几何约束优化：中心加密分布
+        # x = torch.sigmoid((x - 0.5) * 4)  # 中心加密
+        # y = torch.sigmoid((y - 0.5) * 4)  # 中心加密
+        # 这里暂时使用简单的线性分布，用户如果需要可以取消注释
+        # 根据用户建议直接应用优化：
+        x = torch.sigmoid((x - 0.5) * 4)
+        # y 不需要加密，因为车辆左右分布相对均匀，或者也可以加密
+        # 但通常纵向（x）更需要远近不同的分辨率，横向（y）相对均匀
+        # 如果是正方形网格，我们假设 x 是纵向（前后），y 是横向（左右）
+        # 如果是 BEV，通常 x 是前方。
+        # 这里我们按照用户建议对 x 进行处理。用户示例代码是 x = ...
+        
         xx, yy = torch.meshgrid(x, y, indexing='ij')
         reference_points = torch.stack([xx.flatten(), yy.flatten()], dim=-1)
         self.register_buffer('reference_points', reference_points)

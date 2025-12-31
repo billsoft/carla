@@ -210,7 +210,7 @@ def main():
     logger.info('Building Balanced model...')
     # Balanced-Pro 优化版配置：
     # embed_dim=256, encoder_layers=5, decoder_layers=4, 
-    # bev_size=(75, 75), num_height_levels=10, num_deform_points=6
+    # bev_size=(50, 50), num_height_levels=8, num_deform_points=6
     model = TransformerOccNetBalanced(
         num_cameras=8,
         img_size=img_size,
@@ -218,8 +218,8 @@ def main():
         encoder_layers=5,      # 4 -> 5
         decoder_layers=4,      # 3 -> 4
         num_heads=8,
-        bev_size=(75, 75),     # 保持 75x75 (显存关键)
-        num_height_levels=10,  # 8 -> 10
+        bev_size=(50, 50),     # 75x75 -> 50x50 (整数倍上采样)
+        num_height_levels=8,   # 10 -> 8 (整数倍上采样)
         num_deform_points=6,   # 4 -> 6
         output_grid_size=(200, 200, 16),
         use_checkpoint=args.use_checkpoint

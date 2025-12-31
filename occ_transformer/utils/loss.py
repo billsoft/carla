@@ -217,7 +217,7 @@ def get_default_class_weights() -> List[float]:
     17: sky - 天空
     """
     weights = [
-        0.5,   # 0: empty - 空类别很多，降低权重
+        0.1,   # 0: empty - 显著降低空类别权重 (背景占绝大多数)
         2.0,   # 1: barrier
         5.0,   # 2: bicycle - 稀有
         2.0,   # 3: bus
@@ -228,13 +228,13 @@ def get_default_class_weights() -> List[float]:
         3.0,   # 8: traffic_cone
         2.0,   # 9: trailer
         2.0,   # 10: truck
-        1.0,   # 11: drivable
+        1.5,   # 11: drivable - 提高路面权重，保证基础结构清晰
         1.0,   # 12: other
-        1.0,   # 13: sidewalk
+        1.5,   # 13: sidewalk
         1.0,   # 14: terrain
         1.0,   # 15: manmade
         1.0,   # 16: vegetation
-        0.5,   # 17: sky
+        0.1,   # 17: sky - 降低天空权重
     ]
     return weights
 

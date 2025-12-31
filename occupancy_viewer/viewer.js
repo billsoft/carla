@@ -49,6 +49,9 @@ class OccupancyViewer {
         this.playInterval = null;
         this.playSpeed = 1000; // 默认 1 秒/帧
 
+        // 类别可见性
+        this.classVisibility = new Array(18).fill(true);
+
         this.init();
     }
 
@@ -127,6 +130,16 @@ class OccupancyViewer {
 
         // 初始化播放控制
         this.initPlayControls();
+
+        // 绑定文件输入事件
+        const folderInput = document.getElementById('folderInput');
+        if (folderInput) {
+            folderInput.addEventListener('change', (event) => {
+                console.log('📂 File input changed:', event.target.files.length, 'files');
+                this.loadDataset(event.target.files);
+            });
+            console.log('✓ File input listener attached');
+        }
 
         // 尝试加载默认数据集
         this.loadDefaultDataset();
@@ -252,9 +265,21 @@ class OccupancyViewer {
         const legendContainer = document.getElementById('legend');
         legendContainer.innerHTML = '';
 
+        const title = document.createElement('div');
+        title.textContent = '图例 (点击隐藏/显示)';
+        title.style.fontWeight = 'bold';
+        title.style.marginBottom = '10px';
+        title.style.textAlign = 'center';
+        legendContainer.appendChild(title);
+
         for (let i = 1; i < OCCUPANCY_COLORS.length; i++) {
             const item = document.createElement('div');
             item.className = 'legend-item';
+            item.style.cursor = 'pointer';
+            item.style.userSelect = 'none';
+            if (!this.classVisibility[i]) {
+                item.style.opacity = '0.3';
+            }
 
             const colorBox = document.createElement('div');
             colorBox.className = 'legend-color';
@@ -265,6 +290,16 @@ class OccupancyViewer {
 
             item.appendChild(colorBox);
             item.appendChild(label);
+            
+            // 点击切换可见性
+            item.onclick = () => {
+                this.classVisibility[i] = !this.classVisibility[i];
+                item.style.opacity = this.classVisibility[i] ? '1.0' : '0.3';
+                if (this.currentData) {
+                    this.renderVoxels();
+                }
+            };
+
             legendContainer.appendChild(item);
         }
     }
@@ -355,7 +390,7 @@ class OccupancyViewer {
             const data = await this.parseNPZ(arrayBuffer);
 
             const occupancy = data['occupancy'];
-            const actor_ids = data['actor_ids'];
+            const actor_ids = data['actor_ids']; // 可能为 undefined
             const mask = data['mask'];
 
             if (!occupancy) {
@@ -403,7 +438,8 @@ class OccupancyViewer {
             }
 
             // 分辨率处理
-            let resolution = data['resolution']?.data?.[0];
+            // 兼容 voxel_size 字段
+            let resolution = data['resolution']?.data?.[0] || data['voxel_size']?.data?.[0];
             
             // 如果没有分辨率，根据 grid_size[2] (Z轴) 智能匹配，或使用默认值
             if (!resolution) {
@@ -542,10 +578,10 @@ class OccupancyViewer {
                     const idx = x * (gridY * gridZ) + y * gridZ + z;
                     const label = occupancy.data[idx];
 
-                    const actorId = actor_ids ? actor_ids.data[idx] : 1;
-                    const isVisible = !actor_ids || (actorId !== 0);
-
-                    if (label > 0 && isVisible) {
+                    // const actorId = actor_ids ? actor_ids.data[idx] : 1;
+                    // const isVisible = !actor_ids || (actorId !== 0);
+                    // 用户请求：去除可见性检查，完全基于 label 渲染
+                    if (label > 0 && this.classVisibility[label]) {
                         const worldX = (x - gridX/2) * voxelSize;
                         const worldY = (y - gridY/2) * voxelSize;
                         const worldZ = (z - gridZ/2) * voxelSize;

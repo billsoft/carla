@@ -91,7 +91,8 @@
       "Bash(C:Usersbills.condaenvscarlapython.exe verify_network_shapes.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaverify_network_shapes.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaverify_fixes.py)",
-      "Bash(C:Usersbills.condaenvscarlapython.exe verify_fixes.py)"
+      "Bash(C:Usersbills.condaenvscarlapython.exe verify_fixes.py)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe -c \"import numpy as np; data = np.load\\(''D:/code/carla/inference_results_balanced/000000.npz''\\); print\\(list\\(data.keys\\(\\)\\)\\); print\\(''Shape:'', data[''occupancy''].shape if ''occupancy'' in data else ''No occupancy''\\)\")"
     ],
     "deny": [],
     "ask": []
