@@ -178,4 +178,4 @@ class VisibilityFilter:
         filtered_occupancy[remove_mask] = 0
         filtered_ids[remove_mask] = 0
         
-        return filtered_occupancy, filtered_ids, final_mask
+        return filtered_occupancy, filtered_ids

@@ -8,12 +8,12 @@ import numpy as np
 import math
 import logging
 from dense_occupancy_collection.config.occupancy_config import (
-    CARLA_TO_OCCUPANCY_MAPPING, OCCUPANCY_LABELS, VISIBILITY_CONFIG
+    CARLA_TO_OCCUPANCY_MAPPING, OCCUPANCY_LABELS
 )
 from dense_occupancy_collection.config.actor_occupancy_mapping import (
     get_occupancy_label_from_actor
 )
-from dense_occupancy_collection.processing.depth_visibility import DepthVisibilityFilter
+# DepthVisibilityFilter 已移除 - 使用 Label 0 (Free) 替代 mask 机制
 
 # 配置日志
 logging.basicConfig(filename='voxel_mapping.log', level=logging.INFO,
@@ -41,15 +41,8 @@ class GroundTruthVoxelGenerator:
             int((z_range[1] - z_range[0]) / resolution)
         ]
 
-        # 初始化深度可见性过滤器 (用于 Depth Camera 模式)
-        self.depth_filter = None
-        if VISIBILITY_CONFIG.get('filter_mode') == 'depth_camera':
-            depth_cfg = VISIBILITY_CONFIG.get('depth_config', {})
-            self.depth_filter = DepthVisibilityFilter(
-                width=depth_cfg.get('width', 512),
-                height=depth_cfg.get('height', 512),
-                fov=depth_cfg.get('fov', 90.0)
-            )
+        # DepthVisibilityFilter 已移除
+        # 不可见区域直接设置为 Label 0 (Free)，无需 mask
         
     def generate(self, world, ego_vehicle, visibility_data=None):
         """
@@ -63,7 +56,6 @@ class GroundTruthVoxelGenerator:
         Returns:
             occupancy: (X, Y, Z) uint8 array - 体素类别
             actor_ids: (X, Y, Z) uint32 array - 每个体素对应的Actor ID
-            mask: (X, Y, Z) uint8 array - (1=Observed, 0=Unknown) -> GT 模式下全是 1
         """
         occupancy = np.zeros(self.grid_size, dtype=np.uint8)
         actor_ids = np.zeros(self.grid_size, dtype=np.int32)  # ⭐ 新增：记录Actor ID（使用int32支持负数虚拟ID）
@@ -128,37 +120,19 @@ class GroundTruthVoxelGenerator:
         print(f"[体素生成] 填充到体素的Actor IDs ({len(filled_actor_ids)}个): {sorted(filled_actor_ids)}")
         print(f"[体素生成]   车辆: {len(filled_by_type['vehicles'])}个, 行人: {len(filled_by_type['walkers'])}个")
 
-        # 5. 可见性过滤
-        # 检查配置是否启用过滤
-        from dense_occupancy_collection.config.occupancy_config import VISIBILITY_CONFIG
-        enable_filter = VISIBILITY_CONFIG.get('enable_visibility_filter', True)
-        
-        if enable_filter:
-            if self.depth_filter is not None and isinstance(visibility_data, dict):
-                # Depth Camera Filter
-                print("[可见性过滤] 使用 Depth Camera 过滤...")
-                occupancy, actor_ids = self._apply_depth_visibility_filter(
-                    occupancy, actor_ids, visibility_data, ego_vehicle.id, ego_matrix
-                )
-            elif visibility_data is not None:
-                # LiDAR Filter (Legacy)
-                print("[可见性过滤] 使用 LiDAR 过滤...")
-                occupancy, actor_ids = self._apply_visibility_filter(
-                    occupancy, actor_ids, visibility_data, world, ego_vehicle.id
-                )
-            else:
-                print("[警告] 这一帧没有可见性传感器数据，跳过可见性过滤")
-        else:
-            print("\n[调试模式] ⭐ 可见性过滤已禁用 (God Mode)")
-            print("[调试模式] 保留所有在范围内的体素，用于验证光栅化完整性")
-            pass
+        # 5. 可见性过滤 (Legacy LiDAR Filter)
+        # 注意: 现在的 pipeline 使用外部 VisibilityFilter (Depth Camera)，此处不再处理
+        if visibility_data is not None:
+             print("[可见性过滤] 使用 LiDAR 过滤 (Legacy)...")
+             occupancy, actor_ids = self._apply_visibility_filter(
+                 occupancy, actor_ids, visibility_data, world, ego_vehicle.id
+             )
 
-        # 6. Mask (Ground Truth is fully observed)
 
-        # 6. Mask (Ground Truth is fully observed)
-        mask = np.ones_like(occupancy)
+        # Mask 字段已完全移除
+        # 不可见/空白区域使用 Label 0 (Free) 表示，无需单独的 mask
 
-        return occupancy, actor_ids, mask
+        return occupancy, actor_ids
 
     def _fill_static_environment(self, occupancy, actor_ids, world, ego_transform):
         """
@@ -1038,84 +1012,7 @@ class GroundTruthVoxelGenerator:
 
         return filtered_occupancy, filtered_actor_ids
 
-    def _apply_depth_visibility_filter(self, occupancy, actor_ids, depth_data, ego_vehicle_id, ego_matrix):
-        """
-        应用基于深度图的可见性过滤
-        """
-        if self.depth_filter is None:
-            return occupancy, actor_ids
-            
-        depth_maps = depth_data['depth_maps']      # (6, H, W)
-        cam_transforms = depth_data['cam_transforms'] # (6, 4, 4)
-        
-        # 1. 计算可见性 Mask
-        # returns boolean mask (True=Visible)
-        # 传入 ego_matrix (Ego -> World) 以正确转换 Ego Grid Points
-        raw_visibility_mask = self.depth_filter.compute_visibility_mask(
-            occupancy, 
-            self.x_range, self.y_range, self.z_range, 
-            self.resolution,
-            depth_maps, 
-            cam_transforms,
-            ego_matrix=ego_matrix
-        )
-        
-        # 2. 实例级可见性广播 (Instance Completion)
-        # 逻辑：只要 Actor 有任何一个体素可见，则该 Actor 的所有体素均可见
-        
-        # 提取所有被判定为可见的 Actor ID (排除0)
-        # 使用 unique 获取唯一ID列表
-        visible_voxel_ids = actor_ids[raw_visibility_mask]
-        unique_visible_ids = np.unique(visible_voxel_ids)
-        unique_visible_ids = unique_visible_ids[unique_visible_ids != 0] # 排除空体素
-        
-        print(f"[可见性过滤] 原始可见体素数: {np.sum(raw_visibility_mask)}")
-        print(f"[可见性过滤] 激活的 Actor 数量: {len(unique_visible_ids)}")
-        
-        # 创建新的实例级 Mask
-        # np.isin 可能会比较慢，但对于 100^3 网格和几百个 Actor 应该还可以接受
-        # 优化：只对非0体素做检查
-        occupied_mask = (occupancy > 0)
-        visibility_mask = np.zeros_like(raw_visibility_mask)
-        
-        # 只在有物体的区域检查 ID 是否在可见列表中
-        # visibility_mask[occupied_mask] = np.isin(actor_ids[occupied_mask], unique_visible_ids)
-        # 上面写法虽然简洁但会产生临时大数组，分步写：
-        
-        if len(unique_visible_ids) > 0:
-            visibility_mask = np.isin(actor_ids, unique_visible_ids)
-        
-        print(f"[可见性过滤] 实例补全后可见体素数: {np.sum(visibility_mask)}")
-        
-        # 3. 强制保留规则 (地面 + Hero)
-        
-        # 地面相关类型永久可见
-        # 11=driveable_surface, 12=other_flat, 13=sidewalk, 14=terrain
-        GROUND_LABELS = [11, 12, 13, 14]
-        ground_mask = np.isin(occupancy, GROUND_LABELS)
-        visibility_mask[ground_mask] = True
-        
-        # Hero车辆永久可见
-        hero_mask = (actor_ids == ego_vehicle_id)
-        visibility_mask[hero_mask] = True
-        
-        # 3. 应用过滤
-        filtered_occupancy = occupancy.copy()
-        filtered_actor_ids = actor_ids.copy()
-        
-        invisible_mask = ~visibility_mask
-        
-        # 最终要删除的：不可见 且 不是地面
-        # (地面已经在 visibility_mask=True 中了，这里再保险一次)
-        final_remove_mask = invisible_mask & (~ground_mask)
-        
-        # Debug Loss
-        self._debug_voxel_loss(filtered_occupancy, final_remove_mask)
-        
-        filtered_occupancy[final_remove_mask] = 0
-        filtered_actor_ids[final_remove_mask] = 0
-        
-        return filtered_occupancy, filtered_actor_ids
+
 
     def _debug_voxel_loss(self, occupancy, remove_mask):
         """
@@ -1180,7 +1077,7 @@ class GroundTruthVoxelGenerator:
         
         return
 
-    def save_to_npz(self, filepath, occupancy, actor_ids, mask, metadata=None):
+    def save_to_npz(self, filepath, occupancy, actor_ids, metadata=None):
         """
         保存体素数据到NPZ文件
 
@@ -1188,13 +1085,13 @@ class GroundTruthVoxelGenerator:
             filepath: 保存路径
             occupancy: (X,Y,Z) uint8 - 体素类别
             actor_ids: (X,Y,Z) uint32 - 体素Actor ID
-            mask: (X,Y,Z) uint8 - 观测mask
             metadata: 额外元数据
+
+        注意: mask 字段已移除，使用 Label 0 (Free) 表示不可见/空白区域
         """
         save_dict = {
             'occupancy': occupancy,
-            'actor_ids': actor_ids,  # ⭐ 保存Actor ID数组
-            'mask': mask,
+            'actor_ids': actor_ids,
             'x_range': self.x_range,
             'y_range': self.y_range,
             'z_range': self.z_range,
@@ -1205,14 +1102,12 @@ class GroundTruthVoxelGenerator:
             save_dict.update(metadata)
         np.savez_compressed(filepath, **save_dict)
     
-    def get_statistics(self, occupancy, mask):
+    def get_statistics(self, occupancy):
         total_voxels = occupancy.size
-        observed_voxels = np.sum(mask)
         occupied_voxels = np.sum(occupancy > 0)
         
         return {
             'total_voxels': total_voxels,
-            'observed_voxels': int(observed_voxels),
             'occupied_voxels': int(occupied_voxels),
-            'observation_rate': observed_voxels / total_voxels if total_voxels > 0 else 0
+            'occupancy_rate': occupied_voxels / total_voxels if total_voxels > 0 else 0
         }

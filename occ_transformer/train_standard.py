@@ -101,7 +101,9 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, 
     for batch_idx, batch in enumerate(dataloader):
         images = batch['images'].to(args.device)
         occupancy = batch['occupancy'].to(args.device)
-        mask = batch['mask'].to(args.device)
+
+        # Mask (Deprecated) - 强制全 True
+        mask = torch.ones_like(occupancy, dtype=torch.bool, device=args.device)
 
         # 混合精度前向传播
         with autocast(enabled=args.amp):

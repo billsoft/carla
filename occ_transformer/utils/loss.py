@@ -1,25 +1,141 @@
-# utils/loss.py
 """
 损失函数模块
 
 支持:
 - MaskedWeightedCELoss: 带 mask 的加权交叉熵损失
+- FocalLoss: 聚焦难分样本的损失
+- LovaszSoftmaxLoss: 直接优化 IoU 的损失 (IoU Surrogate)
+- CombinedLoss: 组合损失 (如 Focal + Lovasz)
 - 类别权重配置
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List
+from typing import Optional, List, Union
+
+
+def lovasz_grad(gt_sorted):
+    """
+    Computes gradient of the Lovasz extension w.r.t sorted errors
+    See Alg. 1 in paper
+    """
+    p = len(gt_sorted)
+    gts = gt_sorted.sum()
+    intersection = gts - gt_sorted.float().cumsum(0)
+    union = gts + (1 - gt_sorted).float().cumsum(0)
+    jaccard = 1. - intersection / union
+    if p > 1:  # cover 1-pixel case
+        jaccard[1:p] = jaccard[1:p] - jaccard[0:-1]
+    return jaccard
+
+
+def lovasz_softmax_flat(probas, labels, classes='present'):
+    """
+    Multi-class Lovasz-Softmax loss
+      probas: [P, C] Variable, class probabilities at each prediction (between 0 and 1)
+      labels: [P] Tensor, ground truth labels (between 0 and C - 1)
+      classes: 'all' for all, 'present' for classes present in labels, or a list of classes to average.
+    """
+    if probas.numel() == 0:
+        # only void pixels, the gradients should be 0
+        return probas * 0.
+    C = probas.size(1)
+    losses = []
+    class_to_sum = list(range(C)) if classes in ['all', 'present'] else classes
+    for c in class_to_sum:
+        fg = (labels == c).float()  # foreground for class c
+        if (classes == 'present' and fg.sum() == 0):
+            continue
+        if C == 1:
+            if len(classes) > 1:
+                raise ValueError('Sigmoid output possible only with 1 class')
+            class_pred = probas[:, 0]
+        else:
+            class_pred = probas[:, c]
+        errors = (fg - class_pred).abs()
+        errors_sorted, perm = torch.sort(errors, 0, descending=True)
+        perm = perm.data
+        fg_sorted = fg[perm]
+        losses.append(torch.dot(errors_sorted, lovasz_grad(fg_sorted)))
+    return torch.stack(losses).mean()
+
+
+class LovaszSoftmaxLoss(nn.Module):
+    """
+    Lovasz-Softmax Loss
+    直接优化 IoU (Intersection over Union)
+    
+    Reference: https://github.com/bermanmaxim/LovaszSoftmax
+    """
+    
+    def __init__(self, ignore_index: int = 255, classes='present', per_image=False):
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.classes = classes
+        self.per_image = per_image
+        
+    def forward(
+        self,
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            logits: [B, C, X, Y, Z] 预测 logits (未经过 softmax)
+            target: [B, X, Y, Z] 目标标签
+            mask: [B, X, Y, Z] 有效区域 mask
+        """
+        # 应用 mask
+        if mask is not None:
+            # 如果 mask 是 bool，直接选出有效区域进行计算
+            # Lovasz loss 需要 flatten
+            if mask.dtype != torch.bool:
+                mask = mask > 0.5
+            
+            # 展平并只取有效像素
+            # logits: [B, C, XYZ] -> permute -> [B, XYZ, C] -> flatten -> [N, C]
+            # target: [B, XYZ] -> flatten -> [N]
+            
+            # 为了简单起见，这里先不处理 per_image 的情况，统一 flatten
+            # 注意：Lovasz Softmax 需要 probas (softmax后的概率)
+            probas = F.softmax(logits, dim=1)
+            
+            # [B, C, D1, D2, D3] -> [B, D1, D2, D3, C]
+            probas = probas.permute(0, 2, 3, 4, 1)
+            
+            # 选取 mask 为 True 的区域
+            valid_probas = probas[mask] # [N, C]
+            valid_target = target[mask] # [N]
+            
+            # 过滤掉 ignore_index (如果有额外的 ignore_index，虽然 mask 应该已经处理了)
+            if self.ignore_index is not None:
+                valid = valid_target != self.ignore_index
+                valid_probas = valid_probas[valid]
+                valid_target = valid_target[valid]
+                
+            loss = lovasz_softmax_flat(valid_probas, valid_target, classes=self.classes)
+            return loss
+            
+        else:
+            # 没有 mask 的情况
+            probas = F.softmax(logits, dim=1)
+            probas = probas.permute(0, 2, 3, 4, 1).contiguous().view(-1, probas.size(1))
+            target = target.view(-1)
+            
+            if self.ignore_index is not None:
+                valid = target != self.ignore_index
+                probas = probas[valid]
+                target = target[valid]
+                
+            loss = lovasz_softmax_flat(probas, target, classes=self.classes)
+            return loss
 
 
 class MaskedWeightedCELoss(nn.Module):
     """
     带 Mask 的加权交叉熵损失
-    
-    Args:
-        class_weights: 类别权重列表
-        ignore_index: 忽略的类别索引
     """
     
     def __init__(
@@ -42,15 +158,6 @@ class MaskedWeightedCELoss(nn.Module):
         target: torch.Tensor,
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Args:
-            logits: [B, C, X, Y, Z] 预测 logits
-            target: [B, X, Y, Z] 目标标签
-            mask: [B, X, Y, Z] 有效区域 mask
-            
-        Returns:
-            loss: 标量损失
-        """
         # 应用 mask
         if mask is not None:
             if mask.shape != target.shape:
@@ -77,14 +184,12 @@ class MaskedWeightedCELoss(nn.Module):
 class FocalLoss(nn.Module):
     """
     Focal Loss
-    
-    用于处理类别不平衡问题
     FL(p_t) = -α_t * (1 - p_t)^γ * log(p_t)
     """
     
     def __init__(
         self,
-        alpha: float = 0.25,
+        alpha: float = 0.25, # 这里的 alpha 可以是标量，也可以不用，因为我们有 class_weights
         gamma: float = 2.0,
         class_weights: Optional[List[float]] = None,
         ignore_index: int = 255
@@ -106,86 +211,89 @@ class FocalLoss(nn.Module):
         target: torch.Tensor,
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Args:
-            logits: [B, C, X, Y, Z] 预测 logits
-            target: [B, X, Y, Z] 目标标签
-            mask: [B, X, Y, Z] 有效区域 mask
-            
-        Returns:
-            loss: 标量损失
-        """
-        # 应用 mask
-        if mask is not None:
-            target = target.clone()
-            if mask.dtype == torch.bool:
-                target[~mask] = self.ignore_index
-            else:
-                target[mask < 0.5] = self.ignore_index
         
-        # 计算 CE loss
+        # 1. 准备 Target
+        if mask is not None:
+            target_masked = target.clone()
+            if mask.dtype == torch.bool:
+                target_masked[~mask] = self.ignore_index
+            else:
+                target_masked[mask < 0.5] = self.ignore_index
+        else:
+            target_masked = target
+
+        # 2. 计算 CE Loss (不进行 reduction，保留每个像素的 loss)
+        # Logits: [B, C, ...] -> [B, C, N]
+        # Target: [B, ...] -> [B, N]
+        
+        # 使用 PyTorch 的 cross_entropy 计算 -log(p_t)
+        # 如果有 class_weights，这里会应用 weights * -log(p_t)
         ce_loss = F.cross_entropy(
             logits,
-            target,
+            target_masked,
             weight=self.class_weights,
             ignore_index=self.ignore_index,
             reduction='none'
         )
         
-        # 计算 p_t
-        p = F.softmax(logits, dim=1)
-        p_t = p.gather(1, target.unsqueeze(1)).squeeze(1)
+        # 3. 计算 p_t (预测概率)
+        # 为了计算 (1-p_t)^gamma，我们需要知道正确类别的概率 p_t
+        log_p = F.log_softmax(logits, dim=1) # [B, C, X, Y, Z]
+        p = torch.exp(log_p)
         
-        # 忽略 ignore_index
-        valid_mask = target != self.ignore_index
+        # Gather p_t: 选取 target 对应类别的概率
+        # target 需要 unsqueeze 维度以匹配 gather
+        # target_masked 可能包含 ignore_index，需要处理
         
-        # Focal weight
-        focal_weight = (1 - p_t) ** self.gamma
-        focal_loss = self.alpha * focal_weight * ce_loss
+        # 创建一个临时的 target，把 ignore_index 替换为 0 (或其他有效值)，避免 gather 越界
+        # 之后会通过 mask 过滤掉这些位置
+        target_safe = target_masked.clone()
+        valid_mask = target_safe != self.ignore_index
+        target_safe[~valid_mask] = 0 
         
-        # 只计算有效区域的平均
+        p_t = p.gather(1, target_safe.unsqueeze(1)).squeeze(1) # [B, X, Y, Z]
+        
+        # 4. 计算 Focal Term: (1 - p_t)^gamma
+        focal_term = (1 - p_t) ** self.gamma
+        
+        # 5. 组合
+        # loss = focal_term * ce_loss
+        # 注意：如果 class_weights 已经被 cross_entropy 应用了，这里不需要再乘 alpha
+        # 除非 alpha 是用来平衡正负样本的额外系数。
+        # 在多分类中，通常 class_weights 充当了 alpha 的角色。
+        loss = focal_term * ce_loss
+        
+        # 6. Reduction
         if valid_mask.sum() > 0:
-            loss = focal_loss[valid_mask].mean()
+            return loss[valid_mask].mean()
         else:
-            loss = focal_loss.mean()
-            
-        return loss
+            return loss.sum() * 0.0
 
 
-class LovaszLoss(nn.Module):
+class CombinedLoss(nn.Module):
     """
-    Lovasz-Softmax Loss
-    
-    直接优化 IoU
+    组合损失：Weighted CE + Lovasz-Softmax
     """
-    
-    def __init__(self, ignore_index: int = 255):
-        super().__init__()
-        self.ignore_index = ignore_index
-        
-    def forward(
+    def __init__(
         self,
-        logits: torch.Tensor,
-        target: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """简化版实现，实际使用时建议用完整的 Lovasz loss"""
-        # 应用 mask
-        if mask is not None:
-            target = target.clone()
-            if mask.dtype == torch.bool:
-                target[~mask] = self.ignore_index
-            else:
-                target[mask < 0.5] = self.ignore_index
+        ce_weight: float = 1.0,
+        lovasz_weight: float = 1.0,
+        class_weights: Optional[List[float]] = None,
+        ignore_index: int = 255
+    ):
+        super().__init__()
+        self.ce_weight = ce_weight
+        self.lovasz_weight = lovasz_weight
         
-        # 使用 CE loss 作为近似
-        loss = F.cross_entropy(
-            logits,
-            target,
-            ignore_index=self.ignore_index,
-            reduction='mean'
-        )
+        self.ce_loss = MaskedWeightedCELoss(class_weights=class_weights, ignore_index=ignore_index)
+        self.lovasz_loss = LovaszSoftmaxLoss(ignore_index=ignore_index)
         
+    def forward(self, logits, target, mask=None):
+        loss = 0.0
+        if self.ce_weight > 0:
+            loss += self.ce_weight * self.ce_loss(logits, target, mask)
+        if self.lovasz_weight > 0:
+            loss += self.lovasz_weight * self.lovasz_loss(logits, target, mask)
         return loss
 
 
@@ -193,31 +301,13 @@ def get_default_class_weights() -> List[float]:
     """
     获取默认的类别权重
     
-    根据 CARLA 数据集的类别分布设置
-    稀有类别（行人、自行车等）权重更高
-    
-    类别说明 (18 类):
-    0: empty - 空
-    1: barrier - 护栏
-    2: bicycle - 自行车 (稀有)
-    3: bus - 公交车
-    4: car - 汽车
-    5: construction - 施工区
-    6: motorcycle - 摩托车 (稀有)
-    7: pedestrian - 行人 (稀有, 安全关键)
-    8: traffic_cone - 锥桶
-    9: trailer - 拖车
-    10: truck - 卡车
-    11: drivable - 可行驶区域
-    12: other - 其他
-    13: sidewalk - 人行道
-    14: terrain - 地形
-    15: manmade - 人造物
-    16: vegetation - 植被
-    17: sky - 天空
+    调整策略：
+    1. 避免 0.1 这种极低权重，防止模型完全忽略 free 类别。
+    2. 保持对稀有类别（行人、自行车）的高权重。
+    3. 适当提高 empty 权重，确保模型敢于预测空。
     """
     weights = [
-        0.1,   # 0: empty - 显著降低空类别权重 (背景占绝大多数)
+        0.8,   # 0: empty - 恢复到接近 1.0 (原0.1太低，0.4仍偏低)
         2.0,   # 1: barrier
         5.0,   # 2: bicycle - 稀有
         2.0,   # 3: bus
@@ -228,40 +318,22 @@ def get_default_class_weights() -> List[float]:
         3.0,   # 8: traffic_cone
         2.0,   # 9: trailer
         2.0,   # 10: truck
-        1.5,   # 11: drivable - 提高路面权重，保证基础结构清晰
+        1.5,   # 11: drivable
         1.0,   # 12: other
         1.5,   # 13: sidewalk
         1.0,   # 14: terrain
         1.0,   # 15: manmade
         1.0,   # 16: vegetation
-        0.1,   # 17: sky - 降低天空权重
+        0.5,   # 17: sky - 天空相对容易，权重稍低
     ]
     return weights
 
-
 def get_class_names() -> List[str]:
-    """获取类别名称"""
     return [
-        'empty',        # 0
-        'barrier',      # 1
-        'bicycle',      # 2
-        'bus',          # 3
-        'car',          # 4
-        'construction', # 5
-        'motorcycle',   # 6
-        'pedestrian',   # 7
-        'traffic_cone', # 8
-        'trailer',      # 9
-        'truck',        # 10
-        'drivable',     # 11
-        'other',        # 12
-        'sidewalk',     # 13
-        'terrain',      # 14
-        'manmade',      # 15
-        'vegetation',   # 16
-        'sky',          # 17
+        'empty', 'barrier', 'bicycle', 'bus', 'car', 'construction',
+        'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+        'drivable', 'other', 'sidewalk', 'terrain', 'manmade', 'vegetation', 'sky'
     ]
-
 
 if __name__ == '__main__':
     print("=" * 60)
@@ -270,33 +342,29 @@ if __name__ == '__main__':
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # 测试 MaskedWeightedCELoss
-    print("\n[1] MaskedWeightedCELoss:")
-    criterion = MaskedWeightedCELoss(class_weights=get_default_class_weights()).to(device)
-    
     logits = torch.randn(2, 18, 50, 50, 8, device=device)
     target = torch.randint(0, 18, (2, 50, 50, 8), device=device)
     mask = torch.ones(2, 50, 50, 8, dtype=torch.bool, device=device)
     
+    print("\n[1] MaskedWeightedCELoss:")
+    criterion = MaskedWeightedCELoss(class_weights=get_default_class_weights()).to(device)
     loss = criterion(logits, target, mask)
-    print(f"  Logits: {logits.shape}")
-    print(f"  Target: {target.shape}")
-    print(f"  Mask: {mask.shape}")
     print(f"  Loss: {loss.item():.4f}")
     
-    # 测试 FocalLoss
     print("\n[2] FocalLoss:")
-    focal = FocalLoss(alpha=0.25, gamma=2.0).to(device)
+    focal = FocalLoss(gamma=2.0, class_weights=get_default_class_weights()).to(device)
     loss = focal(logits, target, mask)
     print(f"  Loss: {loss.item():.4f}")
+
+    print("\n[3] LovaszSoftmaxLoss:")
+    lovasz = LovaszSoftmaxLoss().to(device)
+    loss = lovasz(logits, target, mask)
+    print(f"  Loss: {loss.item():.4f}")
     
-    # 类别权重
-    print("\n[3] 类别权重:")
-    weights = get_default_class_weights()
-    names = get_class_names()
-    for i, (name, w) in enumerate(zip(names, weights)):
-        print(f"  {i:2d}. {name:<15} {w:.1f}")
+    print("\n[4] CombinedLoss:")
+    combined = CombinedLoss(class_weights=get_default_class_weights()).to(device)
+    loss = combined(logits, target, mask)
+    print(f"  Loss: {loss.item():.4f}")
     
     print("\n" + "=" * 60)
     print("✅ 测试通过！")
-    print("=" * 60)

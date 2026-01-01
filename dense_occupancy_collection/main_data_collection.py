@@ -267,7 +267,7 @@ def main():
             ego_trans = hero.get_transform()
             ego_matrix = np.array(ego_trans.get_matrix())
 
-            occ_filtered, aids_filtered, mask = vis_filter.run(
+            occ_filtered, aids_filtered = vis_filter.run(
                 occ, aids,
                 {'x_range': X_RANGE, 'y_range': Y_RANGE, 'z_range': Z_RANGE, 'resolution': RESOLUTION},
                 depth_data, ego_matrix
@@ -307,7 +307,7 @@ def main():
                 'resolution': np.array([RESOLUTION]),
                 'grid_size': np.array(GRID_SIZE)
             }
-            saver.save_voxel(frame_idx, occ_filtered, aids_filtered, mask, metadata=meta)
+            saver.save_voxel(frame_idx, occ_filtered, aids_filtered, metadata=meta)
             print(f"  ✅ 数据已保存")
 
     finally:

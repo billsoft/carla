@@ -581,6 +581,7 @@ class OccupancyViewer {
                     // const actorId = actor_ids ? actor_ids.data[idx] : 1;
                     // const isVisible = !actor_ids || (actorId !== 0);
                     // 用户请求：去除可见性检查，完全基于 label 渲染
+                    // 只要 label > 0 (非 Free)，就渲染
                     if (label > 0 && this.classVisibility[label]) {
                         const worldX = (x - gridX/2) * voxelSize;
                         const worldY = (y - gridY/2) * voxelSize;

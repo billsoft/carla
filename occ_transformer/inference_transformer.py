@@ -142,7 +142,9 @@ def main():
             sample = dataset[idx]
             images = sample['images'].unsqueeze(0).to(device)
             gt_occ = sample['occupancy'].numpy()
-            gt_mask = sample['mask'].numpy()
+            
+            # Mask (Deprecated) - 强制全 True
+            gt_mask = np.ones_like(gt_occ, dtype=bool)
             
             # 推理
             start_time = time.time()

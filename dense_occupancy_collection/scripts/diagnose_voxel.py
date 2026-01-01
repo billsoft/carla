@@ -22,7 +22,7 @@ def diagnose_npz(npz_path):
 
     occupancy = data['occupancy']
     actor_ids = data['actor_ids']
-    mask = data['mask']
+    # mask = data['mask']
 
     # 基本统计
     total_voxels = occupancy.size

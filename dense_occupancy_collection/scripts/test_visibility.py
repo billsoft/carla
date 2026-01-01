@@ -116,10 +116,10 @@ def main():
         lidar_sensor.destroy()
         return
 
-    # 生成体素 (带可见性过滤)
-    print(f"\n🔷 生成体素 (带可见性过滤)...")
-    occupancy, actor_ids, mask = voxel_generator.generate(
-        world, hero_vehicle, visibility_lidar_data=lidar_raw
+    # 生成体素 (mask 已移除，使用 Label 0 表示不可见区域)
+    print(f"\n🔷 生成体素...")
+    occupancy, actor_ids = voxel_generator.generate(
+        world, hero_vehicle, visibility_data=lidar_raw
     )
 
     # 统计最终结果
@@ -137,7 +137,7 @@ def main():
 
     npz_path = output_dir / "test.npz"
     voxel_generator.save_to_npz(
-        npz_path, occupancy, actor_ids, mask,
+        npz_path, occupancy, actor_ids,
         metadata={'test': True, 'hero_id': hero_vehicle.id}
     )
 

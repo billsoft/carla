@@ -88,22 +88,23 @@ class CARLADatasetBayer(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         加载一个样本
-        
+
         Returns:
             data: 字典
                 - images: [N_cam, 1, H, W], float32, [0,1]
-                - occupancy: [X, Y, Z], uint8
-                - mask: [X, Y, Z], bool
+                - occupancy: [X, Y, Z], uint8 (Label 0 = Free/不可见区域)
                 - intrinsics: [N_cam, 3, 3], float32 (可选)
                 - extrinsics: [N_cam, 4, 4], float32 (可选)
+
+        注意: mask 字段已移除，使用 Label 0 (Free) 表示不可见/空白区域
         """
         sample_id = self.sample_ids[idx]
-        
+
         # 加载图像
         images = []
         for cam in self.cameras:
             img_path = self.root / 'cameras' / cam / f'{sample_id}.png'
-            
+
             if img_path.exists():
                 img = self._load_bayer_image(str(img_path))
             else:
@@ -112,10 +113,10 @@ class CARLADatasetBayer(Dataset):
                     img = np.random.randint(0, 65535, self.img_size, dtype=np.uint16)
                 else:
                     img = np.random.randint(0, 65535, (960, 1280), dtype=np.uint16)
-                    
+
             # 转换为 tensor
             img_tensor = self._bayer_to_tensor(img)
-            
+
             # 调整大小
             if self.img_size is not None:
                 img_tensor = F.interpolate(
@@ -124,33 +125,30 @@ class CARLADatasetBayer(Dataset):
                     mode='bilinear',
                     align_corners=False
                 ).squeeze(0)
-                
+
             images.append(img_tensor)
-            
+
         images = torch.stack(images, dim=0)  # [N_cam, 1, H, W]
-        
+
         # 加载占用网格
         occ_path = self.root / 'occupancy' / f'{sample_id}.npz'
         occ_data = np.load(str(occ_path))
-        
+
         occupancy = torch.from_numpy(occ_data['occupancy'].astype(np.int64))
-        mask = torch.from_numpy(occ_data['mask'].astype(bool))
-        
+
         # 调整网格大小
         if occupancy.shape != self.target_grid_size:
             occupancy = self._resize_occupancy(occupancy, self.target_grid_size)
-            mask = self._resize_mask(mask, self.target_grid_size)
-        
+
         # 数据增强
         if self.augment:
-            images, occupancy, mask = self._augment(images, occupancy, mask)
-        
+            images, occupancy = self._augment(images, occupancy)
+
         data = {
             'images': images,
             'occupancy': occupancy,
-            'mask': mask,
         }
-        
+
         # 加载相机参数（如果存在）
         calib_path = self.root / 'calibration' / f'{sample_id}.npz'
         if calib_path.exists():
@@ -159,7 +157,7 @@ class CARLADatasetBayer(Dataset):
                 data['intrinsics'] = torch.from_numpy(calib_data['intrinsics'].astype(np.float32))
             if 'extrinsics' in calib_data:
                 data['extrinsics'] = torch.from_numpy(calib_data['extrinsics'].astype(np.float32))
-        
+
         return data
     
     def _load_bayer_image(self, path: str) -> np.ndarray:
@@ -198,32 +196,24 @@ class CARLADatasetBayer(Dataset):
         occ = F.interpolate(occ, size=target_size, mode='nearest')
         return occ.squeeze(0).squeeze(0).long()
     
-    def _resize_mask(self, mask: torch.Tensor, target_size: Tuple[int, int, int]) -> torch.Tensor:
-        """调整 mask 大小"""
-        mask = mask.unsqueeze(0).unsqueeze(0).float()
-        mask = F.interpolate(mask, size=target_size, mode='nearest')
-        return mask.squeeze(0).squeeze(0).bool()
-    
     def _augment(
         self,
         images: torch.Tensor,
-        occupancy: torch.Tensor,
-        mask: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """数据增强"""
+        occupancy: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """数据增强 (mask 已移除)"""
         # 随机水平翻转
         if torch.rand(1).item() > 0.5:
             images = torch.flip(images, dims=[-1])
             occupancy = torch.flip(occupancy, dims=[1])
-            mask = torch.flip(mask, dims=[1])
-            
+
             # 交换左右相机
             # left_pillar <-> right_pillar (3 <-> 4)
             # left_repeater <-> right_repeater (5 <-> 6)
             indices = [0, 1, 2, 4, 3, 6, 5, 7]
             images = images[indices]
-            
-        return images, occupancy, mask
+
+        return images, occupancy
 
 
 def build_dataloader(

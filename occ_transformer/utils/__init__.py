@@ -4,7 +4,8 @@
 from .loss import (
     MaskedWeightedCELoss,
     FocalLoss,
-    LovaszLoss,
+    LovaszSoftmaxLoss,
+    CombinedLoss,
     get_default_class_weights,
     get_class_names,
 )
@@ -12,7 +13,8 @@ from .loss import (
 __all__ = [
     'MaskedWeightedCELoss',
     'FocalLoss',
-    'LovaszLoss',
+    'LovaszSoftmaxLoss',
+    'CombinedLoss',
     'get_default_class_weights',
     'get_class_names',
 ]

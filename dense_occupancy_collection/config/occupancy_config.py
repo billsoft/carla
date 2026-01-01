@@ -67,18 +67,9 @@ DEPTH_CAMERA_CONFIG = {
     ]
 }
 
-# 可见性过滤配置
-VISIBILITY_CONFIG = {
-    # 是否启用可见性过滤
-    'enable_visibility_filter': True,
-    
-    # 过滤模式: 'lidar' 或 'depth_camera'
-    'filter_mode': 'depth_camera',  # ⭐ 切换到深度相机模式
-    
-    'sensor_config': VISIBILITY_LIDAR_CONFIG,
-    'depth_config': DEPTH_CAMERA_CONFIG,
-    'min_points_threshold': 5
-}
+# 可见性过滤配置 - 已弃用
+# VISIBILITY_CONFIG 已移除，相关逻辑已迁移至 VisibilityFilter (Depth Camera)
+
 
 # CARLA 语义标签 (23类) 到 Occupancy 标签 (18类) 的映射
 # 适配 OpenOccupancy / SemanticKITTI 格式

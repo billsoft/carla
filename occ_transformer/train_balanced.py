@@ -23,7 +23,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from models import TransformerOccNetBalanced
 from data.carla_dataset_bayer import build_dataloader
-from utils.loss import MaskedWeightedCELoss, get_default_class_weights
+from utils.loss import (
+    MaskedWeightedCELoss, 
+    FocalLoss, 
+    LovaszSoftmaxLoss, 
+    CombinedLoss, 
+    get_default_class_weights
+)
 
 
 def setup_logging(save_dir: str) -> logging.Logger:
@@ -70,6 +76,9 @@ def parse_args():
     parser.add_argument('--embed-dim', type=int, default=192, help='Embedding 维度')
     
     # 训练技巧
+    parser.add_argument('--loss-type', type=str, default='focal', 
+                       choices=['ce', 'focal', 'lovasz', 'combined'],
+                       help='损失函数类型: ce, focal, lovasz, combined')
     parser.add_argument('--amp', action='store_true', default=True, help='混合精度训练')
     parser.add_argument('--grad-clip', type=float, default=5.0, help='梯度裁剪阈值')
     parser.add_argument('--use-checkpoint', action='store_true', default=True, help='使用梯度检查点')
@@ -96,7 +105,10 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, 
     for batch_idx, batch in enumerate(dataloader):
         images = batch['images'].to(args.device)
         occupancy = batch['occupancy'].to(args.device)
-        mask = batch['mask'].to(args.device)
+        
+        # Mask (Deprecated) - 强制全 True
+        # mask = batch['mask'].to(args.device)
+        mask = torch.ones_like(occupancy, dtype=torch.bool, device=args.device)
 
         # 混合精度前向传播
         with autocast(enabled=args.amp):
@@ -245,7 +257,19 @@ def main():
     # 获取类别权重
     class_weights = get_default_class_weights()
     class_weights = torch.tensor(class_weights).float().to(device)
-    criterion = MaskedWeightedCELoss(class_weights=class_weights)
+    
+    if args.loss_type == 'ce':
+        criterion = MaskedWeightedCELoss(class_weights=class_weights)
+    elif args.loss_type == 'focal':
+        criterion = FocalLoss(class_weights=class_weights, gamma=2.0)
+    elif args.loss_type == 'lovasz':
+        criterion = LovaszSoftmaxLoss()
+    elif args.loss_type == 'combined':
+        criterion = CombinedLoss(class_weights=class_weights)
+    else:
+        raise ValueError(f"Unknown loss type: {args.loss_type}")
+        
+    logger.info(f"Using Loss Function: {args.loss_type}")
 
     # 混合精度
     scaler = GradScaler(enabled=args.amp)

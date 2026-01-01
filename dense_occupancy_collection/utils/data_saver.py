@@ -316,14 +316,17 @@ class DataSaver:
             path = cam_dir / f"{frame_idx:06d}.png"
             cv2.imwrite(str(path), d_mm)
 
-    def save_voxel(self, frame_idx, occupancy, actor_ids, mask, metadata=None):
-        """保存体素数据 (npz)"""
+    def save_voxel(self, frame_idx, occupancy, actor_ids, metadata=None):
+        """
+        保存体素数据 (npz)
+
+        注意: mask 字段已移除，使用 Label 0 (Free) 表示不可见/空白区域
+        """
         path = self.occupancy_dir / f"{frame_idx:06d}.npz"
 
         save_dict = {
             'occupancy': occupancy,
             'actor_ids': actor_ids,
-            'mask': mask
         }
         if metadata:
             save_dict.update(metadata)
