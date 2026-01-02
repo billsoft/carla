@@ -17,7 +17,7 @@
 - 5: construction_vehicle - 工程车
 - 6: motorcycle - 摩托车
 - 7: pedestrian - 行人
-- 8: traffic_cone - 交通锥桶
+- 8: traffic_cone - 交通标识
 - 9: trailer - 拖车
 - 10: truck - 卡车
 - 11: driveable_surface - 可行驶路面

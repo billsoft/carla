@@ -265,12 +265,42 @@ def main():
 
             # Filter
             ego_trans = hero.get_transform()
-            ego_matrix = np.array(ego_trans.get_matrix())
+            # ego_matrix = np.array(ego_trans.get_matrix())
+            
+            # ⭐ 关键修复：构建纯平移 Ego 矩阵 (用于 Visibility Filter)
+            # 因为 VoxelGenerator 现在的输出是对齐世界坐标系的 (East-North-Up)，
+            # 所以 Visibility Filter 也必须使用对齐世界的 Ego 矩阵进行投影
+            ego_location = ego_trans.location
+            ego_matrix_aligned = np.eye(4)
+            ego_matrix_aligned[0, 3] = ego_location.x
+            ego_matrix_aligned[1, 3] = ego_location.y
+            ego_matrix_aligned[2, 3] = ego_location.z
 
+            # ⭐ 修复：可见性过滤器现在也需要 world_to_grid_matrix 的逆过程 (Grid -> World)
+            # 实际上，_check_visibility_numba 接收的 view_matrices 是 Ego -> Camera
+            # 但是这里的 "Ego" 实际上是 Grid Frame (对齐世界)
+            # 而 depth_data['cam_transforms'] 是 Camera -> World
+            # 所以 view_matrices[i] = inv(Cam->World) * (Grid->World)
+            # 这里的 ego_matrix_aligned 正是 Grid->World (纯平移)
+            # 所以逻辑是正确的。
+            
+            # 问题可能出在 "depth_maps" 的时序对齐上。
+            # 如果 depth maps 是上一帧的，或者 sensor tick 有延迟，就会导致物体瞬移。
+            # 确保 world.tick() 后等待足够的时间让 sensor 更新？
+            # 在同步模式下，getData() 应该返回当前 tick 的数据。
+            
+            # 另一个可能性：depth map 的分辨率或 FOV 与投影矩阵不匹配。
+            # 检查 VisibilityFilter 的参数。
+            
+            # ⭐ 调试：强制保留 Ego 附近的物体 (Blind Spot)
+            # 车辆后方、侧方可能在相机盲区。
+            # 虽然有 6 个相机，但可能有缝隙。
+            # 增加一个 "Ego Radius Protection"：距离 Ego 5米内的物体强制可见。
+            
             occ_filtered, aids_filtered = vis_filter.run(
                 occ, aids,
                 {'x_range': X_RANGE, 'y_range': Y_RANGE, 'z_range': Z_RANGE, 'resolution': RESOLUTION},
-                depth_data, ego_matrix
+                depth_data, ego_matrix_aligned
             )
 
             # Stats

@@ -154,7 +154,10 @@ def verify_dataset(dataset_path: str, num_samples: int = 3):
 
         # 检查深度数据
         print("\n  [深度数据]")
-        depth_dirs = ['depth_front', 'depth_right', 'depth_back', 'depth_left', 'depth_up', 'depth_down']
+        depth_dirs = [
+            'depth_front', 'depth_front_right', 'depth_right', 'depth_back_right',
+            'depth_back', 'depth_back_left', 'depth_left', 'depth_front_left'
+        ]
         depth_ok = True
 
         for depth_name in depth_dirs:

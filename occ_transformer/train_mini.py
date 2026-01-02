@@ -240,7 +240,13 @@ def main():
         logger.info(f'  {name}: {value:.2f}M')
 
     # 损失函数
-    class_weights = get_default_class_weights()
+    if args.class_weight_mode == 'moving':
+        logger.info("Using Moving Objects Enhanced Class Weights")
+        class_weights = get_moving_class_weights()
+    else:
+        logger.info("Using Default Class Weights")
+        class_weights = get_default_class_weights()
+
     class_weights = torch.tensor(class_weights).float().to(device)
     
     if args.loss_type == 'ce':

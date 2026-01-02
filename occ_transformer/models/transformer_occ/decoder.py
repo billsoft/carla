@@ -199,17 +199,77 @@ class VoxelDecoder(nn.Module):
             num_deform_points=num_deform_points
         )
         
-        # 上采样
-        self.upsample = nn.Sequential(
-            nn.ConvTranspose3d(embed_dim, embed_dim // 2, kernel_size=2, stride=2),
-            nn.BatchNorm3d(embed_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose3d(embed_dim // 2, embed_dim // 4, kernel_size=(2, 2, 1), stride=(2, 2, 1)),
-            nn.BatchNorm3d(embed_dim // 4),
-            nn.ReLU(inplace=True),
-        )
+        # Build progressive upsample head (replaces old fixed upsample + occ_head)
+        self.head = self._build_upsample_head(embed_dim, num_classes, query_grid_size, output_grid_size)
         
-        self.occ_head = nn.Conv3d(embed_dim // 4, num_classes, kernel_size=1)
+    def _build_upsample_head(self, embed_dim, num_classes, start_size, target_size):
+        """
+        构建渐进式上采样头 - Target/2 策略
+        """
+        layers = []
+        curr_dim = embed_dim
+        curr_size = list(start_size)
+        
+        # Check if we can do a final 2x upsample
+        can_final_2x = (target_size[0] % 2 == 0 and 
+                        target_size[1] % 2 == 0 and 
+                        target_size[2] % 2 == 0)
+        
+        # Determine intermediate target size (Target or Target/2)
+        pre_target = list(target_size)
+        if can_final_2x:
+            pre_target = [t // 2 for t in target_size]
+            
+        # Phase 1: Reach pre_target
+        while (curr_size[0] < pre_target[0] or 
+               curr_size[1] < pre_target[1] or 
+               curr_size[2] < pre_target[2]):
+               
+            sx = 2 if curr_size[0] < pre_target[0] else 1
+            sy = 2 if curr_size[1] < pre_target[1] else 1
+            sz = 2 if curr_size[2] < pre_target[2] else 1
+            
+            if sx == 1 and sy == 1 and sz == 1:
+                break
+                
+            next_dim = max(curr_dim // 2, 32)
+            layers.extend([
+                nn.ConvTranspose3d(
+                    curr_dim, next_dim, 
+                    kernel_size=(sx, sy, sz), 
+                    stride=(sx, sy, sz)
+                ),
+                nn.BatchNorm3d(next_dim),
+                nn.ReLU(inplace=True)
+            ])
+            curr_dim = next_dim
+            curr_size[0] *= sx
+            curr_size[1] *= sy
+            curr_size[2] *= sz
+            
+        # Phase 2: Exact alignment to pre_target
+        if curr_size != pre_target:
+            layers.append(nn.Upsample(size=tuple(pre_target), mode='trilinear', align_corners=False))
+            curr_size = pre_target
+            
+        # Phase 3: Final 2x upsample
+        if can_final_2x:
+            next_dim = max(curr_dim // 2, 32)
+            layers.extend([
+                nn.ConvTranspose3d(
+                    curr_dim, next_dim,
+                    kernel_size=2,
+                    stride=2
+                ),
+                nn.BatchNorm3d(next_dim),
+                nn.ReLU(inplace=True)
+            ])
+            curr_dim = next_dim
+        
+        # Final projection
+        layers.append(nn.Conv3d(curr_dim, num_classes, kernel_size=1))
+        
+        return nn.Sequential(*layers)
         
     def forward(
         self,
@@ -232,8 +292,7 @@ class VoxelDecoder(nn.Module):
         )
         
         decoded = decoded.view(B, X, Y, Z, -1).permute(0, 4, 1, 2, 3)
-        decoded = self.upsample(decoded)
-        occ_logits = self.occ_head(decoded)
+        occ_logits = self.head(decoded)
         
         return occ_logits
 
@@ -278,16 +337,24 @@ class SimplifiedDecoder(nn.Module):
         curr_dim = embed_dim
         curr_size = list(start_size)
         
-        # Calculate scale factors
-        scale_x = target_size[0] // start_size[0]
-        scale_y = target_size[1] // start_size[1]
-        scale_z = target_size[2] // start_size[2]
+        # Check if we can do a final 2x upsample
+        can_final_2x = (target_size[0] % 2 == 0 and 
+                        target_size[1] % 2 == 0 and 
+                        target_size[2] % 2 == 0)
         
-        # Iteratively upsample
-        while curr_size[0] < target_size[0] or curr_size[1] < target_size[1] or curr_size[2] < target_size[2]:
-            sx = 2 if curr_size[0] * 2 <= target_size[0] else 1
-            sy = 2 if curr_size[1] * 2 <= target_size[1] else 1
-            sz = 2 if curr_size[2] * 2 <= target_size[2] else 1
+        # Determine intermediate target size (Target or Target/2)
+        pre_target = list(target_size)
+        if can_final_2x:
+            pre_target = [t // 2 for t in target_size]
+            
+        # Phase 1: Reach pre_target
+        while (curr_size[0] < pre_target[0] or 
+               curr_size[1] < pre_target[1] or 
+               curr_size[2] < pre_target[2]):
+               
+            sx = 2 if curr_size[0] < pre_target[0] else 1
+            sy = 2 if curr_size[1] < pre_target[1] else 1
+            sz = 2 if curr_size[2] < pre_target[2] else 1
             
             if sx == 1 and sy == 1 and sz == 1:
                 break
@@ -306,6 +373,25 @@ class SimplifiedDecoder(nn.Module):
             curr_size[0] *= sx
             curr_size[1] *= sy
             curr_size[2] *= sz
+            
+        # Phase 2: Exact alignment to pre_target
+        if curr_size != pre_target:
+            layers.append(nn.Upsample(size=tuple(pre_target), mode='trilinear', align_corners=False))
+            curr_size = pre_target
+            
+        # Phase 3: Final 2x upsample
+        if can_final_2x:
+            next_dim = max(curr_dim // 2, 32)
+            layers.extend([
+                nn.ConvTranspose3d(
+                    curr_dim, next_dim,
+                    kernel_size=2,
+                    stride=2
+                ),
+                nn.BatchNorm3d(next_dim),
+                nn.ReLU(inplace=True)
+            ])
+            curr_dim = next_dim
             
         # Final projection
         layers.append(nn.Conv3d(curr_dim, num_classes, kernel_size=1))
@@ -418,24 +504,42 @@ class BalancedDecoder(nn.Module):
         )
     
     def _build_upsample_head(self, embed_dim, num_classes, start_size, target_size):
-        """构建渐进式上采样头 - 动态适配"""
+        """
+        构建渐进式上采样头 - Target/2 策略
+        
+        策略:
+        1. 目标对齐到 Target/2 (256x256x20)
+        2. 使用 ConvTranspose3d 接近 Target/2
+        3. 使用 nn.Upsample 精确对齐 Target/2
+        4. 最后使用 ConvTranspose3d 2x 上采样到 Target
+        """
         layers = []
         curr_dim = embed_dim
         curr_size = list(start_size)
         
-        # 计算目标缩放比例
-        scale_x = target_size[0] // start_size[0]
-        scale_y = target_size[1] // start_size[1]
-        scale_z = target_size[2] // start_size[2]
+        # 检查是否可以进行最终的 2x 上采样
+        can_final_2x = (target_size[0] % 2 == 0 and 
+                        target_size[1] % 2 == 0 and 
+                        target_size[2] % 2 == 0)
         
-        # 迭代上采样直到达到或超过目标尺寸
-        while curr_size[0] < target_size[0] or curr_size[1] < target_size[1] or curr_size[2] < target_size[2]:
-            # 确定当前步的缩放因子 (优先 2x)
-            sx = 2 if curr_size[0] * 2 <= target_size[0] else 1
-            sy = 2 if curr_size[1] * 2 <= target_size[1] else 1
-            sz = 2 if curr_size[2] * 2 <= target_size[2] else 1
+        # 确定中间目标尺寸 (Target 或 Target/2)
+        pre_target = list(target_size)
+        if can_final_2x:
+            pre_target = [t // 2 for t in target_size]
             
-            # 如果都不需要缩放了，跳出
+        # Phase 1: 逼近 pre_target
+        while (curr_size[0] < pre_target[0] or 
+               curr_size[1] < pre_target[1] or 
+               curr_size[2] < pre_target[2]):
+               
+            # 只有当翻倍后不超过 pre_target太多时才翻倍 (这里允许略微超过，后续插值回来，或者严格控制)
+            # 策略：如果当前尺寸 * 2 <= pre_target * 1.5，则翻倍。
+            # 简单起见：只要小于 pre_target 就翻倍，最后插值
+            
+            sx = 2 if curr_size[0] < pre_target[0] else 1
+            sy = 2 if curr_size[1] < pre_target[1] else 1
+            sz = 2 if curr_size[2] < pre_target[2] else 1
+            
             if sx == 1 and sy == 1 and sz == 1:
                 break
                 
@@ -456,6 +560,26 @@ class BalancedDecoder(nn.Module):
             curr_size[1] *= sy
             curr_size[2] *= sz
             
+        # Phase 2: 精确对齐 pre_target (Trilinear Interpolation)
+        # 如果尺寸不匹配，强制插值
+        if curr_size != pre_target:
+            layers.append(nn.Upsample(size=tuple(pre_target), mode='trilinear', align_corners=False))
+            curr_size = pre_target
+            
+        # Phase 3: 最终 2x 上采样 (如果适用)
+        if can_final_2x:
+            next_dim = max(curr_dim // 2, 32)
+            layers.extend([
+                nn.ConvTranspose3d(
+                    curr_dim, next_dim,
+                    kernel_size=2,
+                    stride=2
+                ),
+                nn.BatchNorm3d(next_dim),
+                nn.ReLU(inplace=True)
+            ])
+            curr_dim = next_dim
+        
         # 最后的分类头
         layers.append(nn.Conv3d(curr_dim, num_classes, kernel_size=1))
         
@@ -519,12 +643,9 @@ class BalancedDecoder(nn.Module):
         x = self.conv3d(x) + x
         
         # Upsample to target size
-        x = self.upsample_head(x)  # [B, num_classes, H*2, W*2, 16]
+        x = self.upsample_head(x)  # [B, 18, 512, 512, 40]
         
-        # 最终插值到 200×200
-        x = F.interpolate(x, size=self.output_grid_size, mode='trilinear', align_corners=False)
-        
-        return x  # [B, 18, 200, 200, 16]
+        return x  # [B, 18, 512, 512, 40]
 
 
 if __name__ == '__main__':
@@ -539,7 +660,7 @@ if __name__ == '__main__':
         embed_dim=256,
         num_layers=6,
         query_grid_size=(50, 50, 8),
-        output_grid_size=(200, 200, 16),
+        output_grid_size=(512, 512, 40),
         num_classes=18
     ).to(device)
     

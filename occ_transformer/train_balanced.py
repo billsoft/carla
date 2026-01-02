@@ -32,6 +32,18 @@ from utils.loss import (
 )
 
 
+def get_moving_class_weights():
+    """获取针对移动物体增强的类别权重"""
+    base = get_default_class_weights()
+    # 4: car, 7: pedestrian, 2: bicycle, 6: motorcycle, 8: traffic_sign
+    base[4] *= 5.0   # car
+    base[7] *= 15.0  # pedestrian
+    base[2] *= 20.0  # bicycle
+    base[6] *= 15.0  # motorcycle
+    base[8] *= 15.0  # traffic_sign
+    return base
+
+
 def setup_logging(save_dir: str) -> logging.Logger:
     """设置日志"""
     os.makedirs(save_dir, exist_ok=True)
@@ -79,6 +91,9 @@ def parse_args():
     parser.add_argument('--loss-type', type=str, default='ce', 
                        choices=['ce', 'focal', 'lovasz', 'combined'],
                        help='损失函数类型: ce, focal, lovasz, combined')
+    parser.add_argument('--class-weight-mode', type=str, default='default',
+                       choices=['default', 'moving'],
+                       help='类别权重模式: default (基础), moving (针对移动物体增强)')
     parser.add_argument('--amp', action='store_true', default=True, help='混合精度训练')
     parser.add_argument('--grad-clip', type=float, default=5.0, help='梯度裁剪阈值')
     parser.add_argument('--use-checkpoint', action='store_true', default=True, help='使用梯度检查点')
@@ -255,7 +270,13 @@ def main():
 
     # 损失函数
     # 获取类别权重
-    class_weights = get_default_class_weights()
+    if args.class_weight_mode == 'moving':
+        logger.info("Using Moving Objects Enhanced Class Weights")
+        class_weights = get_moving_class_weights()
+    else:
+        logger.info("Using Default Class Weights")
+        class_weights = get_default_class_weights()
+        
     class_weights = torch.tensor(class_weights).float().to(device)
     
     if args.loss_type == 'ce':

@@ -6,24 +6,24 @@
 // Occupancy 类别颜色映射 (Hex)
 // 严格匹配 dense_occupancy_collection/config/actor_occupancy_mapping.py 中的 OCCUPANCY_COLORS
 const OCCUPANCY_COLORS = [
-    0x000000,  // 0: free (0, 0, 0)
-    0x708090,  // 1: barrier (112, 128, 144) - 灰蓝色
-    0xFF3D63,  // 2: bicycle (255, 61, 99) - 粉红色
-    0xDC143C,  // 3: bus (220, 20, 60) - 深红色
-    0xFF9E00,  // 4: car (255, 158, 0) - 橙色
-    0xE99646,  // 5: construction_vehicle (233, 150, 70) - 土黄色
-    0xFF00FF,  // 6: motorcycle (255, 0, 255) - 品红色
-    0x1E90FF,  // 7: pedestrian (30, 144, 255) - 道奇蓝
-    0xFF7F50,  // 8: traffic_cone (255, 127, 80) - 珊瑚橙
-    0xFF8C00,  // 9: trailer (255, 140, 0) - 暗橙色
-    0xB4A5B4,  // 10: truck (180, 165, 180) - 紫灰色
-    0x804080,  // 11: driveable_surface (128, 64, 128) - 深紫色
-    0xF423E8,  // 12: other_flat (244, 35, 232) - 洋红色
-    0x6B8E23,  // 13: sidewalk (107, 142, 35) - 橄榄绿
-    0x98FB98,  // 14: terrain (152, 251, 152) - 淡绿色
-    0x464646,  // 15: manmade (70, 70, 70) - 深灰色
-    0x00FF00,  // 16: vegetation (0, 255, 0) - 绿色
-    0xFFFFFF,  // 17: general_object (255, 255, 255) - 白色
+    0x000000,  // 0: free (0, 0, 0) - 黑色/空白
+    0xC8C8C8,  // 1: barrier (200, 200, 200) - 银灰色/物理阻隔
+    0xFFD700,  // 2: bicycle (255, 215, 0) - 金黄色/脆弱交通参与者
+    0xFF6347,  // 3: bus (255, 99, 71) - 番茄红/大型公交
+    0xFF8C00,  // 4: car (255, 140, 0) - 深橙色/最常见车辆
+    0xFFA500,  // 5: construction_vehicle (255, 165, 0) - 橙色/工程车
+    0xFF1493,  // 6: motorcycle (255, 20, 147) - 深粉红/高风险
+    0xFF0000,  // 7: pedestrian (255, 0, 0) - 纯红色/最高优先级 ⭐
+    0xFFFF00,  // 8: traffic_cone (255, 255, 0) - 纯黄色/交通标识 ⭐
+    0x4169E1,  // 9: trailer (65, 105, 225) - 皇家蓝
+    0x0000FF,  // 10: truck (0, 0, 255) - 纯蓝色
+    0x505050,  // 11: driveable_surface (80, 80, 80) - 深灰/可行驶路面
+    0x787878,  // 12: other_flat (120, 120, 120) - 中灰/其他平面
+    0xA0A0A0,  // 13: sidewalk (160, 160, 160) - 浅灰/人行道
+    0x8B4513,  // 14: terrain (139, 69, 19) - 马鞍棕/泥土地形
+    0xDCDCDC,  // 15: manmade (220, 220, 220) - 淡灰白/建筑物
+    0x228B22,  // 16: vegetation (34, 139, 34) - 森林绿/植被
+    0xFF00FF,  // 17: general_object (255, 0, 255) - 洋红色/未知障碍物 ⭐
 ];
 
 const OCCUPANCY_NAMES = [
@@ -95,12 +95,13 @@ class OccupancyViewer {
         directionalLight.position.set(50, 100, 50);
         this.scene.add(directionalLight);
 
-        // 添加网格辅助线
-        const gridHelper = new THREE.GridHelper(200, 40, 0x444444, 0x222222);
+        // 添加网格辅助线 (动态调整尺寸以适配 512×512×40)
+        // 512 × 0.2m = 102.4m 范围，网格设置为 120m
+        const gridHelper = new THREE.GridHelper(240, 48, 0x444444, 0x222222);
         this.scene.add(gridHelper);
 
-        // 添加坐标轴
-        const axesHelper = new THREE.AxesHelper(60);
+        // 添加坐标轴 (增大以适配更大范围)
+        const axesHelper = new THREE.AxesHelper(80);
         this.scene.add(axesHelper);
 
         // 创建体素组
@@ -399,9 +400,23 @@ class OccupancyViewer {
 
             // 获取用户选择的默认配置
             const profileSelect = document.getElementById('gridProfile');
-            const profileValue = profileSelect ? profileSelect.value : '40';
-            const defaultGrid = profileValue === '16' ? [200, 200, 16] : [500, 500, 40];
-            const defaultRes = profileValue === '16' ? 0.5 : 0.2;
+            const profileValue = profileSelect ? profileSelect.value : '512';
+
+            let defaultGrid, defaultRes;
+            if (profileValue === '512') {
+                defaultGrid = [512, 512, 40];
+                defaultRes = 0.2;
+            } else if (profileValue === '500') {
+                defaultGrid = [500, 500, 40];
+                defaultRes = 0.2;
+            } else if (profileValue === '200') {
+                defaultGrid = [200, 200, 16];
+                defaultRes = 0.5;
+            } else {
+                // 兜底默认值 (nuScenes 标准)
+                defaultGrid = [512, 512, 40];
+                defaultRes = 0.2;
+            }
 
             // 1. 优先使用保存的 grid_size
             let gridSize = data['grid_size']?.data;
@@ -423,10 +438,12 @@ class OccupancyViewer {
             if (gridSize.length === 3 && profileSelect) {
                 // 判断当前是哪种配置
                 let detectedProfile = null;
-                if (gridSize[0] === 200 && gridSize[1] === 200 && gridSize[2] === 16) {
-                    detectedProfile = '16';
+                if (gridSize[0] === 512 && gridSize[1] === 512 && gridSize[2] === 40) {
+                    detectedProfile = '512';
                 } else if (gridSize[0] === 500 && gridSize[1] === 500 && gridSize[2] === 40) {
-                    detectedProfile = '40';
+                    detectedProfile = '500';
+                } else if (gridSize[0] === 200 && gridSize[1] === 200 && gridSize[2] === 16) {
+                    detectedProfile = '200';
                 }
 
                 // 如果检测到标准配置且与当前选择不一致，则更新下拉列表
@@ -440,28 +457,71 @@ class OccupancyViewer {
             // 分辨率处理
             // 兼容 voxel_size 字段
             let resolution = data['resolution']?.data?.[0] || data['voxel_size']?.data?.[0];
-            
-            // 如果没有分辨率，根据 grid_size[2] (Z轴) 智能匹配，或使用默认值
+
+            // 如果没有分辨率，根据 grid_size 智能匹配，或使用默认值
             if (!resolution) {
                 if (gridSize[2] === 16) {
                     resolution = 0.5;
                 } else if (gridSize[2] === 40) {
-                    resolution = 0.2;
+                    // 根据 X 维度判断是 512 还是 500
+                    if (gridSize[0] === 512) {
+                        resolution = 0.2;  // 512×512×40 → 0.2m (nuScenes)
+                    } else if (gridSize[0] === 500) {
+                        resolution = 0.2;  // 500×500×40 → 0.2m (旧版)
+                    } else {
+                        resolution = 0.2;  // 默认 0.2m
+                    }
                 } else {
                     resolution = defaultRes;
                 }
                 console.log('Using inferred/default resolution:', resolution);
             }
 
-            const xRange = Array.from(data['x_range']?.data || [-50, 50]);
+            // 坐标范围处理 - 根据 grid_size 智能推断
+            let xRange, yRange, zRange;
+
+            if (data['x_range']?.data) {
+                xRange = Array.from(data['x_range'].data);
+            } else {
+                // 根据 grid_size 推断范围
+                if (gridSize[0] === 512) {
+                    xRange = [-51.2, 51.2];  // nuScenes 标准
+                } else if (gridSize[0] === 500) {
+                    xRange = [-50, 50];  // 旧版
+                } else if (gridSize[0] === 200) {
+                    xRange = [-50, 50];  // 训练网络
+                } else {
+                    xRange = [-50, 50];  // 默认
+                }
+            }
+
+            if (data['y_range']?.data) {
+                yRange = Array.from(data['y_range'].data);
+            } else {
+                if (gridSize[1] === 512) {
+                    yRange = [-51.2, 51.2];
+                } else if (gridSize[1] === 500) {
+                    yRange = [-50, 50];
+                } else if (gridSize[1] === 200) {
+                    yRange = [-50, 50];
+                } else {
+                    yRange = [-50, 50];
+                }
+            }
+
+            if (data['z_range']?.data) {
+                zRange = Array.from(data['z_range'].data);
+            } else {
+                zRange = [-4, 4];  // 默认高度范围 (所有配置相同)
+            }
 
             this.currentData = {
                 occupancy: occupancy,
                 actor_ids: actor_ids,
                 mask: mask,
                 x_range: xRange,
-                y_range: Array.from(data['y_range']?.data || [-50, 50]),
-                z_range: Array.from(data['z_range']?.data || [-4, 4]),
+                y_range: yRange,
+                z_range: zRange,
                 resolution: resolution,
                 grid_size: gridSize
             };
@@ -643,7 +703,10 @@ class OccupancyViewer {
     }
 
     setView(viewName) {
-        const distance = 120;
+        // 动态调整相机距离以适配不同网格尺寸
+        const gridSize = this.currentData ? this.currentData.grid_size : [512, 512, 40];
+        const maxDim = Math.max(gridSize[0], gridSize[1]);
+        const distance = maxDim * 0.3;  // 根据网格尺寸动态调整
 
         switch (viewName) {
             case 'top':

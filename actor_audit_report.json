@@ -1,0 +1,332 @@
+{
+    "map": "Carla/Maps/Town10HD_Opt",
+    "actors": [
+        {
+            "type": "Actor",
+            "type_id": "traffic.traffic_light",
+            "count": 15,
+            "semantic_tags": [
+                8,
+                20,
+                6,
+                7
+            ],
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade"
+        },
+        {
+            "type": "Actor",
+            "type_id": "traffic.stop",
+            "count": 3,
+            "semantic_tags": [
+                8,
+                6
+            ],
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade"
+        },
+        {
+            "type": "Actor",
+            "type_id": "traffic.unknown",
+            "count": 3,
+            "semantic_tags": [],
+            "mapped_label_id": 17,
+            "mapped_label_name": "unknown"
+        },
+        {
+            "type": "Actor",
+            "type_id": "traffic.yield",
+            "count": 2,
+            "semantic_tags": [
+                8,
+                6
+            ],
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade"
+        },
+        {
+            "type": "Actor",
+            "type_id": "spectator",
+            "count": 1,
+            "semantic_tags": [],
+            "mapped_label_id": 17,
+            "mapped_label_name": "unknown"
+        }
+    ],
+    "environment_objects": [
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Buildings",
+            "count": 48369,
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade",
+            "examples": [
+                "ProceduralBuilding105_0_Inst_1_1",
+                "ProceduralBuilding105_0_Inst_0_0",
+                "ProceduralBuilding105_0_Inst_2_2"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Vegetation",
+            "count": 4270,
+            "mapped_label_id": 16,
+            "mapped_label_name": "vegetation",
+            "examples": [
+                "InstancedFoliageActor_0_Inst_2_2",
+                "InstancedFoliageActor_0_Inst_0_0",
+                "InstancedFoliageActor_0_Inst_1_1"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "NONE",
+            "count": 1767,
+            "mapped_label_id": 0,
+            "mapped_label_name": "free",
+            "examples": [
+                "Road_Crosswalk_Town10HD_220_SM_0",
+                "Road_Crosswalk_Town10HD_221_SM_0",
+                "Road_Crosswalk_Town10HD_222_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Fences",
+            "count": 1767,
+            "mapped_label_id": 1,
+            "mapped_label_name": "barrier",
+            "examples": [
+                "SM_WallBridge_591_SM_0",
+                "SM_WallBridge_600_SM_0",
+                "SM_WallBridge_599_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Static",
+            "count": 1223,
+            "mapped_label_id": 17,
+            "mapped_label_name": "unknown",
+            "examples": [
+                "BP_TrafficLightNew_T10_master_largeBIG_rsc11_13_Static_9",
+                "BP_TrafficLightNew_T10_master_largeBIG_rsc12_14_Static_8",
+                "BP_TrafficLightNew_T10_master_largeBIG_rsc11_13_Static_8"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Dynamic",
+            "count": 489,
+            "mapped_label_id": 17,
+            "mapped_label_name": "unknown",
+            "examples": [
+                "SM_Dumpster_528_SM_0",
+                "BP_FoodCart_decal3_0_SM_0",
+                "SM_Dumpster3_530_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Other",
+            "count": 370,
+            "mapped_label_id": 17,
+            "mapped_label_name": "unknown",
+            "examples": [
+                "SM_Plane3_97_SM_0",
+                "SM_Plane2_96_SM_0",
+                "SM_Plane4_98_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Sidewalks",
+            "count": 269,
+            "mapped_label_id": 13,
+            "mapped_label_name": "sidewalk",
+            "examples": [
+                "Plane_0_SM_0",
+                "SM_Road_SideWalk_Town10HD51_1_SM_0",
+                "Road_Grass_Town10HD21_9_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "TrafficSigns",
+            "count": 147,
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade",
+            "examples": [
+                "BP_Stop4_2_SM_1",
+                "BP_Stop3_1_SM_1",
+                "BP_Stop2_0_SM_1"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Poles",
+            "count": 120,
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade",
+            "examples": [
+                "BP_Stop2_0_SM_0",
+                "BP_Stop3_1_SM_0",
+                "BP_Stop4_2_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "TrafficLight",
+            "count": 62,
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade",
+            "examples": [
+                "BP_TrafficLightNew_T10_master_largeBIG_rsc11_13_TrafficLight_1",
+                "BP_TrafficLightNew_T10_master_largeBIG_rsc11_13_TrafficLight_0",
+                "BP_TrafficLightNew_T10_master_largeBIG_rsc11_13_TrafficLight_2"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Bicycle",
+            "count": 56,
+            "mapped_label_id": 2,
+            "mapped_label_name": "bicycle",
+            "examples": [
+                "StaticMeshActor_663_SM_0",
+                "StaticMeshActor_218_SM_0",
+                "StaticMeshActor_219_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Walls",
+            "count": 48,
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade",
+            "examples": [
+                "BP_RepSpline83_46_Inst_2_2",
+                "BP_RepSpline83_46_Inst_0_0",
+                "BP_RepSpline83_46_Inst_1_1"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Car",
+            "count": 47,
+            "mapped_label_id": 4,
+            "mapped_label_name": "car",
+            "examples": [
+                "SM_Tesla2_418_SM_0",
+                "SM_ChargerParked_437_SM_0",
+                "SM_ChargerParked_437_SM_1"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Truck",
+            "count": 30,
+            "mapped_label_id": 10,
+            "mapped_label_name": "truck",
+            "examples": [
+                "BP_MercedesSprinter_Parked_C_3_SM_0",
+                "BP_VolkswagenT2_Parked_C_1_SM_0",
+                "BP_VolkswagenT2_Parked_C_1_SM_1"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Terrain",
+            "count": 23,
+            "mapped_label_id": 14,
+            "mapped_label_name": "terrain",
+            "examples": [
+                "Road_Grass_Town10HD8_21_SM_0",
+                "Road_Grass_Town10HD20_8_SM_0",
+                "Road_Grass_Town10HD13_29_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Ground",
+            "count": 15,
+            "mapped_label_id": 12,
+            "mapped_label_name": "other_flat",
+            "examples": [
+                "Road_Grass_Town10HD31_2_SM_0",
+                "Road_Sidewalk_Town10HD29_1_SM_0",
+                "Road_Grass_Town10HD34_3_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Bridge",
+            "count": 9,
+            "mapped_label_id": 15,
+            "mapped_label_name": "manmade",
+            "examples": [
+                "SM_Pier_797_SM_0",
+                "SM_Pier2_799_SM_0",
+                "SM_Pier_Square_798_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Motorcycle",
+            "count": 8,
+            "mapped_label_id": 6,
+            "mapped_label_name": "motorcycle",
+            "examples": [
+                "VespaRig_412_SM_0",
+                "SM_Harley_410_SM_0",
+                "SM_Harley2_423_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "RoadLines",
+            "count": 4,
+            "mapped_label_id": 11,
+            "mapped_label_name": "driveable_surface",
+            "examples": [
+                "StaticMeshActor_45_SM_0",
+                "StaticMeshActor_41_SM_0",
+                "StaticMeshActor_43_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Roads",
+            "count": 4,
+            "mapped_label_id": 11,
+            "mapped_label_name": "driveable_surface",
+            "examples": [
+                "StaticMeshActor_54_SM_0",
+                "StaticMeshActor_55_SM_0",
+                "StaticMeshActor_53_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Water",
+            "count": 2,
+            "mapped_label_id": 12,
+            "mapped_label_name": "other_flat",
+            "examples": [
+                "SM_Beach1760_2_SM_0",
+                "SM_seaM_52_SM_0"
+            ]
+        },
+        {
+            "type": "EnvironmentObject",
+            "city_object_label": "Bus",
+            "count": 2,
+            "mapped_label_id": 3,
+            "mapped_label_name": "bus",
+            "examples": [
+                "BP_MitsubishiFusoRosa_Parked_C_1_SM_0",
+                "BP_MitsubishiFusoRosa_Parked_C_1_SM_1"
+            ]
+        }
+    ]
+}

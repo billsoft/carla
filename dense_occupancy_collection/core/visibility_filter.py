@@ -84,7 +84,13 @@ def _check_visibility_numba(
                         # Check Visibility
                         # Voxel distance is pc_x
                         # Tolerance: 0.5 meters (to account for discretization)
-                        if pc_x < (depth_val + 0.5):
+                        # ⭐ 改进：自适应容差 (Adaptive Tolerance)
+                        # 近处保持高精度 (0.5m)，远处适当放宽以抑制噪声 (max 1.5m)
+                        # pc_x 是距离 (meters)
+                        adaptive_tolerance = 0.5 + max(0.0, (pc_x - 10.0) * 0.02)
+                        adaptive_tolerance = min(adaptive_tolerance, 1.5)
+                        
+                        if pc_x < (depth_val + adaptive_tolerance):
                             is_visible = True
                             break # Visible in at least one camera
                 
@@ -122,7 +128,8 @@ class VisibilityFilter:
         # 1. Prepare Matrices: Ego -> Camera
         # T_ego2cam = inv(T_cam2world) * T_ego2world
         view_matrices = np.zeros_like(cam_transforms_world)
-        for i in range(6):
+        num_cams = cam_transforms_world.shape[0]
+        for i in range(num_cams):
             t_world2cam = np.linalg.inv(cam_transforms_world[i])
             view_matrices[i] = t_world2cam @ ego_matrix
             
@@ -160,11 +167,36 @@ class VisibilityFilter:
         else:
             final_mask = raw_mask
             
-        # 4. 强制保留规则 (地面)
+        # 4. 强制保留规则 (地面 + Ego周边)
         # 11=driveable, 12=other_flat, 13=sidewalk, 14=terrain
         GROUND_LABELS = [11, 12, 13, 14]
         ground_mask = np.isin(occupancy, GROUND_LABELS)
         final_mask[ground_mask] = True
+        
+        # ⭐ 关键修复：Ego 周边盲区保护 (Blind Spot Protection)
+        # 解决车辆后方/下方大物体因相机覆盖不全而闪烁消失的问题
+        # 强制保留距离 Ego 中心 4.0 米内的所有体素
+        # (Grid 坐标系原点即为 Ego 中心)
+        # 计算每个体素到中心的距离 (Grid Index Space)
+        # center index = nx/2, ny/2, nz/2 (roughly)
+        # Better: use coordinate ranges
+        
+        # 简单实现：保留中心区域的 box
+        # grid size is 512x512 (100m x 100m)
+        # center is at 256, 256
+        # 4m radius = 4 / 0.2 = 20 voxels
+        nx, ny, nz = occupancy.shape
+        cx, cy = nx // 2, ny // 2
+        radius_idx = 25 # 5 meters
+        
+        # Clip
+        x_start = max(0, cx - radius_idx)
+        x_end = min(nx, cx + radius_idx)
+        y_start = max(0, cy - radius_idx)
+        y_end = min(ny, cy + radius_idx)
+        
+        # Z range: full Z column near ego
+        final_mask[x_start:x_end, y_start:y_end, :] = True
         
         # Apply Mask
         filtered_occupancy = occupancy.copy()

@@ -26,10 +26,10 @@ class GroundTruthVoxelGenerator:
     """
     
     def __init__(self,
-                 x_range=(-50.0, 50.0),
-                 y_range=(-50.0, 50.0),
+                 x_range=(-51.2, 51.2),  # ⭐ 更新默认值
+                 y_range=(-51.2, 51.2),  # ⭐ 更新默认值
                  z_range=(-4.0, 4.0),
-                 resolution=0.5):
+                 resolution=0.2):  # ⭐ 修正默认值: 0.5 -> 0.2
         self.x_range = x_range
         self.y_range = y_range
         self.z_range = z_range
@@ -40,6 +40,11 @@ class GroundTruthVoxelGenerator:
             int((y_range[1] - y_range[0]) / resolution),
             int((z_range[1] - z_range[0]) / resolution)
         ]
+
+        # ⭐ 添加验证
+        expected_grid_size = [512, 512, 40]
+        if self.grid_size != expected_grid_size:
+            print(f"[警告] 体素网格尺寸 {self.grid_size} 与标准 {expected_grid_size} 不一致")
 
         # DepthVisibilityFilter 已移除
         # 不可见区域直接设置为 Label 0 (Free)，无需 mask
@@ -61,24 +66,34 @@ class GroundTruthVoxelGenerator:
         actor_ids = np.zeros(self.grid_size, dtype=np.int32)  # ⭐ 新增：记录Actor ID（使用int32支持负数虚拟ID）
         
         ego_transform = ego_vehicle.get_transform()
-        ego_matrix = np.array(ego_transform.get_matrix())
+        ego_location = ego_transform.location
+        
+        # ⭐ 构建纯平移变换矩阵 (不包含旋转)
+        # 体素网格坐标系: 以Ego位置为原点,对齐世界坐标轴 (East-North-Up)
+        # 解决车辆转弯时体素网格旋转导致的静态物体闪烁问题
+        grid_to_world_matrix = np.eye(4)
+        grid_to_world_matrix[0, 3] = ego_location.x
+        grid_to_world_matrix[1, 3] = ego_location.y
+        grid_to_world_matrix[2, 3] = ego_location.z
         
         # 1. 填充静态环境 (地面、道路)
-        self._fill_static_environment(occupancy, actor_ids, world, ego_transform)
+        self._fill_static_environment(occupancy, actor_ids, world, ego_transform, grid_to_world_matrix)
 
-        # 2. 获取动态 Actors (车辆、行人、静态道具)
+        # 2. 获取动态 Actors (车辆、行人、静态道具、交通设施)
         actors = world.get_actors()
         vehicles = actors.filter('vehicle.*')
         walkers = actors.filter('walker.pedestrian.*')
-        props = actors.filter('static.prop.*')  # ⭐ 新增：获取锥桶、垃圾桶等 props
-        all_actors = list(vehicles) + list(walkers) + list(props)
+        props = actors.filter('static.prop.*')
+        traffic = actors.filter('traffic.*')  # ⭐ 新增：获取红绿灯、交通标志等 Actor
+        
+        all_actors = list(vehicles) + list(walkers) + list(props) + list(traffic)
 
-        print(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}, Props={len(props)}")
+        print(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}, Props={len(props)}, Traffic={len(traffic)}")
 
         # 3. 遍历 Actor，光栅化 Bounding Box
         filled_actor_ids = []
-        filled_by_type = {'vehicles': [], 'walkers': [], 'props': []}  # ⭐ 统计各类型
-        filtered_by_distance = {'vehicles': 0, 'walkers': 0, 'props': 0}
+        filled_by_type = {'vehicles': [], 'walkers': [], 'props': [], 'traffic': []}
+        filtered_by_distance = {'vehicles': 0, 'walkers': 0, 'props': 0, 'traffic': 0}
 
         print(f"\n[调试] ========== 开始填充Actor到体素 ==========")
 
@@ -99,7 +114,7 @@ class GroundTruthVoxelGenerator:
                     filtered_by_distance['vehicles'] += 1
                 continue
 
-            self._fill_actor_bb(occupancy, actor_ids, actor, ego_matrix, is_ego=(actor.id == ego_vehicle.id))
+            self._fill_actor_bb(occupancy, actor_ids, actor, grid_to_world_matrix, is_ego=(actor.id == ego_vehicle.id))
             filled_actor_ids.append(actor.id)
 
             # ⭐ 按类型统计
@@ -114,7 +129,7 @@ class GroundTruthVoxelGenerator:
         print(f"[调试] 距离过滤: 车辆 {filtered_by_distance['vehicles']}, 行人 {filtered_by_distance['walkers']}, Props {filtered_by_distance['props']}")
 
         # 4. 填充自车
-        self._fill_actor_bb(occupancy, actor_ids, ego_vehicle, ego_matrix, is_ego=True)
+        self._fill_actor_bb(occupancy, actor_ids, ego_vehicle, grid_to_world_matrix, is_ego=True)
         filled_actor_ids.append(ego_vehicle.id)
 
         print(f"[体素生成] 填充到体素的Actor IDs ({len(filled_actor_ids)}个): {sorted(filled_actor_ids)}")
@@ -134,7 +149,7 @@ class GroundTruthVoxelGenerator:
 
         return occupancy, actor_ids
 
-    def _fill_static_environment(self, occupancy, actor_ids, world, ego_transform):
+    def _fill_static_environment(self, occupancy, actor_ids, world, ego_transform, grid_to_world_matrix):
         """
         填充静态环境 (Road, Ground, Sidewalk)
         由于全图 RayCast 太慢，这里采用基于 Map 的启发式方法：
@@ -144,7 +159,7 @@ class GroundTruthVoxelGenerator:
         """
         map_instance = world.get_map()
         ego_location = ego_transform.location
-        ego_matrix = np.array(ego_transform.get_matrix())
+        # ego_matrix = np.array(ego_transform.get_matrix()) # ❌ 不再使用旋转矩阵
         
         # --- A. 地面与道路 (基于高度启发式) ---
         
@@ -180,16 +195,16 @@ class GroundTruthVoxelGenerator:
         x_coords = self.x_range[0] + (x_indices + 0.5) * self.resolution
         y_coords = self.y_range[0] + (y_indices + 0.5) * self.resolution
         
-        # 构建网格点 (N, 3) in Ego
+        # 构建网格点 (N, 3) in Grid Frame
         xv, yv = np.meshgrid(x_coords, y_coords, indexing='ij')
         zv = np.zeros_like(xv) # Z=0 平面
         
-        points_ego = np.stack([xv, yv, zv], axis=-1).reshape(-1, 3)
+        points_grid = np.stack([xv, yv, zv], axis=-1).reshape(-1, 3)
         
-        # Transform to World
+        # Transform to World (使用纯平移矩阵)
         # Homogeneous
-        points_ego_h = np.concatenate([points_ego, np.ones((points_ego.shape[0], 1))], axis=1)
-        points_world_h = points_ego_h @ ego_matrix.T
+        points_grid_h = np.concatenate([points_grid, np.ones((points_grid.shape[0], 1))], axis=1)
+        points_world_h = points_grid_h @ grid_to_world_matrix.T
         points_world = points_world_h[:, :3]
         
         # 批量查询 Map (Python API 只能循环)
@@ -285,51 +300,9 @@ class GroundTruthVoxelGenerator:
         # 使用 world.get_environment_objects() 获取更详细的静态物体信息 (ID, Transform, BBox)
         # 替代旧的 get_level_bbs，以支持实例级可见性过滤
         
-        # 感兴趣的静态物体类型映射
-        # Label -> Occupancy Label
-        # 补充缺失的类型: 
-        #   Vegetation(9) -> 16
-        #   TrafficLight(18) -> 15
-        #   TrafficSign(12) -> 15
-        #   Pole(5) -> 15
-        #   Fence(2) -> 1
-        #   Wall(11) -> 15
-        #   Bridge(15) -> 2
-        #   Roads/Lines -> 11 (driveable_surface)
-        #   Sidewalks -> 13 (sidewalk)
-        #   Terrain -> 14 (terrain)
-        #   Ground/Water -> 12 (other_flat)
-        #   Static Vehicles -> 对应语义类 (Car->4, Truck->10, etc.)
-        static_type_mapping = {
-            carla.CityObjectLabel.Buildings: 15,      # manmade
-            carla.CityObjectLabel.Fences: 1,          # barrier
-            carla.CityObjectLabel.TrafficLight: 15,   # manmade
-            carla.CityObjectLabel.TrafficSigns: 15,   # manmade
-            carla.CityObjectLabel.Poles: 15,          # manmade
-            carla.CityObjectLabel.Vegetation: 16,     # vegetation
-            carla.CityObjectLabel.Walls: 15,          # manmade
-            carla.CityObjectLabel.Other: 17,          # general_object
-            carla.CityObjectLabel.Static: 17,         # general_object
-            carla.CityObjectLabel.Dynamic: 17,        # general_object
-            carla.CityObjectLabel.Bridge: 2,          # construction
-            carla.CityObjectLabel.GuardRail: 1,       # barrier
-            carla.CityObjectLabel.RailTrack: 17,      # general_object
-            
-            # ⭐ 补全缺失的环境物体
-            carla.CityObjectLabel.RoadLines: 11,      # driveable_surface
-            carla.CityObjectLabel.Roads: 11,          # driveable_surface
-            carla.CityObjectLabel.Sidewalks: 13,      # sidewalk
-            carla.CityObjectLabel.Terrain: 14,        # terrain
-            carla.CityObjectLabel.Ground: 12,         # other_flat
-            carla.CityObjectLabel.Water: 12,          # other_flat
-            
-            # ⭐ 静态停放车辆 (Environment Objects)
-            carla.CityObjectLabel.Car: 4,             # car
-            carla.CityObjectLabel.Truck: 10,          # truck
-            carla.CityObjectLabel.Bus: 3,             # bus
-            carla.CityObjectLabel.Motorcycle: 6,      # motorcycle
-            carla.CityObjectLabel.Bicycle: 2,         # bicycle -> 2(bicycle)? Occupancy label for bicycle is 2.
-        }
+        # 直接使用 occupancy_config.py 中的统一映射配置
+        # 确保与 actor_occupancy_mapping.py 和全局配置保持一致
+        static_type_mapping = CARLA_TO_OCCUPANCY_MAPPING
         
         # 获取所有环境物体
         env_objs = world.get_environment_objects(carla.CityObjectLabel.Any)
@@ -354,9 +327,10 @@ class GroundTruthVoxelGenerator:
         if skipped_types:
             print(f"[警告] 发现未映射的物体类型: {skipped_types}")
         
-        # 预计算 Ego 逆矩阵
+        # 预计算 Grid->World 的逆矩阵 (World->Grid)
+        # grid_to_world_matrix 是纯平移矩阵，其逆矩阵也是纯平移 (T^-1 = -T)
         try:
-            ego_matrix_inv = np.linalg.inv(ego_matrix)
+            world_to_grid_matrix = np.linalg.inv(grid_to_world_matrix)
         except np.linalg.LinAlgError:
             return
 
@@ -387,21 +361,21 @@ class GroundTruthVoxelGenerator:
             # 使用 Identity Transform 获取世界顶点 (因为 BB 已经是 World AABB)
             verts_world = bb.get_world_vertices(carla.Transform())
             
-            # 4. 转换到 Ego Frame
+            # 4. 转换到 Grid Frame (对齐世界坐标轴)
             verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
-            verts_ego_np = ego_matrix_inv @ verts_world_np
+            verts_grid_np = world_to_grid_matrix @ verts_world_np
             
-            xs_ego = verts_ego_np[0, :]
-            ys_ego = verts_ego_np[1, :]
-            zs_ego = verts_ego_np[2, :]
+            xs_grid = verts_grid_np[0, :]
+            ys_grid = verts_grid_np[1, :]
+            zs_grid = verts_grid_np[2, :]
             
             # 5. 计算 Grid 范围
-            min_ix = int(np.floor((np.min(xs_ego) - self.x_range[0]) / self.resolution))
-            max_ix = int(np.ceil((np.max(xs_ego) - self.x_range[0]) / self.resolution))
-            min_iy = int(np.floor((np.min(ys_ego) - self.y_range[0]) / self.resolution))
-            max_iy = int(np.ceil((np.max(ys_ego) - self.y_range[0]) / self.resolution))
-            min_iz = int(np.floor((np.min(zs_ego) - self.z_range[0]) / self.resolution))
-            max_iz = int(np.ceil((np.max(zs_ego) - self.z_range[0]) / self.resolution))
+            min_ix = int(np.floor((np.min(xs_grid) - self.x_range[0]) / self.resolution))
+            max_ix = int(np.ceil((np.max(xs_grid) - self.x_range[0]) / self.resolution))
+            min_iy = int(np.floor((np.min(ys_grid) - self.y_range[0]) / self.resolution))
+            max_iy = int(np.ceil((np.max(ys_grid) - self.y_range[0]) / self.resolution))
+            min_iz = int(np.floor((np.min(zs_grid) - self.z_range[0]) / self.resolution))
+            max_iz = int(np.ceil((np.max(zs_grid) - self.z_range[0]) / self.resolution))
             
             # Clip
             min_ix = max(0, min_ix)
@@ -423,25 +397,23 @@ class GroundTruthVoxelGenerator:
                 continue
                 
             # 6. OBB 光栅化 (改进版：保守光栅化 Conservative Rasterization)
-            # 生成 Ego Grid Points
-            lx = np.linspace(self.x_range[0] + (min_ix + 0.5)*self.resolution, 
-                             self.x_range[0] + (max_ix - 0.5)*self.resolution, max_ix - min_ix)
-            ly = np.linspace(self.y_range[0] + (min_iy + 0.5)*self.resolution, 
-                             self.y_range[0] + (max_iy - 0.5)*self.resolution, max_iy - min_iy)
-            lz = np.linspace(self.z_range[0] + (min_iz + 0.5)*self.resolution, 
-                             self.z_range[0] + (max_iz - 0.5)*self.resolution, max_iz - min_iz)
+            # 生成 Grid Points
+            # ⭐ 优化：使用 arange + 索引计算 (精度最高)
+            lx = self.x_range[0] + (np.arange(min_ix, max_ix) + 0.5) * self.resolution
+            ly = self.y_range[0] + (np.arange(min_iy, max_iy) + 0.5) * self.resolution
+            lz = self.z_range[0] + (np.arange(min_iz, max_iz) + 0.5) * self.resolution
             
             sub_xv, sub_yv, sub_zv = np.meshgrid(lx, ly, lz, indexing='ij')
-            sub_points_ego = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
+            sub_points_grid = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
             
-            # Ego -> World -> Local
-            # T_obj_inv * T_ego * P_ego
+            # Grid -> World -> Local
+            # T_obj_inv * T_grid * P_grid
             # 注意：由于 bb 已经是 World AABB，我们不需要转换到 Local Object Space
             # 我们只需要检查 World Points 是否在 World AABB 内
             # 也就是检查 abs(P_world - BB_Center) <= BB_Extent
             
-            # Ego -> World
-            sub_points_world_h = sub_points_ego @ ego_matrix.T
+            # Grid -> World
+            sub_points_world_h = sub_points_grid @ grid_to_world_matrix.T
             sub_points_world = sub_points_world_h[:, :3]
             
             # World AABB Check
@@ -455,7 +427,10 @@ class GroundTruthVoxelGenerator:
             # 这样，只要体素中心距离物体表面在 resolution/2 以内（即体素体积与物体相交），就会被选中。
             
             # 默认 padding
-            padding = self.resolution * 0.6  # 稍微多一点点以防浮点误差
+            # ⭐ 增强 Padding: 0.9 * resolution (0.18m)
+            # 这足以覆盖旋转体素的对角线距离 (sqrt(3)/2 * res ≈ 0.866 * res)
+            # 解决静态物体闪烁问题
+            padding = self.resolution * 0.9 
             
             # 优化：对于非常大的物体（如道路、地形），不需要这么激进的 padding，以节省性能并防止过度膨胀
             # 如果 extent 很大，减少 padding
@@ -595,7 +570,7 @@ class GroundTruthVoxelGenerator:
         else:
             return original_x * 0.85, original_y * 0.85, original_z * 0.85
 
-    def _fill_actor_bb(self, occupancy, actor_ids_grid, actor, ego_matrix, is_ego=False):
+    def _fill_actor_bb(self, occupancy, actor_ids_grid, actor, grid_to_world_matrix, is_ego=False):
         """
         Helper to rasterize an actor's bounding box into the occupancy grid
 
@@ -603,7 +578,7 @@ class GroundTruthVoxelGenerator:
             occupancy: 体素类别数组
             actor_ids_grid: 体素Actor ID数组
             actor: CARLA Actor对象
-            ego_matrix: Ego变换矩阵
+            grid_to_world_matrix: Grid到World的变换矩阵 (纯平移)
             is_ego: 是否是自车
         """
         try:
@@ -615,9 +590,9 @@ class GroundTruthVoxelGenerator:
         # Logging for debug
         # print(f"DEBUG: Actor {actor.type_id} -> Semantic Tag {actor.semantic_tags}")
 
-        # Ego Matrix Inverse (World -> Ego)
+        # World -> Grid (Translation Only Inverse)
         try:
-            m_inv = np.linalg.inv(ego_matrix)
+            world_to_grid_matrix = np.linalg.inv(grid_to_world_matrix)
         except np.linalg.LinAlgError:
             return
 
@@ -628,20 +603,20 @@ class GroundTruthVoxelGenerator:
 
         verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
 
-        # Transform to Ego
-        verts_ego_np = m_inv @ verts_world_np
+        # Transform to Grid Frame
+        verts_grid_np = world_to_grid_matrix @ verts_world_np
 
-        xs_ego = verts_ego_np[0, :]
-        ys_ego = verts_ego_np[1, :]
-        zs_ego = verts_ego_np[2, :]
+        xs_grid = verts_grid_np[0, :]
+        ys_grid = verts_grid_np[1, :]
+        zs_grid = verts_grid_np[2, :]
 
         # Grid Indices Range
-        min_ix = int(np.floor((np.min(xs_ego) - self.x_range[0]) / self.resolution))
-        max_ix = int(np.ceil((np.max(xs_ego) - self.x_range[0]) / self.resolution))
-        min_iy = int(np.floor((np.min(ys_ego) - self.y_range[0]) / self.resolution))
-        max_iy = int(np.ceil((np.max(ys_ego) - self.y_range[0]) / self.resolution))
-        min_iz = int(np.floor((np.min(zs_ego) - self.z_range[0]) / self.resolution))
-        max_iz = int(np.ceil((np.max(zs_ego) - self.z_range[0]) / self.resolution))
+        min_ix = int(np.floor((np.min(xs_grid) - self.x_range[0]) / self.resolution))
+        max_ix = int(np.ceil((np.max(xs_grid) - self.x_range[0]) / self.resolution))
+        min_iy = int(np.floor((np.min(ys_grid) - self.y_range[0]) / self.resolution))
+        max_iy = int(np.ceil((np.max(ys_grid) - self.y_range[0]) / self.resolution))
+        min_iz = int(np.floor((np.min(zs_grid) - self.z_range[0]) / self.resolution))
+        max_iz = int(np.ceil((np.max(zs_grid) - self.z_range[0]) / self.resolution))
 
         # Clip
         min_ix = max(0, min_ix)
@@ -662,34 +637,76 @@ class GroundTruthVoxelGenerator:
             return
 
         # Prepare Sub-grid for OBB check
-        lx = np.linspace(self.x_range[0] + (min_ix + 0.5)*self.resolution, 
-                         self.x_range[0] + (max_ix - 0.5)*self.resolution, max_ix - min_ix)
-        ly = np.linspace(self.y_range[0] + (min_iy + 0.5)*self.resolution, 
-                         self.y_range[0] + (max_iy - 0.5)*self.resolution, max_iy - min_iy)
-        lz = np.linspace(self.z_range[0] + (min_iz + 0.5)*self.resolution, 
-                         self.z_range[0] + (max_iz - 0.5)*self.resolution, max_iz - min_iz)
+        # ⭐ 优化：使用 arange + 索引计算 (精度最高)
+        # 避免 linspace 的浮点累积误差
+        lx = self.x_range[0] + (np.arange(min_ix, max_ix) + 0.5) * self.resolution
+        ly = self.y_range[0] + (np.arange(min_iy, max_iy) + 0.5) * self.resolution
+        lz = self.z_range[0] + (np.arange(min_iz, max_iz) + 0.5) * self.resolution
         
         sub_xv, sub_yv, sub_zv = np.meshgrid(lx, ly, lz, indexing='ij')
         
-        # Flatten
-        sub_points_ego = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
+        # Flatten Voxel Centers
+        # shape: (N, 3)
+        # sub_points_grid: 体素中心在Grid坐标系中 (对齐世界坐标轴)
+        sub_points_grid = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
+        num_voxels = sub_points_grid.shape[0]
+
+        # ==============================================================================
+        # ⭐ 多点采样策略 (Multi-point Sampling) 
+        # 解决细小物体在体素网格移动时的闪烁问题
+        # ==============================================================================
         
-        # Transform Ego -> World -> Actor Local
-        # P_local = T_actor_inv * P_world
-        # P_world = T_ego * P_ego
-        # P_local = T_actor_inv * T_ego * P_ego
+        # 1. 判定是否启用多点采样
+        # 细小物体 (extent < 1.0) 或 行人 (walker) 启用 27 点采样 (3x3x3)
+        # 之前的 9 点 (3x3平面) 在Z轴方向仍有不足，导致上下跳动闪烁
+        # 大物体 (车辆) 保持中心单点采样以节省性能
+        max_dim = max(bb.extent.x, bb.extent.y, bb.extent.z)
+        is_small_object = (max_dim < 1.0) or is_walker
         
+        if is_small_object:
+            # 27-point sampling (3x3x3 Grid)
+            # 覆盖 Center, Corners, and Edge Centers
+            half_res = self.resolution * 0.45 # 稍微收缩一点，避免跨越太多体素
+            
+            offsets = [-half_res, 0, half_res]
+            sample_offsets = []
+            for ox in offsets:
+                for oy in offsets:
+                    for oz in offsets:
+                        sample_offsets.append([ox, oy, oz])
+            sample_offsets = np.array(sample_offsets)
+        else:
+            # 1-point sampling (Center only)
+            sample_offsets = np.array([[0, 0, 0]])
+            
+        # 2. 扩展采样点
+        # (N, 1, 3) + (1, S, 3) -> (N, S, 3)
+        centers_expanded = sub_points_grid[:, :3][:, np.newaxis, :] + sample_offsets[np.newaxis, :, :]
+        
+        # Reshape to (N*S, 3) for vectorized transformation
+        all_samples = centers_expanded.reshape(-1, 3)
+        
+        # To Homogeneous: (N*S, 4)
+        all_samples_h = np.concatenate([all_samples, np.ones((all_samples.shape[0], 1))], axis=1)
+        
+        # Grid -> World -> Actor Local
+        # Step 1: Grid -> World (纯平移)
+        sub_points_world = all_samples_h @ grid_to_world_matrix.T
+
+        # Step 2: World -> Actor Local (用于BBox内点检测)
         box_matrix = np.array(actor_transform.get_matrix())
         try:
             box_matrix_inv = np.linalg.inv(box_matrix)
         except np.linalg.LinAlgError:
             return
             
-        transform_matrix = box_matrix_inv @ ego_matrix
-        
-        points_in_actor = sub_points_ego @ transform_matrix.T # (N, 4)
+        points_in_actor = sub_points_world @ box_matrix_inv.T # (N*S, 4)
         
         # Subtract bb.location (which is local offset in actor frame)
+        # Note: In actor local frame, bb center is usually at (0,0,0) + bb.location
+        # But carla.BoundingBox.location is relative to actor origin.
+        # So points_in_actor is relative to actor origin.
+        # We need to shift by bb.location to center it around (0,0,0) for extent check.
         rel_x = points_in_actor[:, 0] - bb.location.x
         rel_y = points_in_actor[:, 1] - bb.location.y
         rel_z = points_in_actor[:, 2] - bb.location.z
@@ -712,11 +729,19 @@ class GroundTruthVoxelGenerator:
                   f"自适应extent=({extent_x:.2f}, {extent_y:.2f}, {extent_z:.2f})")
 
         # Check Extents with adaptive shrinking
+        # mask_in_samples: (N*S, )
         in_x = np.abs(rel_x) <= extent_x
         in_y = np.abs(rel_y) <= extent_y
         in_z = np.abs(rel_z) <= extent_z
 
-        mask_in = in_x & in_y & in_z
+        mask_in_samples = in_x & in_y & in_z
+        
+        # 3. 聚合采样结果
+        # Reshape back to (N, S)
+        mask_in_samples_reshaped = mask_in_samples.reshape(num_voxels, -1)
+        
+        # 只要任意一个采样点命中，该体素即为命中
+        mask_in = np.any(mask_in_samples_reshaped, axis=1)
 
         voxel_count = np.sum(mask_in)
 

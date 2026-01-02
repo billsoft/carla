@@ -324,15 +324,45 @@ def get_default_class_weights() -> List[float]:
         1.0,   # 14: terrain
         1.0,   # 15: manmade
         1.0,   # 16: vegetation
-        0.5,   # 17: sky - 天空相对容易，权重稍低
+        3.0,   # 17: general_object - 临时障碍物，安全关键
     ]
+    return weights
+
+
+def get_moving_class_weights() -> List[float]:
+    """
+    获取针对移动物体优化的类别权重
+    
+    策略：
+    - 大幅提升移动物体（车、人、骑行者）的权重
+    - 提升交通设施（锥桶/标志）的权重
+    """
+    weights = get_default_class_weights()
+    
+    # 车辆类 (x2.5 - x5)
+    weights[4] = 5.0   # car (was 2.0)
+    weights[3] = 5.0   # bus (was 2.0)
+    weights[10] = 5.0  # truck (was 2.0)
+    weights[9] = 5.0   # trailer (was 2.0)
+    
+    # 弱势交通参与者 (x3 - x4)
+    weights[7] = 15.0  # pedestrian (was 5.0)
+    weights[2] = 20.0  # bicycle (was 5.0)
+    weights[6] = 15.0  # motorcycle (was 5.0)
+    
+    # 交通设施 (x5)
+    weights[8] = 15.0  # traffic_cone (was 3.0)
+    
+    # 也是潜在移动或重要障碍物
+    weights[17] = 5.0  # general_object (was 3.0)
+    
     return weights
 
 def get_class_names() -> List[str]:
     return [
         'empty', 'barrier', 'bicycle', 'bus', 'car', 'construction',
         'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
-        'drivable', 'other', 'sidewalk', 'terrain', 'manmade', 'vegetation', 'sky'
+        'drivable', 'other', 'sidewalk', 'terrain', 'manmade', 'vegetation', 'general_object'
     ]
 
 if __name__ == '__main__':

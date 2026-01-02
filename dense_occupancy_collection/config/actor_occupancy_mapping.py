@@ -137,16 +137,23 @@ WALKER_MAPPING = {
 
 # Props（道具/静态物体）映射
 PROP_MAPPING = {
-    # Traffic Cone (8) - 交通锥桶
+    # Traffic Cone (8) - 交通锥桶/交通标识
     8: [
         'static.prop.trafficcone01',
         'static.prop.trafficcone02',
         'static.prop.constructioncone',
+        'static.prop.streetsign',
+        'static.prop.streetsign01',
+        'static.prop.streetsign04',
+        'static.prop.trafficwarning',
+        'static.prop.streetbarrier',  # Moved from Barrier
+        'static.prop.warningtape',
+        'static.prop.advertisingboard',
     ],
 
     # Barrier (1) - 隔离栏/护栏
     1: [
-        'static.prop.streetbarrier',
+        # 'static.prop.streetbarrier', -> Moved to 8
         'static.prop.chainbarrier',
         'static.prop.chainbarriergate',
         'static.prop.warningconstruction',
@@ -156,23 +163,11 @@ PROP_MAPPING = {
 
     # Manmade (15) - 人造物体
     15: [
-        'static.prop.bench01',
-        'static.prop.bench02',
-        'static.prop.bench03',
         'static.prop.fountain',
-        'static.prop.streetsign',
-        'static.prop.streetsign01',
-        'static.prop.streetsign04',
-        'static.prop.trafficwarning',
-        'static.prop.mailbox',
-        'static.prop.phonebox',
-        'static.prop.table',
-        'static.prop.busstop',
-        'static.prop.atm',           # Add ATM
-        'static.prop.advertisement', # Add Ad
-        'static.prop.vendingmachine',# Add Vending
-        'static.prop.doghouse',      # Add Doghouse
-        'static.prop.barbeque',      # Add BBQ
+        # 'static.prop.streetsign', -> Moved to 8
+        # 'static.prop.streetsign01', -> Moved to 8
+        # 'static.prop.streetsign04', -> Moved to 8
+        # 'static.prop.trafficwarning', -> Moved to 8
     ],
 
     # Vegetation (16) - 植被
@@ -188,6 +183,7 @@ PROP_MAPPING = {
 
     # General Object (17) - 通用障碍物/其他
     17: [
+        'static.prop.ironplank',
         'static.prop.bin',
         'static.prop.trashcan01',
         'static.prop.trashcan02',
@@ -240,8 +236,8 @@ CITY_OBJECT_MAPPING = {
     carla.CityObjectLabel.Walls: 15,           # 墙 (48个) -> manmade
     carla.CityObjectLabel.Fences: 1,           # 围栏 (1767个) -> barrier
     carla.CityObjectLabel.Poles: 15,           # 杆 (120个) -> manmade
-    carla.CityObjectLabel.TrafficLight: 15,    # 交通灯 (62个) -> manmade
-    carla.CityObjectLabel.TrafficSigns: 15,    # 交通标志 (147个) -> manmade
+    carla.CityObjectLabel.TrafficLight: 8,     # 交通灯 (62个) -> traffic_cone
+    carla.CityObjectLabel.TrafficSigns: 8,     # 交通标志 (147个) -> traffic_cone
     carla.CityObjectLabel.Vegetation: 16,      # 植被 (4270个) -> vegetation
     carla.CityObjectLabel.Terrain: 14,         # 地形 (23个) -> terrain
     carla.CityObjectLabel.Car: 4,              # 车辆 (80个) -> car
@@ -329,14 +325,11 @@ def get_occupancy_label_from_actor(actor):
 
     # 2. 兜底：使用semantic_tags
     if hasattr(actor, 'semantic_tags') and actor.semantic_tags:
-        sem_tag = actor.semantic_tags[0]
-        # CARLA语义标签到Occupancy的基础映射
-        sem_mapping = {
-            4: 7,   # Pedestrian -> pedestrian
-            10: 4,  # Vehicles -> car
-        }
-        if sem_tag in sem_mapping:
-            return sem_mapping[sem_tag]
+        # 获取所有标签，优先匹配已知映射
+        for sem_tag in actor.semantic_tags:
+            sem_tag_int = int(sem_tag)
+            if sem_tag_int in CITY_OBJECT_MAPPING:
+                return CITY_OBJECT_MAPPING[sem_tag_int]
 
     # 3. 最终兜底
     return 17  # general_object
