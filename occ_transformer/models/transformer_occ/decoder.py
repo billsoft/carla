@@ -418,33 +418,45 @@ class BalancedDecoder(nn.Module):
         )
     
     def _build_upsample_head(self, embed_dim, num_classes, start_size, target_size):
-        """构建渐进式上采样头 - 使用 PixelShuffle3D"""
+        """构建渐进式上采样头 - 动态适配"""
         layers = []
         curr_dim = embed_dim
         curr_size = list(start_size)
         
-        # 第一次上采样 2×
-        # ConvTranspose3d 替代方案: 1x1 Conv + PixelShuffle3D
-        layers.extend([
-            nn.Conv3d(curr_dim, curr_dim * 8, kernel_size=1), # 扩展通道用于 shuffle
-            PixelShuffle3D(upscale_factor=2),
-            nn.BatchNorm3d(curr_dim), # shuffle 后通道数变回 curr_dim (256*8 / 8 = 256)
-            nn.ReLU(inplace=True)
-        ])
+        # 计算目标缩放比例
+        scale_x = target_size[0] // start_size[0]
+        scale_y = target_size[1] // start_size[1]
+        scale_z = target_size[2] // start_size[2]
         
-        # PixelShuffle3D 保持通道数不变 (如果我们把输出通道设为 curr_dim)
-        # 上面的实现: input C, output C/8. 
-        # 所以我们 input 需要 C*8.
-        # Conv3d(curr_dim, curr_dim*8) -> PixelShuffle -> output dim = curr_dim
-        
-        # 第二次调整到目标尺寸 (保持分辨率不变，只做特征提取)
-        layers.extend([
-            nn.Conv3d(curr_dim, curr_dim, kernel_size=3, padding=1),
-            nn.BatchNorm3d(curr_dim),
-            nn.ReLU(inplace=True)
-        ])
-        
-        # 分类头
+        # 迭代上采样直到达到或超过目标尺寸
+        while curr_size[0] < target_size[0] or curr_size[1] < target_size[1] or curr_size[2] < target_size[2]:
+            # 确定当前步的缩放因子 (优先 2x)
+            sx = 2 if curr_size[0] * 2 <= target_size[0] else 1
+            sy = 2 if curr_size[1] * 2 <= target_size[1] else 1
+            sz = 2 if curr_size[2] * 2 <= target_size[2] else 1
+            
+            # 如果都不需要缩放了，跳出
+            if sx == 1 and sy == 1 and sz == 1:
+                break
+                
+            next_dim = max(curr_dim // 2, 32)
+            
+            layers.extend([
+                nn.ConvTranspose3d(
+                    curr_dim, next_dim, 
+                    kernel_size=(sx, sy, sz), 
+                    stride=(sx, sy, sz)
+                ),
+                nn.BatchNorm3d(next_dim),
+                nn.ReLU(inplace=True)
+            ])
+            
+            curr_dim = next_dim
+            curr_size[0] *= sx
+            curr_size[1] *= sy
+            curr_size[2] *= sz
+            
+        # 最后的分类头
         layers.append(nn.Conv3d(curr_dim, num_classes, kernel_size=1))
         
         return nn.Sequential(*layers)

@@ -42,11 +42,11 @@ from .decoder import (
 from .transformer_occ_net import (
     TransformerOccNet,
     TransformerOccNetLite,
-    TransformerOccNetMini,
     build_transformer_occ_net
 )
 from .transformer_occ_nano_net import TransformerOccNetNano
 from .transformer_occ_balanced_net import TransformerOccNetBalanced
+from .transformer_occ_mini_net import TransformerOccNetMini
 
 __all__ = [
     # Patch Embedding

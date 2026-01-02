@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Tuple, Optional, Dict
-import torch.utils.checkpoint as checkpoint
 
 from .patch_embed import MultiCameraPatchEmbed
 from .position_encoding import Spatial2DPositionEncoding, CameraPositionEncoding
@@ -11,15 +9,19 @@ from .voxel_query import BEVQueries
 from .decoder import BalancedDecoder
 
 
-class TransformerOccNetBalanced(nn.Module):
+class TransformerOccNetMini(nn.Module):
     """
-    Transformer Occupancy Network - Balanced 版本
+    Transformer Occupancy Network - Mini 版本
     
-    特点：
-    1. 序列长度可控 (9,600 tokens)
-    2. 可变形 Cross-Attention 节省显存
-    3. BEV 75×75 精度合理
-    4. 3 层 Decoder 平衡深度与效率
+    基于 Balanced 架构的缩减版，目标显存 ~6GB
+    
+    配置参考 (内存简化版.md):
+    - BEV Size: 75x75
+    - Height Levels: 12
+    - Embed Dim: 256
+    - Encoder: 6层
+    - Decoder: 4层
+    - Deform Points: 6
     """
     
     def __init__(
@@ -28,13 +30,13 @@ class TransformerOccNetBalanced(nn.Module):
         img_size: Tuple[int, int] = (960, 1280),
         patch_size: int = 16,
         embed_dim: int = 256,
-        encoder_layers: int = 10,     # Enhanced: 5 -> 10
-        decoder_layers: int = 6,      # Enhanced: 4 -> 6
+        encoder_layers: int = 6,      # Balanced: 10 -> Mini: 6
+        decoder_layers: int = 4,      # Balanced: 6 -> Mini: 4
         num_heads: int = 8,
         ffn_dim: int = 1024,
-        bev_size: Tuple[int, int] = (100, 100), # Enhanced: 50 -> 100
-        num_height_levels: int = 16,            # Enhanced: 8 -> 16
-        num_deform_points: int = 8,             # Enhanced: 6 -> 8
+        bev_size: Tuple[int, int] = (75, 75),   # Balanced: 100x100 -> Mini: 75x75
+        num_height_levels: int = 12,            # Balanced: 16 -> Mini: 12
+        num_deform_points: int = 6,             # Balanced: 8 -> Mini: 6
         output_grid_size: Tuple[int, int, int] = (200, 200, 16),
         num_classes: int = 18,
         dropout: float = 0.1,
@@ -55,8 +57,8 @@ class TransformerOccNetBalanced(nn.Module):
             patch_size=patch_size,
             embed_dim=embed_dim
         )
-        self.grid_h = self.patch_embed.grid_size[0]  # 30
-        self.grid_w = self.patch_embed.grid_size[1]  # 40
+        self.grid_h = self.patch_embed.grid_size[0]
+        self.grid_w = self.patch_embed.grid_size[1]
         
         # 2. Position Encoding
         self.spatial_pe = Spatial2DPositionEncoding(
@@ -115,7 +117,6 @@ class TransformerOccNetBalanced(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Conv3d) or isinstance(m, nn.ConvTranspose3d):
-                # 3D 卷积初始化优化
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
@@ -136,7 +137,7 @@ class TransformerOccNetBalanced(nn.Module):
         device = images.device
         
         # 1. Patch Embedding
-        patches, _ = self.patch_embed(images)  # [B, 9600, 256]
+        patches, _ = self.patch_embed(images)
         
         # 2. Add Position Encoding
         spatial_pe = self.spatial_pe()
@@ -145,19 +146,18 @@ class TransformerOccNetBalanced(nn.Module):
             cam_pe = self.camera_pe(cam_idx, B, device=device)
             combined_pe = spatial_pe.unsqueeze(0).expand(B, -1, -1) + cam_pe
             all_pe.append(combined_pe)
-        position_embed = torch.cat(all_pe, dim=1)  # [B, 9600, 256]
+        position_embed = torch.cat(all_pe, dim=1)
         
         patches = patches + position_embed
         
         # 3. Encoder
-        total_W = self.grid_w * N_cam  # 40 * 8 = 320
+        total_W = self.grid_w * N_cam
         encoded = self.encoder(patches, H=self.grid_h, W=total_W)
         
         # 4. Get BEV Queries
         queries, query_pos, ref_points = self.bev_queries(B)
         
         # 5. Decoder
-        # 注意: memory_spatial_shapes 应该是 [N_levels, 2]，这里只有一层
         spatial_shapes = torch.tensor([[self.grid_h, total_W]], device=device)
         
         occ_logits = self.decoder(

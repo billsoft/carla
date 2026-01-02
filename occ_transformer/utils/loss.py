@@ -307,7 +307,7 @@ def get_default_class_weights() -> List[float]:
     3. 适当提高 empty 权重，确保模型敢于预测空。
     """
     weights = [
-        0.8,   # 0: empty - 恢复到接近 1.0 (原0.1太低，0.4仍偏低)
+        1.0,   # 0: empty - 恢复到 1.0 以平衡 Free/Occupied
         2.0,   # 1: barrier
         5.0,   # 2: bicycle - 稀有
         2.0,   # 3: bus

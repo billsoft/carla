@@ -23,7 +23,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from models import TransformerOccNetMini
 from data.carla_dataset_bayer import build_dataloader
-from utils.loss import MaskedWeightedCELoss, get_default_class_weights
+from utils.loss import (
+    MaskedWeightedCELoss, 
+    FocalLoss, 
+    LovaszSoftmaxLoss, 
+    CombinedLoss, 
+    get_default_class_weights
+)
 
 
 def setup_logging(save_dir: str) -> logging.Logger:
@@ -65,14 +71,17 @@ def parse_args():
     parser.add_argument('--weight-decay', type=float, default=0.01, help='权重衰减')
     parser.add_argument('--num-workers', type=int, default=4)
 
-    # 模型配置
+    # 模型配置 (Balanced-Mid)
     parser.add_argument('--img-size', type=int, nargs=2, default=[960, 1280], help='图像尺寸 H W')
-    parser.add_argument('--embed-dim', type=int, default=192, help='Embedding 维度')
+    parser.add_argument('--embed-dim', type=int, default=256, help='Embedding 维度')
     
     # 训练技巧
-    parser.add_argument('--amp', action='store_true', help='混合精度训练')
+    parser.add_argument('--loss-type', type=str, default='ce', 
+                       choices=['ce', 'focal', 'lovasz', 'combined'],
+                       help='损失函数类型')
+    parser.add_argument('--amp', action='store_true', default=True, help='混合精度训练')
     parser.add_argument('--grad-clip', type=float, default=5.0, help='梯度裁剪阈值')
-    parser.add_argument('--use-checkpoint', action='store_true', help='使用梯度检查点')
+    parser.add_argument('--use-checkpoint', action='store_true', default=True, help='使用梯度检查点')
 
     # 保存
     parser.add_argument('--save-dir', type=str, default='outputs/mini_occ')
@@ -208,17 +217,18 @@ def main():
 
     logger.info(f'Train: {len(train_loader.dataset)} samples')
 
-    # 构建 Mini Network
-    logger.info('Building Mini Occupancy Network...')
+    # 构建 Mini Network (Balanced-Mid 配置)
+    logger.info('Building Mini Occupancy Network (Balanced-Mid)...')
     model = TransformerOccNetMini(
         num_cameras=8,
         img_size=img_size,
-        embed_dim=args.embed_dim,
-        encoder_layers=4,
-        decoder_layers=4,
-        num_heads=6, # 192 / 32
-        bev_size=(50, 50),
-        num_height_levels=16,
+        embed_dim=256,          # 192 -> 256
+        encoder_layers=6,       # 4 -> 6
+        decoder_layers=4,       # 4 -> 4
+        num_heads=8,            # 6 -> 8
+        bev_size=(75, 75),      # 50 -> 75
+        num_height_levels=12,   # 16 -> 12
+        num_deform_points=6,
         output_grid_size=(200, 200, 16),
         use_checkpoint=args.use_checkpoint
     ).to(device)
@@ -231,8 +241,20 @@ def main():
 
     # 损失函数
     class_weights = get_default_class_weights()
-    criterion = MaskedWeightedCELoss(class_weights=class_weights).to(device)
-    logger.info(f"Using MaskedWeightedCELoss with class weights.")
+    class_weights = torch.tensor(class_weights).float().to(device)
+    
+    if args.loss_type == 'ce':
+        criterion = MaskedWeightedCELoss(class_weights=class_weights)
+    elif args.loss_type == 'focal':
+        criterion = FocalLoss(class_weights=class_weights, gamma=2.0)
+    elif args.loss_type == 'lovasz':
+        criterion = LovaszSoftmaxLoss()
+    elif args.loss_type == 'combined':
+        criterion = CombinedLoss(class_weights=class_weights)
+    else:
+        raise ValueError(f"Unknown loss type: {args.loss_type}")
+        
+    logger.info(f"Using Loss Function: {args.loss_type}")
 
     # 优化器
     optimizer = optim.AdamW(
@@ -242,47 +264,55 @@ def main():
     )
 
     # 学习率调度
-    total_steps = args.epochs * len(train_loader)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=args.lr,
+        steps_per_epoch=len(train_loader),
+        epochs=args.epochs,
+        pct_start=0.3,
+    )
 
     # 混合精度
     scaler = GradScaler(enabled=args.amp)
 
     # 恢复训练
-    start_epoch = 0
+    start_epoch = 1
     if args.resume:
         logger.info(f'Resuming from {args.resume}')
-        ckpt = torch.load(args.resume, map_location='cpu')
-        model.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        if ckpt['scheduler_state_dict']:
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-        if args.amp and ckpt['scaler_state_dict']:
-            scaler.load_state_dict(ckpt['scaler_state_dict'])
-        start_epoch = ckpt['epoch'] + 1
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if 'scaler_state_dict' in checkpoint and checkpoint['scaler_state_dict']:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
 
     # 训练循环
-    logger.info('Starting training...')
+    logger.info('Start training...')
+    
+    best_loss = float('inf')
 
-    for epoch in range(start_epoch, args.epochs):
-        # 重置显存统计
-        if device.type == 'cuda':
-            torch.cuda.reset_peak_memory_stats()
-
+    for epoch in range(start_epoch, args.epochs + 1):
         # 训练
-        train_loss = train_one_epoch(
-            model, train_loader, criterion, optimizer, scheduler, scaler,
-            epoch, args, logger
+        avg_loss = train_one_epoch(
+            model, train_loader, criterion, optimizer, scheduler, scaler, epoch, args, logger
         )
 
         # 保存检查点
-        save_checkpoint(
-            model, optimizer, scheduler, scaler,
-            epoch,
-            os.path.join(save_dir, f'epoch_{epoch:03d}.pth')
-        )
+        if epoch % 5 == 0 or epoch == args.epochs:
+            save_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch}.pth')
+            save_checkpoint(model, optimizer, scheduler, scaler, epoch, save_path)
+            logger.info(f'Saved checkpoint to {save_path}')
+        
+        # 保存最佳模型
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            save_path = os.path.join(save_dir, 'best_model.pth')
+            save_checkpoint(model, optimizer, scheduler, scaler, epoch, save_path)
+            logger.info(f'Saved best model with loss {best_loss:.4f}')
 
-    logger.info(f'Training done. Checkpoints saved to {save_dir}')
+    logger.info('Training completed.')
 
 
 if __name__ == '__main__':

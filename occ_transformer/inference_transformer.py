@@ -29,6 +29,7 @@ def parse_args():
     parser.add_argument('--checkpoint', type=str, required=True, help='模型检查点')
     parser.add_argument('--dataset', type=str, required=True, help='数据集目录')
     parser.add_argument('--num-samples', type=int, default=10, help='推理样本数')
+    parser.add_argument('--interval', type=int, default=1, help='采样间隔')
     parser.add_argument('--output-dir', type=str, default='inference_results_transformer')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--img-size', type=int, nargs=2, default=[960, 1280])
@@ -89,23 +90,25 @@ def main():
         img_size=tuple(args.img_size),
         augment=False
     )
-    num_samples = min(args.num_samples, len(dataset))
-    print(f"样本数: {num_samples}")
+    num_samples = args.num_samples
+    interval = args.interval
+    print(f"计划推理样本数: {num_samples}, 间隔: {interval}")
     
     # 模型
     print(f"\n构建 {args.model_type} 模型...")
     if args.model_type == 'balanced':
         # Balanced-Pro 配置 (需与 train_balanced.py 一致)
+        # 根据 checkpoint 调整参数
         model = TransformerOccNetBalanced(
             num_cameras=8,
             img_size=tuple(args.img_size),
             embed_dim=256,
-            encoder_layers=5,
-            decoder_layers=4,
+            encoder_layers=10,  # 5 -> 10
+            decoder_layers=6,   # 4 -> 6
             num_heads=8,
-            bev_size=(50, 50),
-            num_height_levels=8,
-            num_deform_points=6,
+            bev_size=(100, 100), # (50, 50) -> (100, 100)
+            num_height_levels=16, # 8 -> 16
+            num_deform_points=8,  # 6 -> 8
             output_grid_size=(200, 200, 16),
             use_checkpoint=False  # 推理时不需 checkpoint
         ).to(device)
@@ -138,8 +141,16 @@ def main():
     inference_times = []
     
     with torch.no_grad():
-        for idx in tqdm(range(num_samples), desc="推理进度"):
+        for i in tqdm(range(num_samples), desc="推理进度"):
+            idx = i * interval
+            if idx >= len(dataset):
+                print(f"已到达数据集末尾 (Index {idx} >= {len(dataset)})")
+                break
+            
             sample = dataset[idx]
+            # 获取实际的 sample_id 用于保存文件名 (确保与 GT 对应)
+            sample_id = dataset.sample_ids[idx]
+            
             images = sample['images'].unsqueeze(0).to(device)
             gt_occ = sample['occupancy'].numpy()
             
@@ -159,9 +170,9 @@ def main():
             metrics = compute_metrics(occ_pred, gt_occ, gt_mask)
             all_metrics.append(metrics)
             
-            # 保存
+            # 保存 - 使用 sample_id 作为文件名
             np.savez_compressed(
-                output_dir / f'{idx:06d}.npz',
+                output_dir / f'{sample_id}.npz',
                 occupancy=occ_pred.astype(np.uint8),
                 mask=(gt_mask > 0).astype(bool)
             )

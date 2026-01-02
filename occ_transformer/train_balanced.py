@@ -66,7 +66,7 @@ def parse_args():
 
     # 训练
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch-size', type=int, default=2)
+    parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4, help='初始学习率')
     parser.add_argument('--weight-decay', type=float, default=0.01, help='权重衰减')
     parser.add_argument('--num-workers', type=int, default=4)
@@ -76,7 +76,7 @@ def parse_args():
     parser.add_argument('--embed-dim', type=int, default=192, help='Embedding 维度')
     
     # 训练技巧
-    parser.add_argument('--loss-type', type=str, default='focal', 
+    parser.add_argument('--loss-type', type=str, default='ce', 
                        choices=['ce', 'focal', 'lovasz', 'combined'],
                        help='损失函数类型: ce, focal, lovasz, combined')
     parser.add_argument('--amp', action='store_true', default=True, help='混合精度训练')
@@ -219,20 +219,20 @@ def main():
     logger.info(f'Data loaded. Steps per epoch: {len(train_loader)}')
 
     # 模型构建
-    logger.info('Building Balanced model...')
-    # Balanced-Pro 优化版配置：
-    # embed_dim=256, encoder_layers=5, decoder_layers=4, 
-    # bev_size=(50, 50), num_height_levels=8, num_deform_points=6
+    logger.info('Building Balanced-Pro model...')
+    # Balanced-Pro 优化版配置 (8GB显存优化)：
+    # embed_dim=256, encoder_layers=10, decoder_layers=6, 
+    # bev_size=(100, 100), num_height_levels=16, num_deform_points=8
     model = TransformerOccNetBalanced(
         num_cameras=8,
         img_size=img_size,
         embed_dim=256,         # Fixed 256
-        encoder_layers=5,      # 4 -> 5
-        decoder_layers=4,      # 3 -> 4
+        encoder_layers=10,     # 5 -> 10
+        decoder_layers=6,      # 4 -> 6
         num_heads=8,
-        bev_size=(50, 50),     # 75x75 -> 50x50 (整数倍上采样)
-        num_height_levels=8,   # 10 -> 8 (整数倍上采样)
-        num_deform_points=6,   # 4 -> 6
+        bev_size=(100, 100),   # 50x50 -> 100x100 (分辨率提升)
+        num_height_levels=16,  # 8 -> 16 (高度精度提升)
+        num_deform_points=8,   # 6 -> 8
         output_grid_size=(200, 200, 16),
         use_checkpoint=args.use_checkpoint
     ).to(device)
