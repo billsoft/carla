@@ -57,7 +57,7 @@ TESLA_CONFIGS = [
 from dense_occupancy_collection.core.scenario_manager import ScenarioManager
 from dense_occupancy_collection.core.rgb_suite import RGBSuite
 from dense_occupancy_collection.core.depth_suite import DepthSuite
-from dense_occupancy_collection.core.voxel_generator import VoxelGenerator
+from dense_occupancy_collection.processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
 from dense_occupancy_collection.core.visibility_filter import VisibilityFilter
 from dense_occupancy_collection.utils.data_saver import DataSaver
 from dense_occupancy_collection.utils.camera_utils import compute_camera_params
@@ -193,6 +193,15 @@ def main():
     try:
         # 1. Setup Scenario
         print("\n[1/4] 设置场景...")
+        
+        # 强制所有交通灯变绿 (解决静止场景过拟合问题)
+        traffic_lights = world.get_actors().filter('traffic.traffic_light')
+        if traffic_lights:
+            print(f"  🚦 强制设置 {len(traffic_lights)} 个交通灯为常绿...")
+            for tl in traffic_lights:
+                tl.set_state(carla.TrafficLightState.Green)
+                tl.freeze(True) # 冻结状态，防止自动变红
+        
         hero = scenario.spawn_hero()
         print(f"  生成主车: {hero.type_id}")
 
@@ -209,11 +218,13 @@ def main():
 
         # 3. Setup Processors
         print("\n[3/4] 设置处理器...")
-        voxel_gen = VoxelGenerator({
-            'x_range': X_RANGE, 'y_range': Y_RANGE, 'z_range': Z_RANGE,
-            'resolution': RESOLUTION, 'grid_size': GRID_SIZE,
-            'mapping': CARLA_TO_OCCUPANCY_MAPPING
-        })
+        # 注意: GroundTruthVoxelGenerator 不需要传递 grid_size 或 mapping (它自己计算/导入)
+        voxel_gen = GroundTruthVoxelGenerator(
+            x_range=X_RANGE,
+            y_range=Y_RANGE,
+            z_range=Z_RANGE,
+            resolution=RESOLUTION
+        )
         print(f"  体素生成器: {GRID_SIZE}")
 
         vis_filter = VisibilityFilter(
@@ -339,6 +350,10 @@ def main():
             }
             saver.save_voxel(frame_idx, occ_filtered, aids_filtered, metadata=meta)
             print(f"  ✅ 数据已保存")
+
+            if i % 100 == 0 and hasattr(voxel_gen, 'ground_cache'):
+                voxel_gen.ground_cache.clear()
+                print(f"  🔄 已清理地面缓存 (帧 {i})")
 
     finally:
         print("\n" + "="*70)

@@ -270,23 +270,201 @@ class FocalLoss(nn.Module):
             return loss.sum() * 0.0
 
 
+class OHEMLoss(nn.Module):
+    """
+    Online Hard Example Mining Loss
+    
+    只对 loss 最大的前 k% 样本进行反向传播
+    """
+    def __init__(
+        self,
+        class_weights: Optional[List[float]] = None,
+        ignore_index: int = 255,
+        thresh: float = 0.7,
+        min_kept: int = 100000
+    ):
+        super().__init__()
+        if class_weights is not None:
+            self.register_buffer('class_weights', torch.tensor(class_weights).float())
+        else:
+            self.class_weights = None
+            
+        self.ignore_index = ignore_index
+        self.thresh = thresh
+        self.min_kept = min_kept
+        
+    def forward(
+        self,
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        
+        # 1. 计算所有像素的 CE Loss (reduction='none')
+        # Logits: [B, C, XYZ]
+        # Target: [B, XYZ]
+        
+        if mask is not None:
+            target_masked = target.clone()
+            if mask.dtype == torch.bool:
+                target_masked[~mask] = self.ignore_index
+            else:
+                target_masked[mask < 0.5] = self.ignore_index
+        else:
+            target_masked = target
+            
+        loss = F.cross_entropy(
+            logits,
+            target_masked,
+            weight=self.class_weights,
+            ignore_index=self.ignore_index,
+            reduction='none'
+        )
+        
+        # 2. OHEM 筛选
+        # 展平 loss
+        loss = loss.view(-1)
+        
+        # 移除 ignore_index 的 loss (已经是 0 或无效值，但为了安全重新过滤)
+        # cross_entropy ignore_index 位置 loss 为 0，不影响排序，但最好只在有效像素中选
+        if self.ignore_index is not None:
+            valid_mask = target_masked.view(-1) != self.ignore_index
+            loss = loss[valid_mask]
+            
+        if loss.numel() == 0:
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+            
+        # 排序
+        num_kept = int(loss.numel() * self.thresh)
+        num_kept = max(num_kept, self.min_kept)
+        num_kept = min(num_kept, loss.numel())
+        
+        top_k_loss, _ = loss.topk(num_kept)
+        
+        return top_k_loss.mean()
+
+
+class DistanceAwareLoss(nn.Module):
+    """
+    距离感知损失
+    
+    近距离 (15m内): x2.0 (Was x3.0)
+    中距离 (30m内): x1.2 (Was x1.5)
+    远距离: x1.0
+    """
+    def __init__(
+        self,
+        class_weights: Optional[List[float]] = None,
+        ignore_index: int = 255,
+        bev_size: tuple = (100, 100),
+        voxel_size: tuple = (0.5, 0.5) # 假设 50m / 100 = 0.5m
+    ):
+        super().__init__()
+        self.base_loss = MaskedWeightedCELoss(class_weights, ignore_index)
+        self.bev_size = bev_size
+        self.voxel_size = voxel_size
+        
+        # 预计算距离权重矩阵
+        # self.register_buffer('dist_weights', self._make_dist_weights())
+        self.dist_weights = None
+        
+    def _make_dist_weights(self):
+        # 注意: 即使 self.bev_size 可能是 (100, 100)，但在 forward 中，
+        # logits 的空间维度可能是 (50, 50) 或 (100, 100) 取决于模型输出。
+        # 因此，这里我们只作为初始参考，或者在 forward 中动态调整。
+        # 为了健壮性，我们将在 forward 中动态生成或插值。
+        pass
+        
+    def forward(self, logits, target, mask=None):
+        # 1. 计算逐像素 loss
+        loss_map = F.cross_entropy(
+            logits,
+            target,
+            weight=self.base_loss.class_weights,
+            ignore_index=self.base_loss.ignore_index,
+            reduction='none'
+        )
+        
+        # 2. 动态生成距离权重 (匹配当前 logits 尺寸)
+        # loss_map: [B, H, W, Z] 或 [B, H, W]
+        # 获取空间维度 H, W
+        if loss_map.dim() == 4:
+            H, W = loss_map.shape[1], loss_map.shape[2]
+        else:
+            H, W = loss_map.shape[1], loss_map.shape[2] # 假设最后是 Z 或 logits 是 [B, H, W]
+            
+        # 检查是否已有缓存且尺寸匹配
+        if self.dist_weights is None or self.dist_weights.shape[0] != H or self.dist_weights.shape[1] != W:
+            cx, cy = H / 2, W / 2
+            y, x = torch.meshgrid(torch.arange(H, device=logits.device), torch.arange(W, device=logits.device), indexing='ij')
+            
+            dist_sq = (x - cx)**2 + (y - cy)**2
+            dist = torch.sqrt(dist_sq.float())
+            
+            # 距离转换: 假设总范围是 50m (不论分辨率多少)
+            # dist_norm = dist / (H/2) # 归一化到 [0, 1] (边缘)
+            # dist_m = dist_norm * 25.0 # 假设半径 25m
+            
+            # 或者简单地：假设输入 voxel_size 是基于 100x100 = 50m范围 -> 0.5m/pixel
+            # 如果是 50x50 -> 1.0m/pixel
+            # scale_factor = 50.0 / H
+            scale_factor = 0.5 * (100.0 / H) # base 0.5m for 100px
+            dist_m = dist * scale_factor
+            
+            weights = torch.ones_like(dist_m)
+            weights[dist_m < 15] = 2.0  # Was 3.0
+            weights[(dist_m >= 15) & (dist_m < 30)] = 1.2 # Was 1.5
+            
+            # [H, W] -> [H, W, 1]
+            self.dist_weights = weights.unsqueeze(-1)
+            
+        # 2. 应用距离权重
+        # loss_map: [B, H, W, Z]
+        # dist_weights: [H, W, 1]
+        
+        if mask is not None:
+            if mask.dtype == torch.bool:
+                loss_map = loss_map * mask.float()
+            else:
+                loss_map = loss_map * (mask > 0.5).float()
+                
+        weighted_loss = loss_map * self.dist_weights
+        
+        # 3. Mean (只对有效区域)
+        if mask is not None:
+            return weighted_loss.sum() / (mask.float().sum() + 1e-6)
+        else:
+            return weighted_loss.mean()
+
+
 class CombinedLoss(nn.Module):
     """
-    组合损失：Weighted CE + Lovasz-Softmax
+    组合损失：Weighted CE + Lovasz-Softmax + OHEM + Distance
     """
     def __init__(
         self,
         ce_weight: float = 1.0,
         lovasz_weight: float = 1.0,
+        ohem_weight: float = 0.0,
+        distance_weight: float = 0.0,
         class_weights: Optional[List[float]] = None,
-        ignore_index: int = 255
+        ignore_index: int = 255,
+        bev_size: tuple = (100, 100) # 新增 bev_size 参数传递给 DistanceAwareLoss
     ):
         super().__init__()
         self.ce_weight = ce_weight
         self.lovasz_weight = lovasz_weight
+        self.ohem_weight = ohem_weight
+        self.distance_weight = distance_weight
         
         self.ce_loss = MaskedWeightedCELoss(class_weights=class_weights, ignore_index=ignore_index)
         self.lovasz_loss = LovaszSoftmaxLoss(ignore_index=ignore_index)
+        
+        if ohem_weight > 0:
+            self.ohem_loss = OHEMLoss(class_weights=class_weights, ignore_index=ignore_index)
+            
+        if distance_weight > 0:
+            self.distance_loss = DistanceAwareLoss(class_weights=class_weights, ignore_index=ignore_index, bev_size=bev_size)
         
     def forward(self, logits, target, mask=None):
         loss = 0.0
@@ -294,75 +472,100 @@ class CombinedLoss(nn.Module):
             loss += self.ce_weight * self.ce_loss(logits, target, mask)
         if self.lovasz_weight > 0:
             loss += self.lovasz_weight * self.lovasz_loss(logits, target, mask)
+        if self.ohem_weight > 0:
+            loss += self.ohem_weight * self.ohem_loss(logits, target, mask)
+        if self.distance_weight > 0:
+            loss += self.distance_weight * self.distance_loss(logits, target, mask)
+            
         return loss
 
 
 def get_default_class_weights() -> List[float]:
     """
-    获取默认的类别权重
+    获取默认的类别权重 (v5 - Fine-tuned)
     
-    调整策略：
-    1. 避免 0.1 这种极低权重，防止模型完全忽略 free 类别。
-    2. 保持对稀有类别（行人、自行车）的高权重。
-    3. 适当提高 empty 权重，确保模型敢于预测空。
+    设计理念:
+    1. 抑制误报 (False Positives): Free (0) 权重设为 1.0 (基准)。
+    2. 关键障碍物均衡 (Safety Critical): 
+       - 弱势交通参与者 (行人, 两轮车) 统一高权 (x5.0)
+       - 车辆与交通设施 (车, 栏, 锥) 统一中高权 (x3.0 - x4.0)
+    3. 环境背景 (Environment): 
+       - 路面、人行道保持基准 (x1.0)
+       - 降低 植被(16)、建筑(15)、地形(14) 权重 (x0.8)，因为树木容易遮挡且误报高。
+    4. 提升未知障碍物 (General Object): 
+       - x2.0，避免漏检不明物体。
     """
     weights = [
-        1.0,   # 0: empty - 恢复到 1.0 以平衡 Free/Occupied
-        2.0,   # 1: barrier
-        5.0,   # 2: bicycle - 稀有
-        2.0,   # 3: bus
-        2.0,   # 4: car
-        3.0,   # 5: construction
-        5.0,   # 6: motorcycle - 稀有
-        5.0,   # 7: pedestrian - 安全关键
-        3.0,   # 8: traffic_cone
-        2.0,   # 9: trailer
-        2.0,   # 10: truck
-        1.5,   # 11: drivable
-        1.0,   # 12: other
-        1.5,   # 13: sidewalk
-        1.0,   # 14: terrain
-        1.0,   # 15: manmade
-        1.0,   # 16: vegetation
-        3.0,   # 17: general_object - 临时障碍物，安全关键
+        1.0,   # 0: free - 基准，抑制噪点
+        3.0,   # 1: barrier - 隔离带 (重要边界)
+        5.0,   # 2: bicycle - VRU (高危)
+        3.0,   # 3: bus - 大型车辆
+        3.0,   # 4: car - 核心车辆
+        3.0,   # 5: construction_vehicle - 异型车辆
+        5.0,   # 6: motorcycle - VRU (高危)
+        5.0,   # 7: pedestrian - VRU (高危)
+        4.0,   # 8: traffic_cone - 小物体 (施工/警示)
+        3.0,   # 9: trailer - 拖车
+        3.0,   # 10: truck - 卡车
+        1.0,   # 11: driveable_surface - 路面 (易检测)
+        1.0,   # 12: other_flat
+        1.0,   # 13: sidewalk
+        0.8,   # 14: terrain - 略降 (0.8)
+        0.8,   # 15: manmade - 略降 (0.8)，避免建筑墙面权重过高
+        0.8,   # 16: vegetation - 略降 (0.8)，抑制树木误报
+        2.0,   # 17: general_object - 提升 (2.0)，关注未知障碍
     ]
     return weights
 
 
 def get_moving_class_weights() -> List[float]:
     """
-    获取针对移动物体优化的类别权重
+    获取针对移动物体优化的类别权重 (v4 - Consistent)
     
-    策略：
-    - 大幅提升移动物体（车、人、骑行者）的权重
-    - 提升交通设施（锥桶/标志）的权重
+    在 v4 策略中，我们保持与默认权重高度一致，
+    仅对核心移动障碍物做极其微小的增强，避免破坏整体平衡。
     """
     weights = get_default_class_weights()
     
-    # 车辆类 (x2.5 - x5)
-    weights[4] = 5.0   # car (was 2.0)
-    weights[3] = 5.0   # bus (was 2.0)
-    weights[10] = 5.0  # truck (was 2.0)
-    weights[9] = 5.0   # trailer (was 2.0)
+    # 既然用户要求"统一规划"且"不希望多出体素"，
+    # 这里我们不再进行激进的加权，而是保持一致性。
+    # 仅保留函数接口以便兼容，或者做微乎其微的调整。
     
-    # 弱势交通参与者 (x3 - x4)
-    weights[7] = 15.0  # pedestrian (was 5.0)
-    weights[2] = 20.0  # bicycle (was 5.0)
-    weights[6] = 15.0  # motorcycle (was 5.0)
+    # 实际上，直接返回 default 可能是最稳健的，
+    # 但为了区分 moving 模式，我们只对 VRU 再加一点点 (5.0 -> 6.0)
     
-    # 交通设施 (x5)
-    weights[8] = 15.0  # traffic_cone (was 3.0)
-    
-    # 也是潜在移动或重要障碍物
-    weights[17] = 5.0  # general_object (was 3.0)
+    weights[7] = 6.0  # pedestrian
+    weights[2] = 6.0  # bicycle
+    weights[6] = 6.0  # motorcycle
     
     return weights
 
 def get_class_names() -> List[str]:
+    """
+    获取类别名称列表
+
+    ⚠️ 注意: 与 dense_occupancy_collection/config/occupancy_config.py 中的
+    OCCUPANCY_LABELS 保持一致
+    """
     return [
-        'empty', 'barrier', 'bicycle', 'bus', 'car', 'construction',
-        'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
-        'drivable', 'other', 'sidewalk', 'terrain', 'manmade', 'vegetation', 'general_object'
+        'free',               # 0 (was 'empty')
+        'barrier',            # 1
+        'bicycle',            # 2
+        'bus',                # 3
+        'car',                # 4
+        'construction_vehicle', # 5 (was 'construction')
+        'motorcycle',         # 6
+        'pedestrian',         # 7
+        'traffic_cone',       # 8
+        'trailer',            # 9
+        'truck',              # 10
+        'driveable_surface',  # 11 (was 'drivable')
+        'other_flat',         # 12 (was 'other')
+        'sidewalk',           # 13
+        'terrain',            # 14
+        'manmade',            # 15
+        'vegetation',         # 16
+        'general_object'      # 17
     ]
 
 if __name__ == '__main__':
@@ -391,9 +594,31 @@ if __name__ == '__main__':
     loss = lovasz(logits, target, mask)
     print(f"  Loss: {loss.item():.4f}")
     
-    print("\n[4] CombinedLoss:")
+    print("\n[4] CombinedLoss (Basic):")
     combined = CombinedLoss(class_weights=get_default_class_weights()).to(device)
     loss = combined(logits, target, mask)
+    print(f"  Loss: {loss.item():.4f}")
+
+    print("\n[5] OHEMLoss:")
+    ohem = OHEMLoss(class_weights=get_default_class_weights(), thresh=0.5).to(device)
+    loss = ohem(logits, target, mask)
+    print(f"  Loss: {loss.item():.4f}")
+
+    print("\n[6] DistanceAwareLoss:")
+    dist_loss = DistanceAwareLoss(class_weights=get_default_class_weights(), bev_size=(50, 50)).to(device)
+    loss = dist_loss(logits, target, mask)
+    print(f"  Loss: {loss.item():.4f}")
+
+    print("\n[7] CombinedLoss (All):")
+    combined_all = CombinedLoss(
+        ce_weight=1.0, 
+        lovasz_weight=1.0, 
+        ohem_weight=0.5, 
+        distance_weight=0.5,
+        class_weights=get_default_class_weights(),
+        bev_size=(50, 50) # 传入 bev_size 以匹配测试数据
+    ).to(device)
+    loss = combined_all(logits, target, mask)
     print(f"  Loss: {loss.item():.4f}")
     
     print("\n" + "=" * 60)

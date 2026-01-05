@@ -109,6 +109,7 @@ class CARLADatasetBayer(Dataset):
                 img = self._load_bayer_image(str(img_path))
             else:
                 # 如果图像不存在，创建随机数据（用于测试）
+                print(f"Warning: Image not found, using random data: {img_path}")
                 if self.img_size:
                     img = np.random.randint(0, 65535, self.img_size, dtype=np.uint16)
                 else:
@@ -291,7 +292,6 @@ if __name__ == '__main__':
             print(f"\n样本内容:")
             print(f"  images: {sample['images'].shape}")
             print(f"  occupancy: {sample['occupancy'].shape}")
-            print(f"  mask: {sample['mask'].shape}")
     
     print("\n" + "=" * 60)
     print("✅ 测试通过！")

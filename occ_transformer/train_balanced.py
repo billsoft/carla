@@ -28,20 +28,13 @@ from utils.loss import (
     FocalLoss, 
     LovaszSoftmaxLoss, 
     CombinedLoss, 
-    get_default_class_weights
+    OHEMLoss,
+    DistanceAwareLoss,
+    get_default_class_weights,
+    get_moving_class_weights
 )
 
 
-def get_moving_class_weights():
-    """获取针对移动物体增强的类别权重"""
-    base = get_default_class_weights()
-    # 4: car, 7: pedestrian, 2: bicycle, 6: motorcycle, 8: traffic_sign
-    base[4] *= 5.0   # car
-    base[7] *= 15.0  # pedestrian
-    base[2] *= 20.0  # bicycle
-    base[6] *= 15.0  # motorcycle
-    base[8] *= 15.0  # traffic_sign
-    return base
 
 
 def setup_logging(save_dir: str) -> logging.Logger:
@@ -89,8 +82,8 @@ def parse_args():
     
     # 训练技巧
     parser.add_argument('--loss-type', type=str, default='ce', 
-                       choices=['ce', 'focal', 'lovasz', 'combined'],
-                       help='损失函数类型: ce, focal, lovasz, combined')
+                       help='损失函数类型: ce, focal, lovasz, combined, ohem, distance, distance_focal')
+    parser.add_argument('--gamma', type=float, default=2.5, help='Focal Loss gamma (default: 2.5)')
     parser.add_argument('--class-weight-mode', type=str, default='default',
                        choices=['default', 'moving'],
                        help='类别权重模式: default (基础), moving (针对移动物体增强)')
@@ -210,7 +203,12 @@ def main():
     logger.info(f'Arguments: {args}')
 
     # 设备
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    if args.device == 'cuda' and not torch.cuda.is_available():
+        logger.warning('⚠️  CUDA requested but not available! Fallback to CPU.')
+        device = torch.device('cpu')
+    else:
+        device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    
     logger.info(f'Device: {device}')
 
     if device.type == 'cuda':
@@ -259,22 +257,77 @@ def main():
     # 优化器
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    # 学习率调度
+    # 混合精度
+    scaler = GradScaler(enabled=args.amp)
+
+    # 恢复训练逻辑
+    start_epoch = 1
+    last_epoch = -1  # 用于 scheduler 的 last_epoch
+    
+    if args.resume:
+        if os.path.isfile(args.resume):
+            logger.info(f'Loading checkpoint from {args.resume}')
+            checkpoint = torch.load(args.resume, map_location=device)
+            
+            # 1. 无论何种情况，都加载模型权重 (保证权重不丢失)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            logger.info("Model weights loaded.")
+
+            ckpt_epoch = checkpoint['epoch']
+            
+            # 2. 判断是 "断点续训" 还是 "基于旧权重重新训练/微调"
+            if ckpt_epoch < args.epochs:
+                # 情况 A: 断点续训 (如从 epoch 10 恢复，目标 50; 或从 50 恢复，目标 100)
+                logger.info(f"Resuming training context from epoch {ckpt_epoch} to {args.epochs}...")
+                
+                start_epoch = ckpt_epoch + 1
+                
+                # 加载优化器状态 (保持动量)
+                if 'optimizer_state_dict' in checkpoint:
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    logger.info("Optimizer state loaded.")
+                
+                # 加载 Scaler
+                if 'scaler_state_dict' in checkpoint and checkpoint.get('scaler_state_dict'):
+                    scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                    logger.info("Scaler state loaded.")
+                    
+                # 计算 last_epoch 以恢复调度器进度
+                # 注意: last_epoch 是步数 (steps)，不是 epoch 数
+                # -1 表示从头开始，否则应为 (start_epoch - 1) * steps_per_epoch - 1
+                last_epoch = (start_epoch - 1) * len(train_loader) - 1
+                
+            else:
+                # 情况 B: 旧训练已完成 (或 checkpoint epoch >= args.epochs)
+                # 用户希望基于这些权重重新开始训练 (Fine-tuning 或 Restart)
+                logger.info(f"Checkpoint epoch ({ckpt_epoch}) >= Target epochs ({args.epochs}).")
+                logger.info("Starting FRESH training (Epoch 1) using loaded weights.")
+                
+                start_epoch = 1
+                last_epoch = -1
+                # 不加载优化器和 Scaler，重置为初始状态
+        else:
+            logger.warning(f"Checkpoint file not found: {args.resume}. Training from scratch.")
+
+    # 学习率调度 (在恢复逻辑之后初始化，以支持正确的 last_epoch)
+    # OneCycleLR 需要知道总步数和当前步数 (last_epoch)
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=args.lr,
         steps_per_epoch=len(train_loader),
         epochs=args.epochs,
         pct_start=0.3,
+        last_epoch=last_epoch 
     )
+    logger.info(f"Scheduler initialized. Start Epoch: {start_epoch}, Last Step: {last_epoch}")
 
     # 损失函数
     # 获取类别权重
     if args.class_weight_mode == 'moving':
-        logger.info("Using Moving Objects Enhanced Class Weights")
+        logger.info("Using Moving Objects Enhanced Class Weights (Aggressive V2)")
         class_weights = get_moving_class_weights()
     else:
-        logger.info("Using Default Class Weights")
+        logger.info("Using Default Class Weights (Aggressive V2)")
         class_weights = get_default_class_weights()
         
     class_weights = torch.tensor(class_weights).float().to(device)
@@ -282,31 +335,26 @@ def main():
     if args.loss_type == 'ce':
         criterion = MaskedWeightedCELoss(class_weights=class_weights)
     elif args.loss_type == 'focal':
-        criterion = FocalLoss(class_weights=class_weights, gamma=2.0)
+        criterion = FocalLoss(class_weights=class_weights, gamma=args.gamma)
     elif args.loss_type == 'lovasz':
         criterion = LovaszSoftmaxLoss()
     elif args.loss_type == 'combined':
-        criterion = CombinedLoss(class_weights=class_weights)
+        criterion = CombinedLoss(
+            ce_weight=1.0, 
+            lovasz_weight=1.0, 
+            class_weights=class_weights
+        )
+    elif args.loss_type == 'ohem':
+        criterion = OHEMLoss(class_weights=class_weights, thresh=0.7)
+    elif args.loss_type == 'distance':
+        criterion = DistanceAwareLoss(class_weights=class_weights)
+    elif args.loss_type == 'distance_focal':
+        logger.info("Using Distance Aware + Focal Loss")
+        criterion = DistanceAwareLoss(class_weights=class_weights)
     else:
         raise ValueError(f"Unknown loss type: {args.loss_type}")
         
     logger.info(f"Using Loss Function: {args.loss_type}")
-
-    # 混合精度
-    scaler = GradScaler(enabled=args.amp)
-
-    # 恢复训练
-    start_epoch = 1
-    if args.resume:
-        logger.info(f'Resuming from {args.resume}')
-        checkpoint = torch.load(args.resume, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        if 'scaler_state_dict' in checkpoint and checkpoint['scaler_state_dict']:
-            scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
 
     # 训练循环
     logger.info('Start training...')

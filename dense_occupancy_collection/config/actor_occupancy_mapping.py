@@ -1,6 +1,6 @@
 """
-CARLA Actor类型到17分类Occupancy的完整映射配置
-基于业界标准（nuScenes）的17类分类体系
+CARLA Actor类型到18分类Occupancy的完整映射配置
+基于业界标准（nuScenes + free类）的18类分类体系
 
 映射规则：
 1. 优先使用 type_id 字符串匹配（最准确）
@@ -9,51 +9,19 @@ CARLA Actor类型到17分类Occupancy的完整映射配置
 """
 
 # ============================================================================
-# 17类Occupancy标签定义（业界标准 - nuScenes）
+# 18类Occupancy标签和颜色定义（统一配置源）
+# ⚠️ 所有标签和颜色定义已统一到 occupancy_config.py
+# 此文件不再重复定义，避免配置冲突和颜色不一致问题
 # ============================================================================
 
-OCCUPANCY_LABELS = {
-    0: 'free',                  # 自由空间/空气
-    1: 'barrier',               # 隔离栏/护栏
-    2: 'bicycle',               # 自行车
-    3: 'bus',                   # 公交车
-    4: 'car',                   # 小汽车
-    5: 'construction_vehicle',  # 工程车
-    6: 'motorcycle',            # 摩托车
-    7: 'pedestrian',            # 行人
-    8: 'traffic_cone',          # 交通锥桶
-    9: 'trailer',               # 拖车
-    10: 'truck',                # 卡车
-    11: 'driveable_surface',    # 可行驶路面
-    12: 'other_flat',           # 其他平坦表面
-    13: 'sidewalk',             # 人行道
-    14: 'terrain',              # 地形（草地、泥地等）
-    15: 'manmade',              # 人造物体（建筑、标志等）
-    16: 'vegetation',           # 植被
-    17: 'general_object',       # 通用障碍物/其他
-}
+from dense_occupancy_collection.config.occupancy_config import (
+    OCCUPANCY_LABELS as OCCUPANCY_LABELS_LIST,
+    OCCUPANCY_COLORS as OCCUPANCY_COLORS_LIST
+)
 
-# 可视化颜色（RGB格式）
-OCCUPANCY_COLORS = {
-    0: (0, 0, 0),           # free - 黑色
-    1: (112, 128, 144),     # barrier - 灰蓝色
-    2: (255, 61, 99),       # bicycle - 粉红色
-    3: (220, 20, 60),       # bus - 深红色
-    4: (255, 158, 0),       # car - 橙色
-    5: (233, 150, 70),      # construction_vehicle - 土黄色
-    6: (255, 0, 255),       # motorcycle - 品红色
-    7: (30, 144, 255),      # pedestrian - 道奇蓝
-    8: (255, 127, 80),      # traffic_cone - 珊瑚橙
-    9: (255, 140, 0),       # trailer - 暗橙色
-    10: (180, 165, 180),    # truck - 紫灰色
-    11: (128, 64, 128),     # driveable_surface - 深紫色
-    12: (244, 35, 232),     # other_flat - 洋红色
-    13: (107, 142, 35),     # sidewalk - 橄榄绿
-    14: (152, 251, 152),    # terrain - 淡绿色
-    15: (70, 70, 70),       # manmade - 深灰色
-    16: (0, 255, 0),        # vegetation - 绿色
-    17: (255, 255, 255),    # general_object - 白色
-}
+# 转换为字典格式（兼容本文件中使用 .get() 的旧代码）
+OCCUPANCY_LABELS = {i: OCCUPANCY_LABELS_LIST[i] for i in range(18)}
+OCCUPANCY_COLORS = {i: OCCUPANCY_COLORS_LIST[i] for i in range(18)}
 
 # ============================================================================
 # CARLA Actor type_id 到 Occupancy 的映射（1对多关系）

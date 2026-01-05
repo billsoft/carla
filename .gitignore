@@ -21,6 +21,7 @@ PythonAPI/examples/cache/
 carla_data_collection/dataset_output/
 dataset_output/
 dataset_10k/
+dataset_10k_bak/
 outputs/
 inference_results/
 .log

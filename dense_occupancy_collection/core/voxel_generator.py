@@ -48,7 +48,7 @@ class VoxelGenerator:
         self._fill_dynamic_actors(occupancy, actor_ids, world, ego_vehicle, ego_matrix)
         
         return occupancy, actor_ids
-
+    
     def _fill_static_environment(self, occupancy, actor_ids, world, ego_trans, ego_matrix):
         """填充静态环境 (Ground, Buildings, etc.)"""
         map_inst = world.get_map()
@@ -109,7 +109,7 @@ class VoxelGenerator:
                     if loc.distance(wp_sw.transform.location) < (wp_sw.lane_width / 2.0 + 0.5):
                         # 是人行道
                         self._fill_ground_patch(idx, x_indices, y_indices, step, occupancy, actor_ids, gz_max, 13, 1) # ID=1
-
+                        
         # --- B. 静态物体 (Buildings, Poles, etc.) ---
         self._fill_env_objects(occupancy, actor_ids, world, ego_loc, ego_matrix)
 

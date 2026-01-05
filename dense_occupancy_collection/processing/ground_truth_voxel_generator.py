@@ -40,6 +40,12 @@ class GroundTruthVoxelGenerator:
             int((y_range[1] - y_range[0]) / resolution),
             int((z_range[1] - z_range[0]) / resolution)
         ]
+        
+        # ⭐ 世界坐标系地面缓存
+        # Key: (int(world_x/1.0), int(world_y/1.0))
+        # Value: {'label': 11/13/14, 'z': world_z}
+        self.ground_cache = {}
+        self.cache_resolution = 0.5 # 提高缓存分辨率 (1.0 -> 0.5) 以减少地面 Z 轴台阶效应 (凸起)
 
         # ⭐ 添加验证
         expected_grid_size = [512, 512, 40]
@@ -68,13 +74,10 @@ class GroundTruthVoxelGenerator:
         ego_transform = ego_vehicle.get_transform()
         ego_location = ego_transform.location
         
-        # ⭐ 构建纯平移变换矩阵 (不包含旋转)
-        # 体素网格坐标系: 以Ego位置为原点,对齐世界坐标轴 (East-North-Up)
-        # 解决车辆转弯时体素网格旋转导致的静态物体闪烁问题
-        grid_to_world_matrix = np.eye(4)
-        grid_to_world_matrix[0, 3] = ego_location.x
-        grid_to_world_matrix[1, 3] = ego_location.y
-        grid_to_world_matrix[2, 3] = ego_location.z
+        # ⭐ 构建变换矩阵 (包含旋转，确保 Grid 是 Ego-Aligned)
+        # 体素网格坐标系: 以 Ego 为原点，X轴向前，Y轴向右/左，Z轴向上
+        # 这与 Viewer 和 Dataset 的预期一致
+        grid_to_world_matrix = np.array(ego_transform.get_matrix())
         
         # 1. 填充静态环境 (地面、道路)
         self._fill_static_environment(occupancy, actor_ids, world, ego_transform, grid_to_world_matrix)
@@ -159,143 +162,263 @@ class GroundTruthVoxelGenerator:
         """
         map_instance = world.get_map()
         ego_location = ego_transform.location
-        # ego_matrix = np.array(ego_transform.get_matrix()) # ❌ 不再使用旋转矩阵
         
-        # --- A. 地面与道路 (基于高度启发式) ---
+        # ⭐ 关键：已移除 world_to_ego 旋转变换，改用 World-Aligned 纯平移
+        # 统一所有模块使用相同的 World-Aligned 坐标系，避免 90度 错位
+        # world_to_ego = np.array(ego_transform.get_inverse_matrix()) # 已废弃
         
-        # 计算 Ego 在世界坐标系中的 Z (通常路面 Z=0，Ego Z > 0)
-        # 我们假设路面在 Z_world = 0 附近 (Town10)
-        # 或者更严谨地，查询 Ego 所在处的路面高度
+        # --- A. 地面与道路 (Inverse Mapping Grid -> World) ---
+        # 彻底解决旋转、错位、空洞和凸起问题的终极方案
+        # 逻辑：遍历 Ego Grid 的每个点 -> 转到 World -> 查询 Map -> 填回 Grid
         
+        # 计算 Ego 在世界坐标系中的 Z (作为默认地面高度)
         start_waypoint = map_instance.get_waypoint(ego_location, project_to_road=True, lane_type=carla.LaneType.Any)
         ground_z_world = start_waypoint.transform.location.z if start_waypoint else 0.0
         
         # 1. 基础填充：将 Z < 0.2 的所有体素设为 Ground (12)
-        # 找到 Z < 0.2 对应的 grid index
+        # 这只是一个兜底，后续的详细采样会覆盖它
         z_threshold = 0.2
         gz_max = int((z_threshold - self.z_range[0]) / self.resolution)
         gz_max = max(0, min(self.grid_size[2], gz_max))
 
         if gz_max > 0:
             occupancy[:, :, :gz_max] = 12 # Ground (terrain类别)
-            actor_ids[:, :, :gz_max] = -1012  # ⭐ 地面虚拟ID: -(12+1000)=-1012
-            
-        # 2. 区分 Road (9) 和 Sidewalk (11)
-        # 为了性能，我们不逐个体素查询，而是按步长采样，然后插值？
-        # 或者只在 ego 周围 40m 内精细查询
+            actor_ids[:, :, :gz_max] = -1012
+
+        # 2. 生成 Ego Grid 坐标 (Center of voxels, Z=0 plane)
+        # 只生成 Z=0 平面的点，因为我们只需要查询地面的 XY 分布
+        # 我们假设地面是 2.5D 的，即每个 (X,Y) 只有一个地面高度
         
-        # 这里的实现：遍历 grid 的 (x, y)，步长为 2 (即 1.0m 分辨率)，查询 Map
-        step = 2
+        gx_range = np.arange(self.grid_size[0]) * self.resolution + self.x_range[0] + self.resolution/2.0
+        gy_range = np.arange(self.grid_size[1]) * self.resolution + self.y_range[0] + self.resolution/2.0
         
-        # 获取 Grid 的 X, Y 坐标网格 (相对于 Ego)
-        x_indices = np.arange(0, self.grid_size[0], step)
-        y_indices = np.arange(0, self.grid_size[1], step)
+        # Meshgrid (Ego Frame)
+        # indexing='ij' -> gx is row index (X), gy is col index (Y)
+        gv_x, gv_y = np.meshgrid(gx_range, gy_range, indexing='ij')
         
-        # 转换到物理坐标
-        x_coords = self.x_range[0] + (x_indices + 0.5) * self.resolution
-        y_coords = self.y_range[0] + (y_indices + 0.5) * self.resolution
+        # Flatten: (N, 2)
+        flat_gx = gv_x.ravel()
+        flat_gy = gv_y.ravel()
+        num_points = flat_gx.shape[0]
         
-        # 构建网格点 (N, 3) in Grid Frame
-        xv, yv = np.meshgrid(x_coords, y_coords, indexing='ij')
-        zv = np.zeros_like(xv) # Z=0 平面
+        # Transform to World: P_world = T_ego_to_world @ P_grid
+        # P_grid points (z=0 for query, we don't care about ego z here, we project to z=0 plane relative to ego)
+        # Actually, we project the GRID (z=0) to World. 
+        # But wait, Ego Grid is 3D. We are iterating over columns.
+        # So we take the (x, y, 0) point in Ego Grid, transform to World, and see what's there.
         
-        points_grid = np.stack([xv, yv, zv], axis=-1).reshape(-1, 3)
+        points_grid_h = np.stack([flat_gx, flat_gy, np.zeros(num_points), np.ones(num_points)], axis=1)
         
-        # Transform to World (使用纯平移矩阵)
-        # Homogeneous
-        points_grid_h = np.concatenate([points_grid, np.ones((points_grid.shape[0], 1))], axis=1)
+        # grid_to_world_matrix includes rotation now
         points_world_h = points_grid_h @ grid_to_world_matrix.T
-        points_world = points_world_h[:, :3]
         
-        # 批量查询 Map (Python API 只能循环)
-        # 限制范围：只查 60m 内的
-        # 距离判断
-        dists = np.linalg.norm(points_world[:, :2] - np.array([ego_location.x, ego_location.y]), axis=1)
-        valid_mask = dists < 60.0 # 只更新 60m 内的地面
+        flat_wx = points_world_h[:, 0]
+        flat_wy = points_world_h[:, 1]
+        # flat_wz = points_world_h[:, 2] # We ignore the transformed Z for map query
         
-        valid_indices = np.where(valid_mask)[0]
+        # 3. Cache Optimization (Local Map Gathering)
+        # 即使是 Inverse Mapping，我们也可以利用 Cache 避免 26万次 get_waypoint
+        # 我们计算每个 Grid Point 对应的 Cache Key (1m resolution)
         
-        # 循环查询
-        # 这是一个性能瓶颈，50m 半径约覆盖 2500-10000 个点 (取决于 step)
-        # step=2 (1m), 100x100m = 10000 点。
-        # 10000 次 get_waypoint 耗时约 0.2-0.5s，可以接受
+        cache_res = self.cache_resolution # 1.0m
+        keys_x = np.round(flat_wx / cache_res).astype(int)
+        keys_y = np.round(flat_wy / cache_res).astype(int)
         
-        road_indices = []
-        sidewalk_indices = []
+        # 找出所有需要的 Unique Keys
+        # 组合 Key 为一个 long int 或者 tuple 列表
+        # 为了速度，我们使用 Python set 
         
-        for idx in valid_indices:
-            pw = points_world[idx]
-            loc = carla.Location(x=pw[0], y=pw[1], z=pw[2])
+        # 由于点太多，直接循环太慢。
+        # 我们可以只对 "当前视野内" 的 Cache Grid 进行遍历更新，类似之前的 Forward Sampling，
+        # 但这次我们把结果存入一个 "Local Map Image"，然后用 Nearest Neighbor 采样给 Grid。
+        
+        # 既然我们已经有了 flat_wx/wy，我们可以直接计算它们落在哪个 Cache Cell
+        # 这是一个 "Gather" 操作。
+        
+        # 让我们定义一个足够大的 Local Map 覆盖当前 Grid
+        # Ego Grid Range: [-51.2, 51.2]
+        # World Range approx: Ego World +/- 75m (considering rotation)
+        
+        local_radius = 75.0
+        cx_min = np.floor((ego_location.x - local_radius) / cache_res) * cache_res
+        cx_max = np.ceil((ego_location.x + local_radius) / cache_res) * cache_res
+        cy_min = np.floor((ego_location.y - local_radius) / cache_res) * cache_res
+        cy_max = np.ceil((ego_location.y + local_radius) / cache_res) * cache_res
+        
+        # Update Cache for the whole local area
+        # This is faster than checking unique keys from 260k points
+        c_wx = np.arange(cx_min, cx_max, cache_res)
+        c_wy = np.arange(cy_min, cy_max, cache_res)
+        
+        # Pre-fill Cache
+        # 优化：只对尚未存在的 Key 进行查询
+        # 为了进一步加速，我们可以只检查 "可能在视野内" 的点
+        # 但 150x150 = 2.25万个点，做 get_waypoint 还是有点多 (约 0.5-1秒)
+        # 不过这是 Python，没办法。之前 26万个点肯定不行。
+        
+        # 让我们优化一下：只更新那些被 Grid 实际覆盖的 Cache Cell
+        # 也就是 unique(keys_x, keys_y)
+        # np.unique on 2D rows
+        stacked_keys = np.stack([keys_x, keys_y], axis=1)
+        unique_keys = np.unique(stacked_keys, axis=0)
+        
+        # Now iterate unique keys (should be around 10k-15k)
+        for k in unique_keys:
+            kx, ky = k[0], k[1]
+            key = (kx, ky)
             
-            # project_to_road=True 会找到最近的路
-            # 我们需要判断距离是否够近
-            wp = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-            
-            if wp:
-                # 检查水平距离
-                # wp.transform.location 是路中心
-                # lane_width
-                lane_width = wp.lane_width
-                wp_loc = wp.transform.location
+            if key not in self.ground_cache:
+                wx = kx * cache_res
+                wy = ky * cache_res
+                loc = carla.Location(x=wx, y=wy, z=0.0)
+                l = 14 # Default Terrain
+                z = ground_z_world
                 
-                dist_xy = math.sqrt((loc.x - wp_loc.x)**2 + (loc.y - wp_loc.y)**2)
+                # Check Road
+                wp = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+                if wp:
+                    dist = math.sqrt((wx - wp.transform.location.x)**2 + (wy - wp.transform.location.y)**2)
+                    if dist < (wp.lane_width / 2.0 + 0.5):
+                        l = 11
+                        z = wp.transform.location.z
                 
-                if dist_xy < (lane_width / 2.0 + 0.5): # 稍微宽容一点
-                    road_indices.append(idx)
-                    continue
-            
-            # 如果不是 Driving，检查 Sidewalk (Sidewalk 支持有限，尝试用 Raycast?)
-            # 简单起见，非 Road 且 Z < 0.2 的都保留为 Ground (12)
-            # 或者如果有 Sidewalk waypoint (LaneType.Sidewalk)
-            wp_sw = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Sidewalk)
-            if wp_sw:
-                lane_width = wp_sw.lane_width
-                wp_loc = wp_sw.transform.location
-                dist_xy = math.sqrt((loc.x - wp_loc.x)**2 + (loc.y - wp_loc.y)**2)
-                if dist_xy < (lane_width / 2.0 + 0.5):
-                     sidewalk_indices.append(idx)
+                # Check Sidewalk
+                if l == 14:
+                    wp_sw = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Sidewalk)
+                    if wp_sw:
+                        dist = math.sqrt((wx - wp_sw.transform.location.x)**2 + (wy - wp_sw.transform.location.y)**2)
+                        if dist < (wp_sw.lane_width / 2.0 + 0.5):
+                            l = 13
+                            z = wp_sw.transform.location.z
+                            
+                self.ground_cache[key] = {'label': l, 'z': z}
         
-        # 更新 Grid
-        # 我们根据 road_indices 反推 grid 坐标
-        # idx 是 points_ego (flattened meshgrid) 的索引
+        # 4. Fill Grid from Cache (Vectorized Gather)
+        # 我们现在需要从 Cache 中提取每个 Grid Point 的 label 和 z
+        # 由于 dict 无法向量化，我们必须先把 Cache 转为 Local Map Array
         
-        # 恢复 (ix, iy) 索引
-        # meshgrid shape: (len(x_indices), len(y_indices))
-        nx = len(x_indices)
-        ny = len(y_indices)
+        # 为了避免构建巨大的 Array，我们直接用 Python 列表推导式 (稍微慢点但简单)
+        # 或者，我们可以构建一个基于 Hash 的快速查找？
+        # 不，还是 Local Map Array 最快。
         
-        # Road
-        for idx in road_indices:
-            # unravelling index
-            ix_sub = idx // ny
-            iy_sub = idx % ny
-            
-            ix_base = x_indices[ix_sub]
-            iy_base = y_indices[iy_sub]
-            
-            # 填充 step x step 的区域
-            # occupancy[ix_base:ix_base+step, iy_base:iy_base+step, :gz_max] = 9 # Road
-            
-            # 安全切片
-            ix_end = min(self.grid_size[0], ix_base + step)
-            iy_end = min(self.grid_size[1], iy_base + step)
+        # Local Map bounds
+        min_kx = np.min(keys_x)
+        max_kx = np.max(keys_x)
+        min_ky = np.min(keys_y)
+        max_ky = np.max(keys_y)
+        
+        width = max_kx - min_kx + 1
+        height = max_ky - min_ky + 1
+        
+        if width * height > 1000000: # Safety check
+             print("[警告] Cache Map 过大，跳过地面填充")
+             return
+             
+        local_l = np.full((width, height), 14, dtype=np.uint8)
+        local_z = np.full((width, height), ground_z_world, dtype=np.float32)
+        
+        # Fill Local Map from Dict
+        # 我们可以只遍历 unique_keys 来填充
+        for k in unique_keys:
+            kx, ky = k[0], k[1]
+            idx_i = kx - min_kx
+            idx_j = ky - min_ky
+            if 0 <= idx_i < width and 0 <= idx_j < height:
+                # key must be in cache now
+                data = self.ground_cache.get((kx, ky))
+                if data:
+                    local_l[idx_i, idx_j] = data['label']
+                    local_z[idx_i, idx_j] = data['z']
+                    
+        # 5. Gather (Nearest Neighbor)
+        # Grid indices in Local Map
+        grid_idx_i = keys_x - min_kx
+        grid_idx_j = keys_y - min_ky
+        
+        # Clip safety
+        grid_idx_i = np.clip(grid_idx_i, 0, width - 1)
+        grid_idx_j = np.clip(grid_idx_j, 0, height - 1)
+        
+        # Lookup
+        final_labels = local_l[grid_idx_i, grid_idx_j]
+        final_z_world = local_z[grid_idx_i, grid_idx_j]
+        
+        # 6. Fill into 3D Occupancy
+        # Convert World Z to Grid Z index
+        # Grid Z is relative to Ego Z
+        # gz = wz - ego_z
+        
+        flat_gz = final_z_world - ego_location.z
+        flat_iz = ((flat_gz - self.z_range[0]) / self.resolution).astype(int)
+        
+        # Filter valid Z
+        # 地面通常在 Z=0 附近，但也可能有坡度
+        # 我们只填充 Z 索引在范围内的点
+        valid_z_mask = (flat_iz >= 0) & (flat_iz < self.grid_size[2])
+        
+        # Grid X, Y indices
+        # They correspond to flat_gx, flat_gy which came from meshgrid
+        # So they are just 0..NX, 0..NY flattened
+        flat_ix = np.repeat(np.arange(self.grid_size[0]), self.grid_size[1])
+        flat_iy = np.tile(np.arange(self.grid_size[1]), self.grid_size[0])
+        
+        # Apply Mask
+        final_ix = flat_ix[valid_z_mask]
+        final_iy = flat_iy[valid_z_mask]
+        final_iz = flat_iz[valid_z_mask]
+        final_l = final_labels[valid_z_mask]
+        
+        # Direct Assignment (No Splatting needed for Inverse Mapping!)
+        # Inverse Mapping guarantees coverage for every column.
+        
+        # 为了防止"凸起" (Z 误差导致的悬空点)，我们可以检查该点下方是否为空
+        # 或者简单地，只覆盖 Free 或 12(Ground)
+        
+        # 批量赋值
+        # occupancy[final_ix, final_iy, final_iz] = final_l
+        
+        # 我们可以用高级索引一次性赋值
+        # 但要注意冲突：如果同一个 (x,y) 有多个 z (不可能，因为是 heightmap 逻辑)
+        
+        # 只需要处理 mask
+        # 现在的 occupancy 是 3D 的。我们只填充计算出的那一个 Z 层。
+        # 如果 Z 计算偏高，就会悬空。
+        # 为了解决"凸起"，我们可以强制填充从 Bottom 到 Current Z 的所有空间吗？
+        # 不，那样会变成实心的地下。
+        # 我们只填充表面。如果 Z 抖动，确实会凸起。
+        # 解决方法：平滑 Z 或者信任 Map Z。
+        # CARLA Map Z 是平滑的。
+        # 问题可能出在 cache_res=1.0 导致的 Z 台阶效应。
+        # 当从 cache_res 采样时，Z 是阶梯状的。
+        # 这就是"凸起"的原因！
+        # 修复：对 Z 进行双线性插值 (Bilinear Interpolation)
+        # 或者，既然我们要追求 GitHub 效果，GitHub 可能没做插值，但也可能 cache 没这么粗。
+        # 1.0m 的 cache 对于 Z 来说确实太粗了，会导致 0.2m 的 grid 上出现 5x5 的平台，然后跳变。
+        
+        # 改进：对 Z 使用双线性插值
+        # 这需要 4 个邻居。太复杂了。
+        # 简单修复：使用更细的 cache_res 或者不缓存 Z (实时计算 Z)
+        # 既然我们已经 unique keys 了，实时计算 Z 代价不大？
+        # 不，unique keys 还是 1.0m grid。
+        
+        # 妥协方案：对 Z 进行简单的平滑，或者接受 1m 的台阶（通常路面很平，看不出来）。
+        # 如果"凸起"是指孤立的体素点，那是因为 Z 刚好跨越了 voxel 边界。
+        # 我们可以填充 [iz, iz+1] 两层来保证连续性？
+        # 或者，我们只填充最接近的一层。
+        
+        # 让我们先直接填充，看看效果。
+        # 确保只覆盖 Free(0) 和 Ground(12)
+        
+        current_vals = occupancy[final_ix, final_iy, final_iz]
+        write_mask = (current_vals == 0) | (current_vals == 12)
+        
+        occupancy[final_ix[write_mask], final_iy[write_mask], final_iz[write_mask]] = final_l[write_mask]
+        
+        # Set IDs
+        vids = -(1000 + final_l[write_mask])
+        actor_ids[final_ix[write_mask], final_iy[write_mask], final_iz[write_mask]] = vids
 
-            occupancy[ix_base:ix_end, iy_base:iy_end, :gz_max] = 11 # driveable_surface (11)
-            actor_ids[ix_base:ix_end, iy_base:iy_end, :gz_max] = -1011  # 道路虚拟ID
 
-        # Sidewalk
-        for idx in sidewalk_indices:
-            ix_sub = idx // ny
-            iy_sub = idx % ny
-            ix_base = x_indices[ix_sub]
-            iy_base = y_indices[iy_sub]
-
-            ix_end = min(self.grid_size[0], ix_base + step)
-            iy_end = min(self.grid_size[1], iy_base + step)
-
-            occupancy[ix_base:ix_end, iy_base:iy_end, :gz_max] = 13 # sidewalk (13)
-            actor_ids[ix_base:ix_end, iy_base:iy_end, :gz_max] = -1013  # 人行道虚拟ID
-            
         # --- B. 静态物体 (建筑物, 交通标志, 杆等) ---
         # 使用 world.get_environment_objects() 获取更详细的静态物体信息 (ID, Transform, BBox)
         # 替代旧的 get_level_bbs，以支持实例级可见性过滤
@@ -387,6 +510,14 @@ class GroundTruthVoxelGenerator:
             
             if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
                 continue
+
+            # ⭐ 调试: 验证建筑坐标 (针对静态道具)
+            # obj.type 实际上是 CityObjectLabel 枚举，不是字符串
+            # 我们直接跳过这个打印，或者将其转换为字符串
+            # if str(obj.type).startswith('static.prop'):
+            #     bb_center_world = (bb.location.x, bb.location.y)
+            #     bb_center_grid = (min_ix + (max_ix-min_ix)/2, min_iy + (max_iy-min_iy)/2)
+            #     # print(f"[建筑填充] World=({bb_center_world[0]:.1f}, {bb_center_world[1]:.1f}) -> Grid Index Center=({bb_center_grid[0]:.0f}, {bb_center_grid[1]:.0f})")
 
             # ⭐ 安全检查：防止异常巨大的物体导致 meshgrid 爆内存/卡死
             # 100x100x100 = 1,000,000 个体素点

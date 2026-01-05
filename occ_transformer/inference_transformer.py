@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models.transformer_occ import build_transformer_occ_net
+# from models.transformer_occ import build_transformer_occ_net
 from models import TransformerOccNetBalanced
 from data.carla_dataset_bayer import CARLADatasetBayer
 
