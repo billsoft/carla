@@ -277,10 +277,36 @@ class GroundTruthVoxelGenerator:
                 # Check Road
                 wp = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
                 if wp:
-                    dist = math.sqrt((wx - wp.transform.location.x)**2 + (wy - wp.transform.location.y)**2)
-                    if dist < (wp.lane_width / 2.0 + 0.5):
-                        l = 11
-                        z = wp.transform.location.z
+                    wp_loc = wp.transform.location
+                    dist = math.sqrt((wx - wp_loc.x)**2 + (wy - wp_loc.y)**2)
+                    half_width = wp.lane_width / 2.0
+
+                    if dist < (half_width + 0.5):
+                        l = 11  # 默认为可行驶路面
+                        z = wp_loc.z
+
+                        # ⭐ 检测道路边缘 (距离车道边界 0.3m 以内设为隔离带)
+                        # 车道边缘位置: 距离中心线约 half_width
+                        edge_distance = abs(dist - half_width)
+                        if edge_distance < 0.3:
+                            # 检查是否有实际的路缘石或隔离带 (Border lane)
+                            # 如果没有明确的 Border lane, 强制设为隔离带
+                            wp_border = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Border)
+                            if wp_border is None or edge_distance < 0.15:
+                                l = 1  # 隔离带/护栏
+
+                        # ⭐ 检测车道线 (距离车道边界 0.1m 以内且有车道标线)
+                        # CARLA 的 waypoint 可能包含 left_lane_marking 和 right_lane_marking 信息
+                        if edge_distance < 0.1 and hasattr(wp, 'left_lane_marking') and hasattr(wp, 'right_lane_marking'):
+                            # 检查左右车道标线是否存在且可见
+                            left_marking = wp.left_lane_marking
+                            right_marking = wp.right_lane_marking
+
+                            # carla.LaneMarkingType 包含: NONE, Other, Broken, Solid, etc.
+                            # 只有当标线类型不是 NONE 时才设为交通标识
+                            if (left_marking and left_marking.type != carla.LaneMarkingType.NONE) or \
+                               (right_marking and right_marking.type != carla.LaneMarkingType.NONE):
+                                l = 8  # 交通标识 (traffic_cone)
                 
                 # Check Sidewalk
                 if l == 14:
@@ -406,17 +432,68 @@ class GroundTruthVoxelGenerator:
         # 我们可以填充 [iz, iz+1] 两层来保证连续性？
         # 或者，我们只填充最接近的一层。
         
-        # 让我们先直接填充，看看效果。
-        # 确保只覆盖 Free(0) 和 Ground(12)
-        
-        current_vals = occupancy[final_ix, final_iy, final_iz]
-        write_mask = (current_vals == 0) | (current_vals == 12)
-        
-        occupancy[final_ix[write_mask], final_iy[write_mask], final_iz[write_mask]] = final_l[write_mask]
-        
-        # Set IDs
-        vids = -(1000 + final_l[write_mask])
-        actor_ids[final_ix[write_mask], final_iy[write_mask], final_iz[write_mask]] = vids
+        # ========================================================================
+        # ⭐ 新增逻辑: 地面和地下层的逐层向下填充
+        # ========================================================================
+        # 用户需求:
+        # 1. 地表层: 查询 Map API 确定地形类型
+        # 2. 向下复制: 地表分类向下复制到所有地下层
+        # 3. 逐层遍历: 对于每个 (x,y) 列,从上往下找到第一个非零体素,向下填充
+
+        # 计算地面层索引 (相对于 Ego Z)
+        gz_ground = ground_z_world - ego_location.z
+        iz_ground = int((gz_ground - self.z_range[0]) / self.resolution)
+        iz_ground = max(0, min(iz_ground, self.grid_size[2] - 1))
+
+        print(f"\n[地面填充] 地面层索引 iz_ground={iz_ground} (ground_z={ground_z_world:.2f}, ego_z={ego_location.z:.2f})")
+
+        # 第一遍: 填充地表层 (Map API 查询到的所有地面体素)
+        # ⚠️ 修复: 不限制 Z 层,填充所有 Map API 查询到的地面
+        surface_fill_count = 0
+        for i in range(len(final_ix)):
+            ix, iy, iz, l = final_ix[i], final_iy[i], final_iz[i], final_l[i]
+
+            # 填充地表附近的层 (iz_ground-2 到 iz_ground+2)
+            if iz_ground - 2 <= iz <= iz_ground + 2:
+                current_val = occupancy[ix, iy, iz]
+                if current_val == 0 or current_val == 12:
+                    occupancy[ix, iy, iz] = l
+                    actor_ids[ix, iy, iz] = -(1000 + l)
+                    surface_fill_count += 1
+
+        print(f"[地面填充] 地表层填充: {surface_fill_count} 个体素")
+
+        # 第二遍: 对每个 (x,y) 列,从地面向下填充
+        # ⭐ 新逻辑: 外层循环 xy, 内层循环 z
+        filled_columns = 0
+        total_filled = 0
+
+        for ix in range(self.grid_size[0]):
+            for iy in range(self.grid_size[1]):
+                # 从地表层向下遍历,找到第一个非零体素
+                surface_label = None
+                surface_aid = None
+
+                # 从 iz_ground+2 向下搜索 (容忍地表偏移)
+                for iz in range(min(iz_ground + 2, self.grid_size[2] - 1), -1, -1):
+                    current_val = occupancy[ix, iy, iz]
+
+                    if current_val != 0:
+                        # 找到了地表! 记录分类
+                        surface_label = current_val
+                        surface_aid = actor_ids[ix, iy, iz]
+
+                        # 向下填充所有 0 (Free) 体素
+                        for iz_fill in range(iz - 1, -1, -1):
+                            if occupancy[ix, iy, iz_fill] == 0:
+                                occupancy[ix, iy, iz_fill] = surface_label
+                                actor_ids[ix, iy, iz_fill] = surface_aid
+                                total_filled += 1
+
+                        filled_columns += 1
+                        break  # 完成这一列,跳到下一个 (x,y)
+
+        print(f"[地面填充] 完成 {filled_columns} 列填充, 总填充 {total_filled} 个体素")
 
 
         # --- B. 静态物体 (建筑物, 交通标志, 杆等) ---

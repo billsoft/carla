@@ -31,3 +31,4 @@ nul
 occ_network/checkpoints/
 occ_network_lite/checkpoints_lite/
 code_summary_for_ai.txt
+voxel_mapping.log
