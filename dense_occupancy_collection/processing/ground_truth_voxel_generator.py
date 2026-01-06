@@ -218,11 +218,20 @@ class GroundTruthVoxelGenerator:
         
         # 3. Cache Optimization (Local Map Gathering)
         # 即使是 Inverse Mapping，我们也可以利用 Cache 避免 26万次 get_waypoint
-        # 我们计算每个 Grid Point 对应的 Cache Key (1m resolution)
-        
-        cache_res = self.cache_resolution # 1.0m
-        keys_x = np.round(flat_wx / cache_res).astype(int)
-        keys_y = np.round(flat_wy / cache_res).astype(int)
+        # 我们计算每个 Grid Point 对应的 Cache Key
+
+        # ⭐⭐⭐ CRITICAL FIX: 使用与体素相同的分辨率避免闪烁 ⭐⭐⭐
+        # 之前 cache_res=1.0m 导致：
+        # 1. 多个体素(0.2m)共享一个 cache (1.0m) → 5x5 体素块用同一个材质
+        # 2. round() 导致边界抖动 → wx=49.6 和 wx=50.4 都映射到 key=50，但 wx=49.4 映射到 key=49
+        # 3. 车辆移动时，同一个体素列可能落入不同 cache cell → 地面材质闪烁！
+        #
+        # 修复：使用 0.2m cache，确保每个体素有独立的查询结果
+        cache_res = self.resolution  # 0.2m (与体素分辨率一致)
+
+        # 使用 floor 而不是 round，确保边界稳定
+        keys_x = np.floor(flat_wx / cache_res).astype(int)
+        keys_y = np.floor(flat_wy / cache_res).astype(int)
         
         # 找出所有需要的 Unique Keys
         # 组合 Key 为一个 long int 或者 tuple 列表
@@ -268,8 +277,11 @@ class GroundTruthVoxelGenerator:
             key = (kx, ky)
             
             if key not in self.ground_cache:
-                wx = kx * cache_res
-                wy = ky * cache_res
+                # ⭐ 修复：查询 cache cell 的中心点，而不是左下角
+                # 之前：wx = kx * cache_res (左下角) → 查询结果不准确
+                # 现在：wx = (kx + 0.5) * cache_res (中心点) → 精确对应体素中心
+                wx = (kx + 0.5) * cache_res
+                wy = (ky + 0.5) * cache_res
                 loc = carla.Location(x=wx, y=wy, z=0.0)
                 l = 14 # Default Terrain
                 z = ground_z_world
@@ -281,32 +293,33 @@ class GroundTruthVoxelGenerator:
                     dist = math.sqrt((wx - wp_loc.x)**2 + (wy - wp_loc.y)**2)
                     half_width = wp.lane_width / 2.0
 
-                    if dist < (half_width + 0.5):
-                        l = 11  # 默认为可行驶路面
+                    # ⭐ 修正逻辑: 车道内 vs 车道边缘外侧
+                    if dist < half_width:
+                        # 在车道内: 默认为可行驶路面
+                        l = 11  # driveable_surface
                         z = wp_loc.z
 
-                        # ⭐ 检测道路边缘 (距离车道边界 0.3m 以内设为隔离带)
-                        # 车道边缘位置: 距离中心线约 half_width
-                        edge_distance = abs(dist - half_width)
-                        if edge_distance < 0.3:
-                            # 检查是否有实际的路缘石或隔离带 (Border lane)
-                            # 如果没有明确的 Border lane, 强制设为隔离带
-                            wp_border = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Border)
-                            if wp_border is None or edge_distance < 0.15:
-                                l = 1  # 隔离带/护栏
-
-                        # ⭐ 检测车道线 (距离车道边界 0.1m 以内且有车道标线)
-                        # CARLA 的 waypoint 可能包含 left_lane_marking 和 right_lane_marking 信息
-                        if edge_distance < 0.1 and hasattr(wp, 'left_lane_marking') and hasattr(wp, 'right_lane_marking'):
-                            # 检查左右车道标线是否存在且可见
+                        # ⭐ 检测车道线 (仅在车道内部检测)
+                        # 车道线通常在车道中心或边缘,距离中心线较远
+                        # 但不会超出车道边界 (half_width)
+                        if hasattr(wp, 'left_lane_marking') and hasattr(wp, 'right_lane_marking'):
                             left_marking = wp.left_lane_marking
                             right_marking = wp.right_lane_marking
 
-                            # carla.LaneMarkingType 包含: NONE, Other, Broken, Solid, etc.
-                            # 只有当标线类型不是 NONE 时才设为交通标识
-                            if (left_marking and left_marking.type != carla.LaneMarkingType.NONE) or \
-                               (right_marking and right_marking.type != carla.LaneMarkingType.NONE):
-                                l = 8  # 交通标识 (traffic_cone)
+                            # 检查是否有车道标线
+                            has_marking = (left_marking and left_marking.type != carla.LaneMarkingType.NONE) or \
+                                         (right_marking and right_marking.type != carla.LaneMarkingType.NONE)
+
+                            if has_marking:
+                                # 车道线通常在车道边缘附近 (距离边界 0.2m 以内)
+                                edge_distance = half_width - dist
+                                if edge_distance < 0.2:
+                                    l = 8  # traffic_cone (车道线)
+
+                    elif dist < half_width + 0.5:
+                        # 车道外侧 0.5m: 隔离带 (马路牙子)
+                        l = 1  # barrier
+                        z = wp_loc.z
                 
                 # Check Sidewalk
                 if l == 14:
