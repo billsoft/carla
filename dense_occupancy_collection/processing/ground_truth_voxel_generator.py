@@ -233,6 +233,8 @@ class GroundTruthVoxelGenerator:
         # 但实际上很多点 Cache 命中，只有车辆移动/旋转后的新点需要查询
         # 由于每帧都清空，这里直接遍历即可
 
+        import time
+        t_query_start = time.time()
         print(f"[地面填充] 开始查询 {num_points} 个网格点...")
 
         for i in range(num_points):
@@ -295,7 +297,8 @@ class GroundTruthVoxelGenerator:
                             
                 self.ground_cache[key] = {'label': l, 'z': z}
 
-        print(f"[地面填充] Cache 查询完成，共 {len(self.ground_cache)} 个网格点")
+        t_query_elapsed = time.time() - t_query_start
+        print(f"[地面填充] Cache 查询完成，共 {len(self.ground_cache)} 个网格点 (耗时: {t_query_elapsed:.3f}s)")
 
         # 5. 从 Cache 直接填充到网格
         # ⭐⭐⭐ 修复: 直接使用网格索引，无需复杂的坐标转换 ⭐⭐⭐
@@ -351,54 +354,94 @@ class GroundTruthVoxelGenerator:
         # ⭐⭐⭐ CRITICAL FIX: 移除高度限制,信任 Map API 查询的 Z 值 ⭐⭐⭐
         # 根因: 坡道、桥梁、起伏路面的 Z 高度可能远超 ego 当前位置 ±0.4m
         #       强制限制会导致这些地面被丢弃,出现空洞
-        surface_fill_count = 0
-        for i in range(len(final_ix)):
-            ix, iy, iz, l = final_ix[i], final_iy[i], final_iz[i], final_l[i]
 
-            # ✅ 直接填充,无高度限制
-            # Map API 返回的 Z 是精确的地面高度,应该信任该值
-            current_val = occupancy[ix, iy, iz]
-            if current_val == 0 or current_val == 12:
-                occupancy[ix, iy, iz] = l
-                actor_ids[ix, iy, iz] = -(1000 + l)
-                surface_fill_count += 1
+        # ⭐⭐⭐ 性能优化: 向量化赋值,消除 Python 循环 ⭐⭐⭐
+        # 根因: Python for 循环在处理 26万次赋值时极慢 (10-15秒)
+        # 解决: 使用 NumPy 高级索引批量赋值 (0.1-0.5秒)
+        # 预计提速: 20-150 倍
 
-        print(f"[地面填充] 地表层填充: {surface_fill_count} 个体素")
+        import time
+        t_start = time.time()
+
+        # 1. 批量读取当前值 (利用 NumPy 的向量化操作)
+        current_vals = occupancy[final_ix, final_iy, final_iz]
+
+        # 2. 生成掩码: 只填充空位 (0) 或原有地面 (12)
+        fill_mask = (current_vals == 0) | (current_vals == 12)
+
+        # 3. 筛选需要填充的索引
+        valid_ix = final_ix[fill_mask]
+        valid_iy = final_iy[fill_mask]
+        valid_iz = final_iz[fill_mask]
+        valid_l = final_l[fill_mask]
+
+        # 4. 批量赋值 (瞬间完成,利用 C 语言底层优化)
+        occupancy[valid_ix, valid_iy, valid_iz] = valid_l
+        actor_ids[valid_ix, valid_iy, valid_iz] = -(1000 + valid_l.astype(np.int32))
+
+        surface_fill_count = len(valid_ix)
+        t_elapsed = time.time() - t_start
+
+        print(f"[地面填充] 地表层填充: {surface_fill_count} 个体素 (耗时: {t_elapsed:.3f}s)")
 
         # 第二遍: 对每个 (x,y) 列,从地面向下填充
-        # ⭐ 新逻辑: 外层循环 xy, 内层循环 z
-        # ⭐⭐⭐ CRITICAL FIX: 从网格顶部开始搜索,支持高坡/桥梁 ⭐⭐⭐
-        # 根因: 如果从 iz_ground+2 开始,高于车辆的坡道内部将是空心的
-        #       必须从顶部开始搜索,找到该列的地表层,然后向下填充
-        filled_columns = 0
-        total_filled = 0
+        # ⭐⭐⭐ 性能优化: 向量化向下填充,消除双重循环 ⭐⭐⭐
+        # 根因: 512×512 的双重 Python 循环极慢 (8-10秒)
+        # 解决: 使用 NumPy 3D 广播一次性填充所有列 (预计 0.1-0.5秒)
 
-        for ix in range(self.grid_size[0]):
-            for iy in range(self.grid_size[1]):
-                # 从地表层向下遍历,找到第一个非零体素
-                surface_label = None
-                surface_aid = None
+        t_start_downfill = time.time()
 
-                # ✅ 从网格顶部开始搜索 (支持高坡、桥梁)
-                for iz in range(self.grid_size[2] - 1, -1, -1):
-                    current_val = occupancy[ix, iy, iz]
+        # 策略: 利用已经填充好的地表层 (第一遍的结果)
+        # 对每列,找到最高的非零体素,然后向下填充
 
-                    if current_val != 0:
-                        # 找到了地表! 记录分类
-                        surface_label = current_val
-                        surface_aid = actor_ids[ix, iy, iz]
+        # 1. 找到每列的地表高度索引 (最高的非零体素)
+        # 创建掩码: 哪些体素非零
+        non_zero_mask = (occupancy != 0)
 
-                        # 向下填充所有 0 (Free) 体素
-                        for iz_fill in range(iz - 1, -1, -1):
-                            if occupancy[ix, iy, iz_fill] == 0:
-                                occupancy[ix, iy, iz_fill] = surface_label
-                                actor_ids[ix, iy, iz_fill] = surface_aid
-                                total_filled += 1
+        # 对每列 (x, y),从上到下找第一个非零值的 Z 索引
+        # argmax 会返回第一个 True 的索引,但我们需要从上到下搜索
+        # 技巧: 反转 Z 轴,然后用 argmax
+        non_zero_mask_reversed = non_zero_mask[:, :, ::-1]  # 反转 Z 轴
+        has_surface = np.any(non_zero_mask_reversed, axis=2)  # 每列是否有地表
+        surface_z_reversed = np.argmax(non_zero_mask_reversed, axis=2)  # 地表在反转后的索引
 
-                        filled_columns += 1
-                        break  # 完成这一列,跳到下一个 (x,y)
+        # 转换回原始 Z 索引
+        surface_z = self.grid_size[2] - 1 - surface_z_reversed
 
-        print(f"[地面填充] 完成 {filled_columns} 列填充, 总填充 {total_filled} 个体素")
+        # 2. 提取每列的地表标签和 Actor ID
+        # 使用高级索引获取地表层的值
+        ix_grid, iy_grid = np.meshgrid(np.arange(self.grid_size[0]),
+                                       np.arange(self.grid_size[1]),
+                                       indexing='ij')
+
+        surface_labels = np.where(has_surface,
+                                  occupancy[ix_grid, iy_grid, surface_z],
+                                  0)  # 没有地表的列设为 0
+        surface_aids = np.where(has_surface,
+                               actor_ids[ix_grid, iy_grid, surface_z],
+                               0)
+
+        # 3. 创建 3D Z 坐标网格
+        Z_grid = np.arange(self.grid_size[2])[None, None, :]  # shape: (1, 1, 40)
+        surface_z_3d = surface_z[:, :, None]  # shape: (512, 512, 1)
+
+        # 4. 生成填充掩码: Z < surface_z 且 occupancy == 0
+        fill_mask = (Z_grid < surface_z_3d) & (occupancy == 0) & has_surface[:, :, None]
+
+        # 5. 向量化填充 (广播操作)
+        # 将 surface_labels 和 surface_aids 广播到 3D
+        surface_labels_3d = surface_labels[:, :, None]  # (512, 512, 1)
+        surface_aids_3d = surface_aids[:, :, None]
+
+        # 应用填充
+        occupancy[fill_mask] = np.broadcast_to(surface_labels_3d, occupancy.shape)[fill_mask]
+        actor_ids[fill_mask] = np.broadcast_to(surface_aids_3d, actor_ids.shape)[fill_mask]
+
+        total_filled = np.count_nonzero(fill_mask)
+        filled_columns = np.count_nonzero(has_surface)
+
+        t_downfill_elapsed = time.time() - t_start_downfill
+        print(f"[地面填充] 完成 {filled_columns} 列填充, 总填充 {total_filled} 个体素 (耗时: {t_downfill_elapsed:.3f}s)")
 
 
         # --- B. 静态物体 (建筑物, 交通标志, 杆等) ---
