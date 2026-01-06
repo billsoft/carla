@@ -162,128 +162,91 @@ class GroundTruthVoxelGenerator:
         """
         map_instance = world.get_map()
         ego_location = ego_transform.location
-        
-        # ⭐ 关键：已移除 world_to_ego 旋转变换，改用 World-Aligned 纯平移
-        # 统一所有模块使用相同的 World-Aligned 坐标系，避免 90度 错位
-        # world_to_ego = np.array(ego_transform.get_inverse_matrix()) # 已废弃
-        
+
+        # ⭐⭐⭐ CRITICAL FIX: 每帧清空 Cache ⭐⭐⭐
+        # 根因: 体素网格是 Ego-Aligned (随车辆旋转)
+        #       相同的网格索引 (ix, iy) 在不同旋转角度下对应不同的世界坐标
+        #       使用世界坐标作为 Cache Key 会导致:
+        #         yaw=0°:   grid(10,0) → world(ego_x+2, ego_y) → Road
+        #         yaw=90°:  grid(10,0) → world(ego_x, ego_y+2) → Sidewalk
+        #       但 Cache[(world_key)] 是跨帧复用的，导致旋转后填充错误！
+        #
+        # 解决: 每帧清空 Cache，使用网格索引作为 Key
+        self.ground_cache.clear()
+        print(f"[地面填充] 已清空旧 Cache (Ego-Aligned Grid 旋转后坐标映射改变)")
+
         # --- A. 地面与道路 (Inverse Mapping Grid -> World) ---
-        # 彻底解决旋转、错位、空洞和凸起问题的终极方案
+        # 修复: 使用网格索引作为 Cache Key，而不是世界坐标
         # 逻辑：遍历 Ego Grid 的每个点 -> 转到 World -> 查询 Map -> 填回 Grid
         
         # 计算 Ego 在世界坐标系中的 Z (作为默认地面高度)
         start_waypoint = map_instance.get_waypoint(ego_location, project_to_road=True, lane_type=carla.LaneType.Any)
         ground_z_world = start_waypoint.transform.location.z if start_waypoint else 0.0
-        
-        # 1. 基础填充：将 Z < 0.2 的所有体素设为 Ground (12)
-        # 这只是一个兜底，后续的详细采样会覆盖它
-        z_threshold = 0.2
-        gz_max = int((z_threshold - self.z_range[0]) / self.resolution)
-        gz_max = max(0, min(self.grid_size[2], gz_max))
 
-        if gz_max > 0:
-            occupancy[:, :, :gz_max] = 12 # Ground (terrain类别)
-            actor_ids[:, :, :gz_max] = -1012
+        # ⭐⭐⭐ 删除了过时的"基础填充"逻辑 ⭐⭐⭐
+        # 原逻辑: 将 Z < 0.2 的所有体素设为 Ground (12)
+        # 问题:
+        #   1. 与"第二遍: 向下填充"逻辑冗余
+        #   2. 可能导致类别不一致 (路面是 Road,但底层被强制填成 Ground)
+        #   3. 硬编码的 0.2m 阈值不适用于所有场景
+        # 解决: 完全依赖 Map API 查询 + 向下填充机制
 
-        # 2. 生成 Ego Grid 坐标 (Center of voxels, Z=0 plane)
-        # 只生成 Z=0 平面的点，因为我们只需要查询地面的 XY 分布
-        # 我们假设地面是 2.5D 的，即每个 (X,Y) 只有一个地面高度
-        
-        gx_range = np.arange(self.grid_size[0]) * self.resolution + self.x_range[0] + self.resolution/2.0
-        gy_range = np.arange(self.grid_size[1]) * self.resolution + self.y_range[0] + self.resolution/2.0
-        
-        # Meshgrid (Ego Frame)
-        # indexing='ij' -> gx is row index (X), gy is col index (Y)
-        gv_x, gv_y = np.meshgrid(gx_range, gy_range, indexing='ij')
-        
-        # Flatten: (N, 2)
-        flat_gx = gv_x.ravel()
-        flat_gy = gv_y.ravel()
-        num_points = flat_gx.shape[0]
-        
-        # Transform to World: P_world = T_ego_to_world @ P_grid
-        # P_grid points (z=0 for query, we don't care about ego z here, we project to z=0 plane relative to ego)
-        # Actually, we project the GRID (z=0) to World. 
-        # But wait, Ego Grid is 3D. We are iterating over columns.
-        # So we take the (x, y, 0) point in Ego Grid, transform to World, and see what's there.
-        
-        points_grid_h = np.stack([flat_gx, flat_gy, np.zeros(num_points), np.ones(num_points)], axis=1)
-        
-        # grid_to_world_matrix includes rotation now
+        # 1. 生成网格索引和对应的世界坐标
+        # ⭐⭐⭐ CRITICAL FIX: 直接使用网格索引，避免坐标映射错误 ⭐⭐⭐
+
+        # 生成所有网格索引
+        keys_x = np.arange(self.grid_size[0])  # [0, 1, 2, ..., 511]
+        keys_y = np.arange(self.grid_size[1])  # [0, 1, 2, ..., 511]
+
+        # 生成网格索引对 (ix, iy)
+        keys_x_grid, keys_y_grid = np.meshgrid(keys_x, keys_y, indexing='ij')
+        keys_x_flat = keys_x_grid.ravel()  # 展平后的 X 索引
+        keys_y_flat = keys_y_grid.ravel()  # 展平后的 Y 索引
+
+        # 计算每个网格索引对应的 Ego Frame 坐标
+        gx_flat = keys_x_flat * self.resolution + self.x_range[0] + self.resolution/2.0
+        gy_flat = keys_y_flat * self.resolution + self.y_range[0] + self.resolution/2.0
+
+        # 转换到世界坐标（用于查询 Map API）
+        points_grid_h = np.stack([gx_flat, gy_flat, np.zeros(len(gx_flat)), np.ones(len(gx_flat))], axis=1)
         points_world_h = points_grid_h @ grid_to_world_matrix.T
-        
+
         flat_wx = points_world_h[:, 0]
         flat_wy = points_world_h[:, 1]
-        # flat_wz = points_world_h[:, 2] # We ignore the transformed Z for map query
-        
-        # 3. Cache Optimization (Local Map Gathering)
-        # 即使是 Inverse Mapping，我们也可以利用 Cache 避免 26万次 get_waypoint
-        # 我们计算每个 Grid Point 对应的 Cache Key
 
-        # ⭐⭐⭐ CRITICAL FIX: 使用与体素相同的分辨率避免闪烁 ⭐⭐⭐
-        # 之前 cache_res=1.0m 导致：
-        # 1. 多个体素(0.2m)共享一个 cache (1.0m) → 5x5 体素块用同一个材质
-        # 2. round() 导致边界抖动 → wx=49.6 和 wx=50.4 都映射到 key=50，但 wx=49.4 映射到 key=49
-        # 3. 车辆移动时，同一个体素列可能落入不同 cache cell → 地面材质闪烁！
+        num_points = len(keys_x_flat)
+
+        # 3. Cache Optimization (使用网格索引作为 Key)
+        # ⭐⭐⭐ 修复: 使用 (ix, iy) 作为 Cache Key 而不是世界坐标 ⭐⭐⭐
+        # 原因:
+        #   1. 体素网格是 Ego-Aligned (随车辆旋转)
+        #   2. 网格索引 (ix, iy) 在不同旋转角度下对应不同的世界坐标
+        #   3. 使用世界坐标作为 Key 会导致旋转后填充到错误的网格位置
         #
-        # 修复：使用 0.2m cache，确保每个体素有独立的查询结果
-        cache_res = self.resolution  # 0.2m (与体素分辨率一致)
+        # 优点:
+        #   - Cache Key 与填充目标完全一致
+        #   - 避免坐标系转换引入的误差
+        #   - 逻辑清晰，无歧义
+        
+        # 4. 遍历所有网格点，查询 Map API
+        # ⭐ 由于每帧 Cache 都清空，需要查询所有 262144 个点
+        # 但实际上很多点 Cache 命中，只有车辆移动/旋转后的新点需要查询
+        # 由于每帧都清空，这里直接遍历即可
 
-        # 使用 floor 而不是 round，确保边界稳定
-        keys_x = np.floor(flat_wx / cache_res).astype(int)
-        keys_y = np.floor(flat_wy / cache_res).astype(int)
-        
-        # 找出所有需要的 Unique Keys
-        # 组合 Key 为一个 long int 或者 tuple 列表
-        # 为了速度，我们使用 Python set 
-        
-        # 由于点太多，直接循环太慢。
-        # 我们可以只对 "当前视野内" 的 Cache Grid 进行遍历更新，类似之前的 Forward Sampling，
-        # 但这次我们把结果存入一个 "Local Map Image"，然后用 Nearest Neighbor 采样给 Grid。
-        
-        # 既然我们已经有了 flat_wx/wy，我们可以直接计算它们落在哪个 Cache Cell
-        # 这是一个 "Gather" 操作。
-        
-        # 让我们定义一个足够大的 Local Map 覆盖当前 Grid
-        # Ego Grid Range: [-51.2, 51.2]
-        # World Range approx: Ego World +/- 75m (considering rotation)
-        
-        local_radius = 75.0
-        cx_min = np.floor((ego_location.x - local_radius) / cache_res) * cache_res
-        cx_max = np.ceil((ego_location.x + local_radius) / cache_res) * cache_res
-        cy_min = np.floor((ego_location.y - local_radius) / cache_res) * cache_res
-        cy_max = np.ceil((ego_location.y + local_radius) / cache_res) * cache_res
-        
-        # Update Cache for the whole local area
-        # This is faster than checking unique keys from 260k points
-        c_wx = np.arange(cx_min, cx_max, cache_res)
-        c_wy = np.arange(cy_min, cy_max, cache_res)
-        
-        # Pre-fill Cache
-        # 优化：只对尚未存在的 Key 进行查询
-        # 为了进一步加速，我们可以只检查 "可能在视野内" 的点
-        # 但 150x150 = 2.25万个点，做 get_waypoint 还是有点多 (约 0.5-1秒)
-        # 不过这是 Python，没办法。之前 26万个点肯定不行。
-        
-        # 让我们优化一下：只更新那些被 Grid 实际覆盖的 Cache Cell
-        # 也就是 unique(keys_x, keys_y)
-        # np.unique on 2D rows
-        stacked_keys = np.stack([keys_x, keys_y], axis=1)
-        unique_keys = np.unique(stacked_keys, axis=0)
-        
-        # Now iterate unique keys (should be around 10k-15k)
-        for k in unique_keys:
-            kx, ky = k[0], k[1]
-            key = (kx, ky)
-            
+        print(f"[地面填充] 开始查询 {num_points} 个网格点...")
+
+        for i in range(num_points):
+            ix = keys_x_flat[i]
+            iy = keys_y_flat[i]
+            key = (ix, iy)  # ✅ 网格索引作为 Key
+
             if key not in self.ground_cache:
-                # ⭐ 修复：查询 cache cell 的中心点，而不是左下角
-                # 之前：wx = kx * cache_res (左下角) → 查询结果不准确
-                # 现在：wx = (kx + 0.5) * cache_res (中心点) → 精确对应体素中心
-                wx = (kx + 0.5) * cache_res
-                wy = (ky + 0.5) * cache_res
+                # 使用已计算的世界坐标
+                wx = flat_wx[i]
+                wy = flat_wy[i]
+
                 loc = carla.Location(x=wx, y=wy, z=0.0)
-                l = 14 # Default Terrain
+                l = 14  # Default Terrain
                 z = ground_z_world
                 
                 # Check Road
@@ -331,129 +294,52 @@ class GroundTruthVoxelGenerator:
                             z = wp_sw.transform.location.z
                             
                 self.ground_cache[key] = {'label': l, 'z': z}
-        
-        # 4. Fill Grid from Cache (Vectorized Gather)
-        # 我们现在需要从 Cache 中提取每个 Grid Point 的 label 和 z
-        # 由于 dict 无法向量化，我们必须先把 Cache 转为 Local Map Array
-        
-        # 为了避免构建巨大的 Array，我们直接用 Python 列表推导式 (稍微慢点但简单)
-        # 或者，我们可以构建一个基于 Hash 的快速查找？
-        # 不，还是 Local Map Array 最快。
-        
-        # Local Map bounds
-        min_kx = np.min(keys_x)
-        max_kx = np.max(keys_x)
-        min_ky = np.min(keys_y)
-        max_ky = np.max(keys_y)
-        
-        width = max_kx - min_kx + 1
-        height = max_ky - min_ky + 1
-        
-        if width * height > 1000000: # Safety check
-             print("[警告] Cache Map 过大，跳过地面填充")
-             return
-             
-        local_l = np.full((width, height), 14, dtype=np.uint8)
-        local_z = np.full((width, height), ground_z_world, dtype=np.float32)
-        
-        # Fill Local Map from Dict
-        # 我们可以只遍历 unique_keys 来填充
-        for k in unique_keys:
-            kx, ky = k[0], k[1]
-            idx_i = kx - min_kx
-            idx_j = ky - min_ky
-            if 0 <= idx_i < width and 0 <= idx_j < height:
-                # key must be in cache now
-                data = self.ground_cache.get((kx, ky))
-                if data:
-                    local_l[idx_i, idx_j] = data['label']
-                    local_z[idx_i, idx_j] = data['z']
-                    
-        # 5. Gather (Nearest Neighbor)
-        # Grid indices in Local Map
-        grid_idx_i = keys_x - min_kx
-        grid_idx_j = keys_y - min_ky
-        
-        # Clip safety
-        grid_idx_i = np.clip(grid_idx_i, 0, width - 1)
-        grid_idx_j = np.clip(grid_idx_j, 0, height - 1)
-        
-        # Lookup
-        final_labels = local_l[grid_idx_i, grid_idx_j]
-        final_z_world = local_z[grid_idx_i, grid_idx_j]
-        
-        # 6. Fill into 3D Occupancy
-        # Convert World Z to Grid Z index
-        # Grid Z is relative to Ego Z
-        # gz = wz - ego_z
-        
+
+        print(f"[地面填充] Cache 查询完成，共 {len(self.ground_cache)} 个网格点")
+
+        # 5. 从 Cache 直接填充到网格
+        # ⭐⭐⭐ 修复: 直接使用网格索引，无需复杂的坐标转换 ⭐⭐⭐
+
+        final_ix = keys_x_flat
+        final_iy = keys_y_flat
+        final_l = np.zeros(len(final_ix), dtype=np.uint8)
+        final_z_world = np.zeros(len(final_ix), dtype=np.float32)
+
+        # 从 Cache 读取
+        for i in range(len(final_ix)):
+            ix = final_ix[i]
+            iy = final_iy[i]
+            key = (ix, iy)
+
+            data = self.ground_cache.get(key)
+            if data:
+                final_l[i] = data['label']
+                final_z_world[i] = data['z']
+            else:
+                # 默认值
+                final_l[i] = 14  # Terrain
+                final_z_world[i] = ground_z_world
+
+        # 计算 Z 索引
         flat_gz = final_z_world - ego_location.z
         flat_iz = ((flat_gz - self.z_range[0]) / self.resolution).astype(int)
-        
-        # Filter valid Z
-        # 地面通常在 Z=0 附近，但也可能有坡度
-        # 我们只填充 Z 索引在范围内的点
-        valid_z_mask = (flat_iz >= 0) & (flat_iz < self.grid_size[2])
-        
-        # Grid X, Y indices
-        # They correspond to flat_gx, flat_gy which came from meshgrid
-        # So they are just 0..NX, 0..NY flattened
-        flat_ix = np.repeat(np.arange(self.grid_size[0]), self.grid_size[1])
-        flat_iy = np.tile(np.arange(self.grid_size[1]), self.grid_size[0])
-        
-        # Apply Mask
-        final_ix = flat_ix[valid_z_mask]
-        final_iy = flat_iy[valid_z_mask]
-        final_iz = flat_iz[valid_z_mask]
-        final_l = final_labels[valid_z_mask]
-        
-        # Direct Assignment (No Splatting needed for Inverse Mapping!)
-        # Inverse Mapping guarantees coverage for every column.
-        
-        # 为了防止"凸起" (Z 误差导致的悬空点)，我们可以检查该点下方是否为空
-        # 或者简单地，只覆盖 Free 或 12(Ground)
-        
-        # 批量赋值
-        # occupancy[final_ix, final_iy, final_iz] = final_l
-        
-        # 我们可以用高级索引一次性赋值
-        # 但要注意冲突：如果同一个 (x,y) 有多个 z (不可能，因为是 heightmap 逻辑)
-        
-        # 只需要处理 mask
-        # 现在的 occupancy 是 3D 的。我们只填充计算出的那一个 Z 层。
-        # 如果 Z 计算偏高，就会悬空。
-        # 为了解决"凸起"，我们可以强制填充从 Bottom 到 Current Z 的所有空间吗？
-        # 不，那样会变成实心的地下。
-        # 我们只填充表面。如果 Z 抖动，确实会凸起。
-        # 解决方法：平滑 Z 或者信任 Map Z。
-        # CARLA Map Z 是平滑的。
-        # 问题可能出在 cache_res=1.0 导致的 Z 台阶效应。
-        # 当从 cache_res 采样时，Z 是阶梯状的。
-        # 这就是"凸起"的原因！
-        # 修复：对 Z 进行双线性插值 (Bilinear Interpolation)
-        # 或者，既然我们要追求 GitHub 效果，GitHub 可能没做插值，但也可能 cache 没这么粗。
-        # 1.0m 的 cache 对于 Z 来说确实太粗了，会导致 0.2m 的 grid 上出现 5x5 的平台，然后跳变。
-        
-        # 改进：对 Z 使用双线性插值
-        # 这需要 4 个邻居。太复杂了。
-        # 简单修复：使用更细的 cache_res 或者不缓存 Z (实时计算 Z)
-        # 既然我们已经 unique keys 了，实时计算 Z 代价不大？
-        # 不，unique keys 还是 1.0m grid。
-        
-        # 妥协方案：对 Z 进行简单的平滑，或者接受 1m 的台阶（通常路面很平，看不出来）。
-        # 如果"凸起"是指孤立的体素点，那是因为 Z 刚好跨越了 voxel 边界。
-        # 我们可以填充 [iz, iz+1] 两层来保证连续性？
-        # 或者，我们只填充最接近的一层。
-        
-        # ========================================================================
-        # ⭐ 新增逻辑: 地面和地下层的逐层向下填充
-        # ========================================================================
-        # 用户需求:
-        # 1. 地表层: 查询 Map API 确定地形类型
-        # 2. 向下复制: 地表分类向下复制到所有地下层
-        # 3. 逐层遍历: 对于每个 (x,y) 列,从上往下找到第一个非零体素,向下填充
 
-        # 计算地面层索引 (相对于 Ego Z)
+        # 过滤有效 Z
+        valid_z_mask = (flat_iz >= 0) & (flat_iz < self.grid_size[2])
+
+        final_ix = final_ix[valid_z_mask]
+        final_iy = final_iy[valid_z_mask]
+        final_iz = flat_iz[valid_z_mask]
+        final_l = final_l[valid_z_mask]
+
+        # ========================================================================
+        # 地面和地下层的逐层向下填充
+        # ========================================================================
+        # 逻辑:
+        # 1. 第一遍: 填充地表层 (Map API 查询到的所有地面体素)
+        # 2. 第二遍: 对每个 (x,y) 列,从顶部向下搜索,找到地表,向下填充
+
+        # 计算地面层索引 (相对于 Ego Z, 仅用于日志显示)
         gz_ground = ground_z_world - ego_location.z
         iz_ground = int((gz_ground - self.z_range[0]) / self.resolution)
         iz_ground = max(0, min(iz_ground, self.grid_size[2] - 1))
@@ -462,22 +348,28 @@ class GroundTruthVoxelGenerator:
 
         # 第一遍: 填充地表层 (Map API 查询到的所有地面体素)
         # ⚠️ 修复: 不限制 Z 层,填充所有 Map API 查询到的地面
+        # ⭐⭐⭐ CRITICAL FIX: 移除高度限制,信任 Map API 查询的 Z 值 ⭐⭐⭐
+        # 根因: 坡道、桥梁、起伏路面的 Z 高度可能远超 ego 当前位置 ±0.4m
+        #       强制限制会导致这些地面被丢弃,出现空洞
         surface_fill_count = 0
         for i in range(len(final_ix)):
             ix, iy, iz, l = final_ix[i], final_iy[i], final_iz[i], final_l[i]
 
-            # 填充地表附近的层 (iz_ground-2 到 iz_ground+2)
-            if iz_ground - 2 <= iz <= iz_ground + 2:
-                current_val = occupancy[ix, iy, iz]
-                if current_val == 0 or current_val == 12:
-                    occupancy[ix, iy, iz] = l
-                    actor_ids[ix, iy, iz] = -(1000 + l)
-                    surface_fill_count += 1
+            # ✅ 直接填充,无高度限制
+            # Map API 返回的 Z 是精确的地面高度,应该信任该值
+            current_val = occupancy[ix, iy, iz]
+            if current_val == 0 or current_val == 12:
+                occupancy[ix, iy, iz] = l
+                actor_ids[ix, iy, iz] = -(1000 + l)
+                surface_fill_count += 1
 
         print(f"[地面填充] 地表层填充: {surface_fill_count} 个体素")
 
         # 第二遍: 对每个 (x,y) 列,从地面向下填充
         # ⭐ 新逻辑: 外层循环 xy, 内层循环 z
+        # ⭐⭐⭐ CRITICAL FIX: 从网格顶部开始搜索,支持高坡/桥梁 ⭐⭐⭐
+        # 根因: 如果从 iz_ground+2 开始,高于车辆的坡道内部将是空心的
+        #       必须从顶部开始搜索,找到该列的地表层,然后向下填充
         filled_columns = 0
         total_filled = 0
 
@@ -487,8 +379,8 @@ class GroundTruthVoxelGenerator:
                 surface_label = None
                 surface_aid = None
 
-                # 从 iz_ground+2 向下搜索 (容忍地表偏移)
-                for iz in range(min(iz_ground + 2, self.grid_size[2] - 1), -1, -1):
+                # ✅ 从网格顶部开始搜索 (支持高坡、桥梁)
+                for iz in range(self.grid_size[2] - 1, -1, -1):
                     current_val = occupancy[ix, iy, iz]
 
                     if current_val != 0:

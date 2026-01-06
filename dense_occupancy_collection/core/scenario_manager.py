@@ -58,8 +58,27 @@ class ScenarioManager:
 
                 # 启用自动驾驶
                 if enable_autopilot:
-                    self.hero_vehicle.set_autopilot(True, self.tm_port)
-                    print(f"  ✓ 自动驾驶已启用 (TM Port: {self.tm_port})")
+                    # ⭐ 修复: 添加端口重试机制,避免 TM 端口绑定失败
+                    tm_ports_to_try = [self.tm_port, 8011, 8012, 8013, 8014, 8015]
+                    autopilot_success = False
+
+                    for port in tm_ports_to_try:
+                        try:
+                            self.hero_vehicle.set_autopilot(True, port)
+                            self.tm_port = port  # 更新成功的端口
+                            print(f"  ✓ 自动驾驶已启用 (TM Port: {port})")
+                            autopilot_success = True
+                            break
+                        except RuntimeError as e:
+                            if "bind error" in str(e):
+                                print(f"  ⚠ TM 端口 {port} 被占用,尝试下一个...")
+                                continue
+                            else:
+                                raise
+
+                    if not autopilot_success:
+                        print(f"  ⚠ 警告: 无法启用自动驾驶 (所有端口都被占用)")
+                        print(f"  → 车辆将保持静止状态")
 
                 return self.hero_vehicle
 
@@ -125,7 +144,15 @@ class ScenarioManager:
                     npc = self.world.try_spawn_actor(bp, self.spawn_points[spawn_idx])
                     spawn_idx += 1
                     if npc:
-                        npc.set_autopilot(True, self.tm_port)
+                        # ⭐ 修复: 添加错误处理,避免 TM 端口问题导致崩溃
+                        try:
+                            npc.set_autopilot(True, self.tm_port)
+                        except RuntimeError as e:
+                            if "bind error" in str(e):
+                                print(f"  ⚠ NPC 自动驾驶失败 (TM 端口问题),车辆将保持静止")
+                            else:
+                                raise
+
                         self.npc_actors.append(npc)
                         spawned_count += 1
                         total_spawned += 1
