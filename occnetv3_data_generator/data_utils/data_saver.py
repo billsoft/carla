@@ -1,0 +1,280 @@
+"""
+数据保存器 - OccNetV3 数据集格式
+按照 DATASET_FORMAT.md 规范保存
+"""
+import os
+import json
+import numpy as np
+from pathlib import Path
+from typing import Dict, List
+
+
+class OccNetDataSaver:
+    """
+    保存OccNetV3训练数据
+    目录结构:
+    dataset/
+        ├── calibration/
+        │   ├── intrinsics.json
+        │   └── extrinsics.json
+        ├── images/
+        │   └── scene_XXXX_frame_YYYY/
+        │       ├── cam_0.npy  (1, 960, 1280) float16
+        │       └── ...
+        ├── occupancy/
+        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 40) uint8
+        ├── flow/
+        │   └── scene_XXXX_frame_YYYY.npy  (3, 512, 512, 40) float16
+        ├── flow_mask/
+        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 40) uint8
+        ├── ego_pose/
+        │   └── scene_XXXX_frame_YYYY.npy  (4, 4) float32
+        ├── ego_motion/
+        │   └── scene_XXXX_frame_YYYY.npy  (4, 4) float32
+        ├── train.txt
+        ├── val.txt
+        └── test.txt
+    """
+
+    def __init__(self, output_dir: str, scene_name: str = 'scene'):
+        """
+        Args:
+            output_dir: 输出根目录 (如 D:/code/carla/dataset_10k_bak)
+            scene_name: 场景名称前缀
+        """
+        self.output_dir = Path(output_dir)
+        self.scene_name = scene_name
+        self.scene_counter = 0
+        self.frame_counter = 0
+
+        self.sample_ids = []  # 记录所有sample_id
+
+        # 创建目录结构
+        self._create_directories()
+
+        print(f"[OccNetDataSaver] 初始化完成")
+        print(f"  输出目录: {self.output_dir}")
+
+    def _create_directories(self):
+        """创建所有必需的目录"""
+        dirs = [
+            'calibration',
+            'images',
+            'occupancy',
+            'flow',
+            'flow_mask',
+            'ego_pose',
+            'ego_motion',
+        ]
+
+        for d in dirs:
+            (self.output_dir / d).mkdir(parents=True, exist_ok=True)
+
+        print(f"  ✓ 目录结构已创建")
+
+    def save_calibration(
+        self,
+        camera_intrinsics: Dict[str, np.ndarray],
+        camera_extrinsics: Dict[str, np.ndarray],
+        camera_configs: List[Dict]
+    ):
+        """
+        保存相机标定文件
+
+        Args:
+            camera_intrinsics: {cam_id: (3, 3) 内参矩阵}
+            camera_extrinsics: {cam_id: (4, 4) 外参矩阵}
+            camera_configs: 相机配置列表
+        """
+        # intrinsics.json
+        intrinsics_data = {}
+        for cam_config in camera_configs:
+            cam_id = f"cam_{cam_config['index']}"
+            K = camera_intrinsics[cam_config['id']]
+
+            intrinsics_data[cam_id] = {
+                'fx': float(K[0, 0]),
+                'fy': float(K[1, 1]),
+                'cx': float(K[0, 2]),
+                'cy': float(K[1, 2]),
+                'width': 1280,
+                'height': 960,
+                'fov': float(cam_config['fov']),
+                'distortion': {
+                    'model': 'pinhole',
+                    'k1': 0.0,
+                    'k2': 0.0,
+                    'p1': 0.0,
+                    'p2': 0.0,
+                }
+            }
+
+        with open(self.output_dir / 'calibration' / 'intrinsics.json', 'w') as f:
+            json.dump(intrinsics_data, f, indent=2)
+
+        # extrinsics.json
+        extrinsics_data = {}
+        for cam_config in camera_configs:
+            cam_id = f"cam_{cam_config['index']}"
+            T = camera_extrinsics[cam_config['id']]
+
+            # 分解为平移和旋转
+            translation = T[:3, 3].tolist()
+
+            # 从旋转矩阵提取欧拉角 (简化,假设无roll)
+            R = T[:3, :3]
+            rotation_matrix = R.tolist()
+
+            extrinsics_data[cam_id] = {
+                'translation': [float(x) for x in translation],
+                'rotation': {
+                    'roll': 0.0,
+                    'pitch': 0.0,
+                    'yaw': float(cam_config['rotation'][2]),  # yaw从config读取
+                },
+                'rotation_matrix': [[float(x) for x in row] for row in rotation_matrix]
+            }
+
+        with open(self.output_dir / 'calibration' / 'extrinsics.json', 'w') as f:
+            json.dump(extrinsics_data, f, indent=2)
+
+        print(f"  ✓ 标定文件已保存")
+
+    def save_sample(
+        self,
+        sample_id: str,
+        images: Dict[str, np.ndarray],
+        occupancy: np.ndarray,
+        flow: np.ndarray = None,
+        flow_mask: np.ndarray = None,
+        ego_pose: np.ndarray = None,
+        ego_motion: np.ndarray = None,
+    ):
+        """
+        保存一个训练样本
+
+        Args:
+            sample_id: 样本ID (如 'scene_0001_frame_0000')
+            images: {cam_id: (1, 960, 1280) float16} 8个相机
+            occupancy: (512, 512, 40) uint8 语义标签
+            flow: (3, 512, 512, 40) float16 流场 (可选)
+            flow_mask: (512, 512, 40) uint8 流场掩码 (可选)
+            ego_pose: (4, 4) float32 全局位姿 (可选)
+            ego_motion: (4, 4) float32 帧间运动 (可选)
+        """
+        # 1. 保存图像
+        img_dir = self.output_dir / 'images' / sample_id
+        img_dir.mkdir(parents=True, exist_ok=True)
+
+        for cam_id, img in images.items():
+            # 提取相机索引 (如 'front_main' → 0)
+            cam_index = self._get_cam_index(cam_id)
+            assert img.shape == (1, 960, 1280), f"图像形状错误: {img.shape}"
+            assert img.dtype == np.float16, f"图像类型错误: {img.dtype}"
+
+            np.save(img_dir / f'cam_{cam_index}.npy', img)
+
+        # 2. 保存occupancy
+        assert occupancy.shape == (512, 512, 40), f"occupancy形状错误: {occupancy.shape}"
+        np.save(self.output_dir / 'occupancy' / f'{sample_id}.npy', occupancy.astype(np.uint8))
+
+        # 3. 保存flow (可选)
+        if flow is not None:
+            assert flow.shape == (3, 512, 512, 40), f"flow形状错误: {flow.shape}"
+            np.save(self.output_dir / 'flow' / f'{sample_id}.npy', flow.astype(np.float16))
+
+        if flow_mask is not None:
+            assert flow_mask.shape == (512, 512, 40), f"flow_mask形状错误: {flow_mask.shape}"
+            np.save(self.output_dir / 'flow_mask' / f'{sample_id}.npy', flow_mask.astype(np.uint8))
+
+        # 4. 保存ego数据 (可选)
+        if ego_pose is not None:
+            assert ego_pose.shape == (4, 4), f"ego_pose形状错误: {ego_pose.shape}"
+            np.save(self.output_dir / 'ego_pose' / f'{sample_id}.npy', ego_pose.astype(np.float32))
+
+        if ego_motion is not None:
+            assert ego_motion.shape == (4, 4), f"ego_motion形状错误: {ego_motion.shape}"
+            np.save(self.output_dir / 'ego_motion' / f'{sample_id}.npy', ego_motion.astype(np.float32))
+
+        # 记录sample_id
+        self.sample_ids.append(sample_id)
+
+    def _get_cam_index(self, cam_id: str) -> int:
+        """从相机ID提取索引"""
+        mapping = {
+            'front_main': 0,
+            'front_wide': 1,
+            'front_narrow': 2,
+            'left_pillar': 3,
+            'right_pillar': 4,
+            'left_repeater': 5,
+            'right_repeater': 6,
+            'rear': 7,
+        }
+        return mapping.get(cam_id, 0)
+
+    def generate_sample_id(self) -> str:
+        """生成sample_id"""
+        sample_id = f"{self.scene_name}_{self.scene_counter:04d}_frame_{self.frame_counter:04d}"
+        self.frame_counter += 1
+        return sample_id
+
+    def next_scene(self):
+        """切换到下一个场景"""
+        self.scene_counter += 1
+        self.frame_counter = 0
+        print(f"[OccNetDataSaver] 切换到场景 {self.scene_counter}")
+
+    def finalize(self, train_ratio=0.8, val_ratio=0.1):
+        """
+        结束采集,生成数据集划分文件
+
+        Args:
+            train_ratio: 训练集比例
+            val_ratio: 验证集比例
+        """
+        total = len(self.sample_ids)
+        if total == 0:
+            print(f"[OccNetDataSaver] 警告: 没有数据")
+            return
+
+        # 按场景分组
+        scenes = {}
+        for sample_id in self.sample_ids:
+            scene_id = sample_id.split('_frame_')[0]
+            if scene_id not in scenes:
+                scenes[scene_id] = []
+            scenes[scene_id].append(sample_id)
+
+        # 随机打乱场景
+        scene_list = list(scenes.keys())
+        np.random.shuffle(scene_list)
+
+        # 划分
+        n_train = int(len(scene_list) * train_ratio)
+        n_val = int(len(scene_list) * val_ratio)
+
+        train_scenes = scene_list[:n_train]
+        val_scenes = scene_list[n_train:n_train+n_val]
+        test_scenes = scene_list[n_train+n_val:]
+
+        # 展开为样本列表
+        train_samples = [s for sc in train_scenes for s in scenes[sc]]
+        val_samples = [s for sc in val_scenes for s in scenes[sc]]
+        test_samples = [s for sc in test_scenes for s in scenes[sc]]
+
+        # 保存文件
+        with open(self.output_dir / 'train.txt', 'w') as f:
+            f.write('\n'.join(train_samples))
+
+        with open(self.output_dir / 'val.txt', 'w') as f:
+            f.write('\n'.join(val_samples))
+
+        with open(self.output_dir / 'test.txt', 'w') as f:
+            f.write('\n'.join(test_samples))
+
+        print(f"\n[OccNetDataSaver] 数据集划分完成:")
+        print(f"  训练集: {len(train_samples)} 样本")
+        print(f"  验证集: {len(val_samples)} 样本")
+        print(f"  测试集: {len(test_samples)} 样本")
+        print(f"  总计: {total} 样本")

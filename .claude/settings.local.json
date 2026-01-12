@@ -92,7 +92,11 @@
       "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaverify_network_shapes.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe D:codecarlaverify_fixes.py)",
       "Bash(C:Usersbills.condaenvscarlapython.exe verify_fixes.py)",
-      "Bash(C:Usersbills.condaenvscarlapython.exe -c \"import numpy as np; data = np.load\\(''D:/code/carla/inference_results_balanced/000000.npz''\\); print\\(list\\(data.keys\\(\\)\\)\\); print\\(''Shape:'', data[''occupancy''].shape if ''occupancy'' in data else ''No occupancy''\\)\")"
+      "Bash(C:Usersbills.condaenvscarlapython.exe -c \"import numpy as np; data = np.load\\(''D:/code/carla/inference_results_balanced/000000.npz''\\); print\\(list\\(data.keys\\(\\)\\)\\); print\\(''Shape:'', data[''occupancy''].shape if ''occupancy'' in data else ''No occupancy''\\)\")",
+      "Bash(\"C:/Users/bills/.conda/envs/carla/python.exe\" \"d:/code/carla/occnetv3_data_generator/main_collection.py\" --output \"d:/code/carla/dataset_occnet_v3_test\" --frames 10)",
+      "Bash(\"C:/Users/bills/.conda/envs/carla/python.exe\" -c \"import carla; print\\(''CARLA version:'', carla.__version__\\)\")",
+      "Bash(/c/Users/bills/.conda/envs/car/python.exe:*)",
+      "Bash(C:Usersbills.condaenvscarlapython.exe d:codecarlaverify_occnet_v3_data.py)"
     ],
     "deny": [],
     "ask": []

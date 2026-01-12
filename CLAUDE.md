@@ -93,6 +93,78 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - **CARLA 数据采集**: 使用 `carla` 环境
    - **一般脚本**: 两个环境都可以,优先使用当前激活的环境
 
+9. **⚠️ 关键经验教训 - Claude Code 在 Bash 环境中运行**
+
+   **问题**: Claude Code 的 Bash tool 运行在 Git Bash 或类似环境中,**不是用户的 PowerShell 环境**
+
+   **影响**:
+   - ❌ 用户在 PowerShell 中执行 `conda activate carla` 对 Bash tool 无效
+   - ❌ Bash 环境中的 `python` 命令指向系统 Python (如 Python 3.12), 而不是 conda 环境的 Python 3.10
+   - ❌ `conda` 命令在 Bash 环境中不可用
+   - ❌ Windows 路径格式 (`C:\path`) 在 Bash 中需要转换为 Unix 格式 (`/c/path`)
+
+   **正确做法**:
+   ```bash
+   # ✅ 方法1: 使用 conda 环境的完整 Python 路径 (推荐)
+   /c/Users/bills/.conda/envs/car/python.exe d:/code/carla/script.py
+
+   # ✅ 方法2: 通过 cmd.exe 使用环境 Python (如果 cmd.exe 输出正常)
+   cmd.exe /c "C:\Users\bills\.conda\envs\car\python.exe d:\code\carla\script.py"
+
+   # ❌ 错误: 直接使用 python 命令 (会使用系统 Python)
+   python d:/code/carla/script.py  # 可能是 Python 3.12, 无法加载 carla
+   ```
+
+   **conda 环境路径映射**:
+   - `carla` 环境实际名称可能是 `car`: `/c/Users/bills/.conda/envs/car/`
+   - `deepsys` 环境: `/c/ProgramData/anaconda3/envs/deepsys/`
+   - 查找环境: `ls /c/Users/bills/.conda/envs/` 或 `ls /c/ProgramData/anaconda3/envs/`
+
+   **CARLA 模块版本匹配**:
+   - UE5.5 CARLA 服务器版本: `0.10.0`
+   - 必须确保 Python 环境中的 carla 包也是 `0.10.0`
+   - 检查: `/c/Users/bills/.conda/envs/car/python.exe -m pip list | grep carla`
+   - 如果版本不匹配 (如 0.9.16), 需要更新:
+     ```bash
+     # 卸载旧版本
+     /c/Users/bills/.conda/envs/car/python.exe -m pip uninstall -y carla
+
+     # 安装正确版本
+     /c/Users/bills/.conda/envs/car/python.exe -m pip install \
+       d:/code/carla/Build/PythonAPI/dist/carla-0.10.0-cp310-cp310-win_amd64.whl
+     ```
+
+   **cmd.exe 输出问题**:
+   - ⚠️ `cmd.exe /c` 的输出可能被截断或显示乱码 (中文编码问题)
+   - 建议: 在 Bash 中直接使用 Unix 风格路径,避免 cmd.exe
+   - 输出重定向: `cmd.exe /c "command > output.log 2>&1"` 然后读取 log 文件
+
+   **路径格式最佳实践**:
+   ```bash
+   # ✅ 在 Bash 中使用正斜杠 (推荐)
+   /c/Users/bills/.conda/envs/car/python.exe d:/code/carla/script.py
+
+   # ✅ 查找文件使用 Unix 路径
+   ls /c/Users/bills/.conda/envs/car/
+   find /c/Users/bills/.conda/envs/car/ -name "python.exe"
+
+   # ❌ 反斜杠路径会被 Bash 误解
+   C:\Users\bills\.conda\envs\car\python.exe  # 错误!
+   ```
+
+   **后台运行脚本**:
+   - 数据采集脚本需要长时间运行,使用 `run_in_background=true`
+   - 使用 TaskOutput 等待完成并获取输出
+   - 示例:
+     ```python
+     Bash(
+         command="/c/Users/bills/.conda/envs/car/python.exe d:/code/carla/script.py",
+         description="运行数据采集",
+         timeout=300000,  # 5分钟超时
+         run_in_background=true
+     )
+     ```
+
 ## Project Overview
 
 CARLA is an open-source simulator for autonomous driving research built on Unreal Engine 5.5. This UE5 branch (`ue5-dev`) runs parallel to the legacy UE4 version in `ue4-dev`.
