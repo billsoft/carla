@@ -30,7 +30,7 @@ from config.camera_config import TESLA_CAMERAS
 from config.occupancy_config import (
     X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION, DEPTH_CAMERA_CONFIG
 )
-from sensors.camera_manager import GrayCameraManager
+from sensors.camera_manager import CameraManager
 from sensors.depth_suite import DepthSuite  # ← 新增: 深度相机套件
 from processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator  # ← 新增: Ground Truth生成器
 from data_utils.data_saver import OccNetDataSaver
@@ -213,7 +213,7 @@ def main():
             ego_pose_prev = ego_pose.copy()
 
             # 提取图像 (转换cam_id格式)
-            images = {cam['id']: camera_data[cam['id']]['image'] for cam in TESLA_CAMERAS}
+            images = {cam['id']: camera_data[cam['id']] for cam in TESLA_CAMERAS}
 
             # 生成sample_id
             sample_id = data_saver.generate_sample_id()

@@ -42,10 +42,10 @@ class GroundTruthVoxelGenerator:
         ]
         
         # ⭐ 世界坐标系地面缓存
-        # Key: (int(world_x/1.0), int(world_y/1.0))
+        # Key: (int(world_x/resolution), int(world_y/resolution)) - 使用体素分辨率网格索引
         # Value: {'label': 11/13/14, 'z': world_z}
         self.ground_cache = {}
-        self.cache_resolution = 0.5 # 提高缓存分辨率 (1.0 -> 0.5) 以减少地面 Z 轴台阶效应 (凸起)
+        # self.cache_resolution = 0.5 # Deprecated: use self.resolution
 
         # ⭐ 添加验证
         expected_grid_size = [512, 512, 40]
@@ -163,37 +163,24 @@ class GroundTruthVoxelGenerator:
         map_instance = world.get_map()
         ego_location = ego_transform.location
 
-        # ⭐⭐⭐ CRITICAL FIX: 每帧清空 Cache ⭐⭐⭐
-        # 根因: 体素网格是 Ego-Aligned (随车辆旋转)
-        #       相同的网格索引 (ix, iy) 在不同旋转角度下对应不同的世界坐标
-        #       使用世界坐标作为 Cache Key 会导致:
-        #         yaw=0°:   grid(10,0) → world(ego_x+2, ego_y) → Road
-        #         yaw=90°:  grid(10,0) → world(ego_x, ego_y+2) → Sidewalk
-        #       但 Cache[(world_key)] 是跨帧复用的，导致旋转后填充错误！
-        #
-        # 解决: 每帧清空 Cache，使用网格索引作为 Key
-        self.ground_cache.clear()
-        print(f"[地面填充] 已清空旧 Cache (Ego-Aligned Grid 旋转后坐标映射改变)")
+        # ⭐⭐⭐ CRITICAL FIX: 优化 Cache 策略 ⭐⭐⭐
+        # 原策略: 每帧清空 Cache (Line 175) -> 每帧查询 26万次 Map API -> 极慢
+        # 新策略: 使用世界坐标 Grid Index 作为 Cache Key
+        #         Key = (int(round(world_x/res)), int(round(world_y/res)))
+        #         仅查询 Cache 中缺失的点 (车辆移动产生的新边缘)
+        #         Cache 持续保留，支持任意旋转和移动，无需清空
+        
+        # self.ground_cache.clear() # ❌ 不再清空
+        # print(f"[地面填充] 已清空旧 Cache (Ego-Aligned Grid 旋转后坐标映射改变)")
 
         # --- A. 地面与道路 (Inverse Mapping Grid -> World) ---
-        # 修复: 使用网格索引作为 Cache Key，而不是世界坐标
-        # 逻辑：遍历 Ego Grid 的每个点 -> 转到 World -> 查询 Map -> 填回 Grid
+        # 修复: 使用世界网格索引作为 Cache Key
         
         # 计算 Ego 在世界坐标系中的 Z (作为默认地面高度)
         start_waypoint = map_instance.get_waypoint(ego_location, project_to_road=True, lane_type=carla.LaneType.Any)
         ground_z_world = start_waypoint.transform.location.z if start_waypoint else 0.0
 
-        # ⭐⭐⭐ 删除了过时的"基础填充"逻辑 ⭐⭐⭐
-        # 原逻辑: 将 Z < 0.2 的所有体素设为 Ground (12)
-        # 问题:
-        #   1. 与"第二遍: 向下填充"逻辑冗余
-        #   2. 可能导致类别不一致 (路面是 Road,但底层被强制填成 Ground)
-        #   3. 硬编码的 0.2m 阈值不适用于所有场景
-        # 解决: 完全依赖 Map API 查询 + 向下填充机制
-
         # 1. 生成网格索引和对应的世界坐标
-        # ⭐⭐⭐ CRITICAL FIX: 直接使用网格索引，避免坐标映射错误 ⭐⭐⭐
-
         # 生成所有网格索引
         keys_x = np.arange(self.grid_size[0])  # [0, 1, 2, ..., 511]
         keys_y = np.arange(self.grid_size[1])  # [0, 1, 2, ..., 511]
@@ -216,40 +203,40 @@ class GroundTruthVoxelGenerator:
 
         num_points = len(keys_x_flat)
 
-        # 3. Cache Optimization (使用网格索引作为 Key)
-        # ⭐⭐⭐ 修复: 使用 (ix, iy) 作为 Cache Key 而不是世界坐标 ⭐⭐⭐
-        # 原因:
-        #   1. 体素网格是 Ego-Aligned (随车辆旋转)
-        #   2. 网格索引 (ix, iy) 在不同旋转角度下对应不同的世界坐标
-        #   3. 使用世界坐标作为 Key 会导致旋转后填充到错误的网格位置
-        #
-        # 优点:
-        #   - Cache Key 与填充目标完全一致
-        #   - 避免坐标系转换引入的误差
-        #   - 逻辑清晰，无歧义
+        # 3. Cache Optimization (使用世界网格索引作为 Key)
+        # 将浮点世界坐标量化为整数索引
+        # 使用 round() 避免 float 精度误差导致的抖动
+        world_ix = np.round(flat_wx / self.resolution).astype(np.int64)
+        world_iy = np.round(flat_wy / self.resolution).astype(np.int64)
         
-        # 4. 遍历所有网格点，查询 Map API
-        # ⭐ 由于每帧 Cache 都清空，需要查询所有 262144 个点
-        # 但实际上很多点 Cache 命中，只有车辆移动/旋转后的新点需要查询
-        # 由于每帧都清空，这里直接遍历即可
-
+        # 构造查询 Keys (list of tuples)
+        # 注意: zip 在 Python 3 是 lazy 的，转换成 list 稍有开销但为了逻辑清晰
+        query_keys = list(zip(world_ix, world_iy))
+        
+        # 4. 找出缺失的 Keys 并批量查询
         import time
         t_query_start = time.time()
-        print(f"[地面填充] 开始查询 {num_points} 个网格点...")
-
-        for i in range(num_points):
-            ix = keys_x_flat[i]
-            iy = keys_y_flat[i]
-            key = (ix, iy)  # ✅ 网格索引作为 Key
-
+        
+        # 统计缺失
+        missing_indices = []
+        for i, key in enumerate(query_keys):
             if key not in self.ground_cache:
-                # 使用已计算的世界坐标
-                wx = flat_wx[i]
-                wy = flat_wy[i]
+                missing_indices.append(i)
+                
+        num_missing = len(missing_indices)
+        
+        if num_missing > 0:
+            print(f"[地面填充] 发现 {num_missing} 个新网格点 (总 {num_points}), 开始查询 Map API...")
+            
+            # 仅对缺失点查询 Map
+            for idx in missing_indices:
+                key = query_keys[idx]
+                wx = flat_wx[idx]
+                wy = flat_wy[idx]
 
-                loc = carla.Location(x=wx, y=wy, z=0.0)
+                loc = carla.Location(x=wx, y=wy, z=0.0) # Z不重要，project_to_road=True
                 l = 14  # Default Terrain
-                z = ground_z_world
+                z = ground_z_world # Default Z
                 
                 # Check Road
                 wp = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
@@ -265,8 +252,6 @@ class GroundTruthVoxelGenerator:
                         z = wp_loc.z
 
                         # ⭐ 检测车道线 (仅在车道内部检测)
-                        # 车道线通常在车道中心或边缘,距离中心线较远
-                        # 但不会超出车道边界 (half_width)
                         if hasattr(wp, 'left_lane_marking') and hasattr(wp, 'right_lane_marking'):
                             left_marking = wp.left_lane_marking
                             right_marking = wp.right_lane_marking
@@ -298,34 +283,33 @@ class GroundTruthVoxelGenerator:
                 self.ground_cache[key] = {'label': l, 'z': z}
 
         t_query_elapsed = time.time() - t_query_start
-        print(f"[地面填充] Cache 查询完成，共 {len(self.ground_cache)} 个网格点 (耗时: {t_query_elapsed:.3f}s)")
+        # print(f"[地面填充] Cache 查询完成 (新增 {num_missing}), 耗时: {t_query_elapsed:.3f}s")
 
         # 5. 从 Cache 直接填充到网格
-        # ⭐⭐⭐ 修复: 直接使用网格索引，无需复杂的坐标转换 ⭐⭐⭐
-
         final_ix = keys_x_flat
         final_iy = keys_y_flat
         final_l = np.zeros(len(final_ix), dtype=np.uint8)
         final_z_world = np.zeros(len(final_ix), dtype=np.float32)
 
-        # 从 Cache 读取
+        # 从 Cache 读取 (这是最耗时的 Python 循环, 约 0.05-0.1s)
+        # 即使全部命中，Python 遍历 26万次也需要时间，但比 Map 查询快得多
         for i in range(len(final_ix)):
-            ix = final_ix[i]
-            iy = final_iy[i]
-            key = (ix, iy)
-
+            key = query_keys[i]
+            # 此时 key 必然在 cache 中 (除非并发问题, 但这里是单线程)
             data = self.ground_cache.get(key)
             if data:
                 final_l[i] = data['label']
                 final_z_world[i] = data['z']
             else:
-                # 默认值
-                final_l[i] = 14  # Terrain
+                # Should not happen
+                final_l[i] = 14
                 final_z_world[i] = ground_z_world
 
         # 计算 Z 索引
+        # ⭐⭐⭐ FIX: 使用 round() 替代 floor (int cast) ⭐⭐⭐
+        # 解决 Z 值在体素边界附近时产生的 1-voxel 抖动 (Random Gray Layer)
         flat_gz = final_z_world - ego_location.z
-        flat_iz = ((flat_gz - self.z_range[0]) / self.resolution).astype(int)
+        flat_iz = np.round((flat_gz - self.z_range[0]) / self.resolution).astype(int)
 
         # 过滤有效 Z
         valid_z_mask = (flat_iz >= 0) & (flat_iz < self.grid_size[2])
@@ -430,12 +414,23 @@ class GroundTruthVoxelGenerator:
 
         # 5. 向量化填充 (广播操作)
         # 将 surface_labels 和 surface_aids 广播到 3D
-        surface_labels_3d = surface_labels[:, :, None]  # (512, 512, 1)
-        surface_aids_3d = surface_aids[:, :, None]
+        # surface_labels_3d = surface_labels[:, :, None]  # (512, 512, 1)
+        # surface_aids_3d = surface_aids[:, :, None]
 
+        # ⭐⭐⭐ FIX: 地下填充统一使用 Terrain (泥土) ⭐⭐⭐
+        # 原逻辑: 向下复制地表材质 (occupancy[fill_mask] = surface_labels...)
+        # 问题: 如果地表是 Barrier (灰色)，地下会形成一堵灰色的墙，视觉效果突兀
+        # 解决: 统一填充为 Terrain (14, 棕色)，模拟路基/泥土
+        
+        UNDERGROUND_LABEL = 14 # Terrain
+        UNDERGROUND_ID = -(1000 + UNDERGROUND_LABEL)
+        
         # 应用填充
-        occupancy[fill_mask] = np.broadcast_to(surface_labels_3d, occupancy.shape)[fill_mask]
-        actor_ids[fill_mask] = np.broadcast_to(surface_aids_3d, actor_ids.shape)[fill_mask]
+        # occupancy[fill_mask] = np.broadcast_to(surface_labels_3d, occupancy.shape)[fill_mask]
+        # actor_ids[fill_mask] = np.broadcast_to(surface_aids_3d, actor_ids.shape)[fill_mask]
+        
+        occupancy[fill_mask] = UNDERGROUND_LABEL
+        actor_ids[fill_mask] = UNDERGROUND_ID
 
         total_filled = np.count_nonzero(fill_mask)
         filled_columns = np.count_nonzero(has_surface)
@@ -452,6 +447,20 @@ class GroundTruthVoxelGenerator:
         # 确保与 actor_occupancy_mapping.py 和全局配置保持一致
         static_type_mapping = CARLA_TO_OCCUPANCY_MAPPING
         
+        # ⭐⭐⭐ CRITICAL FIX: 排除已由 Map API 处理的地面类型 ⭐⭐⭐
+        # 根因: Map API 已经生成了平滑、准确的地面 (Road, Sidewalk, Terrain)
+        #       如果再光栅化这些类型的 Mesh (EnvironmentObjects), 会因为 Mesh 与 Waypoint 高度的微小差异
+        #       导致在 Map 地面之上叠加一层"浮空"的 Mesh 地面 (Double Layer / Gray Layer on top)
+        #       用户反馈的"地面上随机覆盖一层灰色"即由此导致。
+        SKIP_STATIC_TYPES = {
+            carla.CityObjectLabel.Roads,
+            carla.CityObjectLabel.Sidewalks,
+            carla.CityObjectLabel.Terrain,
+            carla.CityObjectLabel.Ground,
+            carla.CityObjectLabel.RoadLines, 
+            # carla.CityObjectLabel.Markings, # Markings usually are on road
+        }
+
         # 获取所有环境物体
         env_objs = world.get_environment_objects(carla.CityObjectLabel.Any)
         
@@ -470,7 +479,8 @@ class GroundTruthVoxelGenerator:
         print(f"\n[调试] 环境物体统计 (总数: {len(env_objs)}):")
         for t, count in type_counts.items():
             mapped = "✓" if t in static_type_mapping else "✗ (未映射)"
-            print(f"  - {t}: {count} 个 {mapped}")
+            skipped = "⛔ (已排除)" if t in SKIP_STATIC_TYPES else ""
+            print(f"  - {t}: {count} 个 {mapped} {skipped}")
             
         if skipped_types:
             print(f"[警告] 发现未映射的物体类型: {skipped_types}")
@@ -489,6 +499,10 @@ class GroundTruthVoxelGenerator:
             if obj.type not in static_type_mapping:
                 continue
                 
+            # ⭐ 排除地面类型
+            if obj.type in SKIP_STATIC_TYPES:
+                continue
+
             occ_label = static_type_mapping[obj.type]
             
             # 2. 距离过滤

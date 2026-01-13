@@ -1,0 +1,165 @@
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #121212;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+}
+
+#container {
+    display: flex;
+    height: 100%;
+}
+
+/* Image Panel */
+#image-panel {
+    width: 30%;
+    background-color: #1e1e1e;
+    padding: 10px;
+    overflow-y: auto;
+    border-right: 1px solid #333;
+}
+
+.camera-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+}
+
+.cam-box {
+    position: relative;
+    aspect-ratio: 4/3;
+    background: #000;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.cam-box img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.cam-label {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    font-size: 10px;
+    padding: 2px 4px;
+    text-align: center;
+}
+
+/* Viewer Panel */
+#viewer-panel {
+    flex: 1;
+    position: relative;
+    background: #000;
+}
+
+#three-container {
+    width: 100%;
+    height: 100%;
+}
+
+#loading-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.7);
+    padding: 10px 20px;
+    border-radius: 5px;
+    display: none;
+}
+
+/* Control Panel */
+#control-panel {
+    width: 280px;
+    background-color: #1e1e1e;
+    padding: 15px;
+    border-left: 1px solid #333;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+h2, h3 {
+    margin: 0 0 10px 0;
+    color: #fff;
+}
+
+.control-group {
+    background: #2a2a2a;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+input[type="text"], input[type="number"] {
+    width: 100%;
+    background: #333;
+    border: 1px solid #444;
+    color: #fff;
+    padding: 4px;
+    margin-bottom: 5px;
+}
+
+button {
+    background: #3498db;
+    border: none;
+    color: white;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    width: 100%;
+}
+
+button:hover {
+    background: #2980b9;
+}
+
+.playback-controls {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 5px;
+}
+
+.slider-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+input[type="range"] {
+    width: 100%;
+}
+
+#frame-counter {
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+#legend {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px;
+    font-size: 11px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.color-box {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+}

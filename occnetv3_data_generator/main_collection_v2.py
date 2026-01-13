@@ -1,6 +1,6 @@
 """
-OccNetV3 数据采集主脚本 (v2 - 支持NPC和红绿灯控制)
-生成符合 occ_network 训练要求的数据集
+OccNetV3 数据采集主脚本 (v2 - 修复卡死问题)
+参考 dense_occupancy_collection 的正确初始化流程
 """
 import sys
 import os
@@ -30,14 +30,14 @@ from config.camera_config import TESLA_CAMERAS
 from config.occupancy_config import (
     X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION, DEPTH_CAMERA_CONFIG
 )
-from sensors.camera_manager import GrayCameraManager
+from sensors.camera_manager import CameraManager
 from sensors.depth_suite import DepthSuite
 from processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
 from data_utils.data_saver import OccNetDataSaver
 
 
 def setup_carla(host='localhost', port=2000, town='Town10HD'):
-    """连接CARLA并设置同步模式"""
+    """连接CARLA并设置同步模式 (参考 dense_occupancy_collection)"""
     print(f"[CARLA] 连接到 {host}:{port}")
     client = carla.Client(host, port)
     client.set_timeout(10.0)
@@ -50,44 +50,54 @@ def setup_carla(host='localhost', port=2000, town='Town10HD'):
         print(f"  ⚠️  使用当前地图")
         world = client.get_world()
 
-    # 设置同步模式
+    world.set_weather(carla.WeatherParameters.ClearNoon)
+
+    # 设置同步模式 (与 dense_occupancy_collection 完全一致)
     settings = world.get_settings()
     settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 1.0 / 10.0  # 10Hz
+    settings.fixed_delta_seconds = 0.05  # 20Hz
     world.apply_settings(settings)
-    print(f"  ✓ 同步模式: 10Hz")
+    print(f"  ✓ 同步模式: 20Hz (delta={settings.fixed_delta_seconds}s)")
 
-    return client, world
+    # 设置 Traffic Manager (尝试多个端口)
+    tm = None
+    tm_ports = [8000, 8001, 8002, 8010, 8015]
+    for tm_port in tm_ports:
+        try:
+            tm = client.get_trafficmanager(tm_port)
+            tm.set_synchronous_mode(True)
+            print(f"  ✓ Traffic Manager: Port {tm_port}")
+            break
+        except RuntimeError as e:
+            if "bind" in str(e).lower():
+                continue
+            raise
 
+    if tm is None:
+        print(f"  ⚠️ Traffic Manager 无法启动,所有端口被占用")
 
-def set_traffic_lights_green(world):
-    """设置所有红绿灯为常绿状态"""
-    print("\n[TrafficLights] 设置所有红绿灯为常绿...")
-    traffic_lights = world.get_actors().filter('traffic.traffic_light')
-
+    # 设置红绿灯常绿
+    traffic_lights = world.get_actors().filter('traffic.traffic_light*')
     if traffic_lights:
         for tl in traffic_lights:
             tl.set_state(carla.TrafficLightState.Green)
-            tl.set_green_time(999999.0)
             tl.freeze(True)
-
         print(f"  ✓ 已设置 {len(traffic_lights)} 个红绿灯为常绿")
     else:
         print(f"  ⚠️ 未找到红绿灯")
 
+    return client, world
 
-def spawn_vehicle(world, spawn_point=None, tm_port=8000):
-    """生成ego车辆"""
+
+def spawn_vehicle(world, spawn_point=None):
+    """生成ego车辆 (使用 autopilot)"""
     bp_lib = world.get_blueprint_library()
 
     target_vehicles = [
-        'vehicle.tesla.model3',
         'vehicle.lincoln.mkz_2017',
+        'vehicle.tesla.model3',
         'vehicle.audi.etron',
-        'vehicle.audi.a2',
-        'vehicle.nissan.patrol',
-        'vehicle.nissan.micra',
-        'vehicle.toyota.prius'
+        'vehicle.nissan.patrol'
     ]
 
     vehicle_bp = None
@@ -99,15 +109,12 @@ def spawn_vehicle(world, spawn_point=None, tm_port=8000):
             break
 
     if vehicle_bp is None:
-        print("[Vehicle] 警告: 未找到指定车型, 尝试使用任意车辆...")
         bps = bp_lib.filter('vehicle.*')
         if not bps:
             raise RuntimeError("无法找到任何车辆蓝图!")
         vehicle_bp = bps[0]
-        for bp in bps:
-            if int(bp.get_attribute('number_of_wheels')) == 4:
-                vehicle_bp = bp
-                break
+
+    vehicle_bp.set_attribute('role_name', 'hero')
 
     if spawn_point is None:
         spawn_points = world.get_map().get_spawn_points()
@@ -118,28 +125,28 @@ def spawn_vehicle(world, spawn_point=None, tm_port=8000):
     vehicle = world.spawn_actor(vehicle_bp, spawn_point)
     print(f"[Vehicle] 已生成: {vehicle.type_id}")
 
-    # 启用自动驾驶 (带端口重试)
-    tm_ports = [tm_port, 8001, 8002, 8003, 8004, 8005]
-    autopilot_enabled = False
+    # 物理稳定
+    for _ in range(10):
+        world.tick()
+
+    # 启用 autopilot (尝试多个 TM 端口)
+    tm_ports = [8000, 8001, 8002, 8010, 8015]
     for port in tm_ports:
         try:
             vehicle.set_autopilot(True, port)
-            print(f"  ✓ 自动驾驶已启用 (TM Port: {port})")
-            autopilot_enabled = True
-            break
+            print(f"  ✓ Autopilot 已启用 (TM Port: {port})")
+            return vehicle
         except RuntimeError as e:
             if "bind" in str(e).lower():
                 continue
             raise
 
-    if not autopilot_enabled:
-        print(f"  ⚠️ 自动驾驶启用失败")
-
+    print(f"  ⚠️ Autopilot 无法启用,但车辆已生成")
     return vehicle
 
 
-def spawn_npcs(world, num_vehicles=30, num_walkers=10, tm_port=8000):
-    """生成 NPC 车辆和行人"""
+def spawn_npcs(world, num_vehicles=30, num_walkers=10):
+    """生成 NPC 车辆和行人 (参考 scenario_manager.py)"""
     bp_lib = world.get_blueprint_library()
     spawn_points = world.get_map().get_spawn_points()
     npc_actors = []
@@ -202,10 +209,9 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10, tm_port=8000):
                 spawn_idx += 1
                 if npc:
                     try:
-                        npc.set_autopilot(True, tm_port)
-                    except RuntimeError as e:
-                        if "bind" not in str(e).lower():
-                            raise
+                        npc.set_autopilot(True)
+                    except:
+                        pass
 
                     npc_actors.append(npc)
                     spawned_count += 1
@@ -245,6 +251,7 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10, tm_port=8000):
                     controllers.append(controller)
                     spawned_walkers += 1
 
+        # 启动行人 AI
         world.tick()
         for controller in controllers:
             controller.start()
@@ -253,7 +260,8 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10, tm_port=8000):
 
         print(f"  - pedestrian: {spawned_walkers} 个")
 
-    # 物理稳定
+    # 物理稳定 (重要!)
+    print("  等待 NPC 物理稳定...")
     for _ in range(10):
         world.tick()
 
@@ -261,50 +269,54 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10, tm_port=8000):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='OccNetV3 数据采集 (支持NPC)')
+    parser = argparse.ArgumentParser(description='OccNetV3 数据采集 (修复版)')
     parser.add_argument('--host', default='localhost', help='CARLA服务器地址')
     parser.add_argument('--port', type=int, default=2000, help='CARLA端口')
     parser.add_argument('--town', default='Town10HD', help='地图名称')
-    parser.add_argument('--output', default='D:/code/carla/dataset_occnet_v3', help='输出目录')
-    parser.add_argument('--frames', type=int, default=10, help='采集帧数')
-    parser.add_argument('--scene', default='scene', help='场景名称')
+    parser.add_argument('--output', default='d:/code/carla/dataset_10k_bak', help='输出目录 (默认: dataset_10k_bak)')
+    parser.add_argument('--frames', type=int, default=10, help='采集帧数 (默认: 10)')
+    parser.add_argument('--scene', default='scene', help='场景名称前缀')
     parser.add_argument('--num-vehicles', type=int, default=30, help='NPC车辆数量')
     parser.add_argument('--num-walkers', type=int, default=10, help='NPC行人数量')
+    parser.add_argument('--clear-output', action='store_true', default=True, help='生成前清空输出目录 (默认: True)')
     args = parser.parse_args()
+
+    # 清空输出目录
+    import shutil
+    output_dir = Path(args.output)
+    if output_dir.exists() and args.clear_output:
+        print(f"[Cleanup] 清理输出目录: {output_dir}")
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     client, world = None, None
     vehicle = None
-    npc_actors = []
     camera_manager = None
     depth_suite = None
-    voxel_generator = None
-    data_saver = None
+    npc_actors = []
 
     try:
         # 1. 设置CARLA
         client, world = setup_carla(args.host, args.port, args.town)
 
-        # 2. 设置红绿灯常绿
-        set_traffic_lights_green(world)
-
-        # 3. 生成车辆
+        # 2. 生成车辆
+        print("\n[1/5] 生成 ego 车辆...")
         vehicle = spawn_vehicle(world)
-        time.sleep(1.0)
 
-        # 4. 生成 NPC
+        # 3. 生成 NPC
+        print("\n[2/5] 生成 NPC...")
         npc_actors = spawn_npcs(world, args.num_vehicles, args.num_walkers)
 
-        # 5. 附加传感器
-        print("\n[Sensors] 附加8个灰度相机...")
-        camera_manager = GrayCameraManager(world, vehicle)
+        # 4. 附加传感器
+        print("\n[3/5] 附加传感器...")
+        camera_manager = CameraManager(world, vehicle)
         camera_manager.start_listening()
+        print(f"  ✓ 相机: {len(TESLA_CAMERAS)} 个")
 
-        print("[Sensors] 附加深度相机套件 (8路CubeMap)...")
         depth_suite = DepthSuite(world, vehicle, DEPTH_CAMERA_CONFIG)
-        time.sleep(0.5)
+        print(f"  ✓ 深度相机: 8 个")
 
-        # 6. 初始化生成器和保存器
-        print("[VoxelGenerator] 初始化 Ground Truth 生成器...")
+        # 5. 初始化生成器和保存器
         voxel_generator = GroundTruthVoxelGenerator(
             x_range=X_RANGE,
             y_range=Y_RANGE,
@@ -312,16 +324,26 @@ def main():
             resolution=RESOLUTION
         )
         data_saver = OccNetDataSaver(args.output, args.scene)
+        print(f"  ✓ 体素生成器和数据保存器")
 
-        # 7. 保存相机标定
-        print("\n[Calibration] 保存相机标定...")
+        # 6. 保存相机标定
         intrinsics = {cam['id']: camera_manager.get_intrinsics(cam['id']) for cam in TESLA_CAMERAS}
         extrinsics = {cam['id']: camera_manager.get_extrinsics(cam['id']) for cam in TESLA_CAMERAS}
         data_saver.save_calibration(intrinsics, extrinsics, TESLA_CAMERAS)
+        print(f"  ✓ 相机标定已保存")
 
-        # 8. 采集数据
-        print(f"\n[Collection] 开始采集 {args.frames} 帧数据...")
-        print("="*60)
+        # 7. 等待传感器初始化 (重要!)
+        print("\n[4/5] 等待传感器初始化...")
+        for i in range(10):
+            world.tick()
+            if i % 2 == 0:
+                print(f"  {(i+1)*10}%")
+        print("  ✓ 传感器就绪")
+
+        # 8. 开始采集
+        print(f"\n{'='*60}")
+        print(f"[5/5] 开始采集 {args.frames} 帧".center(60))
+        print(f"{'='*60}\n")
 
         ego_pose_prev = None
 
@@ -338,7 +360,7 @@ def main():
             try:
                 depth_data = depth_suite.get_data(timeout=2.0)
             except Exception as e:
-                print(f"  帧 {frame_idx}: 深度相机数据获取失败 ({e}),跳过")
+                print(f"  帧 {frame_idx}: 深度相机失败 ({e}),跳过")
                 continue
 
             ego_transform = vehicle.get_transform()
@@ -359,7 +381,7 @@ def main():
 
             ego_pose_prev = ego_pose.copy()
 
-            images = {cam['id']: camera_data[cam['id']]['image'] for cam in TESLA_CAMERAS}
+            images = {cam['id']: camera_data[cam['id']] for cam in TESLA_CAMERAS}
 
             sample_id = data_saver.generate_sample_id()
 
@@ -374,14 +396,15 @@ def main():
             )
 
             elapsed_time = time.time() - start_time
-            print(f"  ✓ 帧 {frame_idx}/{args.frames}: {sample_id} "
-                  f"非空={non_empty_count} "
+            print(f"  ✓ 帧 {frame_idx+1}/{args.frames}: {sample_id} "
+                  f"非空={non_empty_count:,} "
                   f"耗时={elapsed_time:.2f}s")
 
         # 9. 完成
         data_saver.finalize()
         print("\n" + "="*60)
         print("✅ 数据采集完成!")
+        print(f"输出目录: {args.output}")
 
     except KeyboardInterrupt:
         print("\n用户中断")
@@ -392,21 +415,44 @@ def main():
         traceback.print_exc()
 
     finally:
-        # 清理
+        # 清理资源
         print("\n[Cleanup] 清理资源...")
+
         if camera_manager:
-            camera_manager.destroy()
+            try:
+                camera_manager.destroy()
+            except:
+                pass
+
         if depth_suite:
-            depth_suite.destroy()
+            try:
+                depth_suite.destroy()
+            except:
+                pass
+
         if vehicle and vehicle.is_alive:
-            vehicle.destroy()
+            try:
+                vehicle.destroy()
+            except:
+                pass
+
+        # 清理 NPC
         for npc in npc_actors:
-            if npc.is_alive:
-                npc.destroy()
+            try:
+                if npc.is_alive:
+                    npc.destroy()
+            except:
+                pass
+
+        # 关闭同步模式
         if world:
-            settings = world.get_settings()
-            settings.synchronous_mode = False
-            world.apply_settings(settings)
+            try:
+                settings = world.get_settings()
+                settings.synchronous_mode = False
+                world.apply_settings(settings)
+            except:
+                pass
+
         print("  ✓ 清理完成")
 
 

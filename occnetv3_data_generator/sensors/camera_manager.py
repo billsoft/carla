@@ -1,6 +1,6 @@
 """
 Tesla 8相机管理器
-输出单通道灰度图像 (1, 960, 1280) float16
+支持 Bayer RGGB Raw 数据采集
 """
 import carla
 import numpy as np
@@ -11,9 +11,9 @@ from typing import Dict, Optional
 from config.camera_config import TESLA_CAMERAS, CAMERA_SENSOR_CONFIG
 
 
-class GrayCameraManager:
+class CameraManager:
     """
-    管理8个RGB相机,自动转换为单通道灰度
+    管理8个RGB相机, 支持 Bayer RGGB 转换
     """
 
     def __init__(self, world: carla.World, vehicle: carla.Vehicle):
@@ -45,6 +45,11 @@ class GrayCameraManager:
             camera_bp.set_attribute('enable_postprocess_effects',
                                    str(CAMERA_SENSOR_CONFIG['enable_postprocess_effects']))
         
+        # 自动应用 Town10HD_Opt 的后处理配置文件 (解决光照问题)
+        map_name = self.world.get_map().name
+        if 'Town10HD_Opt' in map_name and camera_bp.has_attribute('post_process_profile'):
+            camera_bp.set_attribute('post_process_profile', 'Town10HD_Opt')
+
         if camera_bp.has_attribute('gamma'):
             camera_bp.set_attribute('gamma', str(CAMERA_SENSOR_CONFIG['gamma']))
             
@@ -85,33 +90,47 @@ class GrayCameraManager:
             print(f"  ✓ {cam_id}: FOV={cam_config['fov']}° "
                   f"pos={pos} rot={rot}")
 
-        print(f"[GrayCameraManager] 已创建 {len(self.cameras)} 个相机")
+        print(f"[CameraManager] 已创建 {len(self.cameras)} 个相机")
 
     def start_listening(self):
         """开始监听所有相机"""
         for cam_id, camera in self.cameras.items():
             # 使用弱引用避免循环引用
             weak_self = weakref.ref(self)
-            camera.listen(lambda image, cid=cam_id: GrayCameraManager._camera_callback(weak_self, cid, image))
+            # 获取该相机的 raw_type 配置
+            raw_type = 'uint8'
+            for cfg in self.camera_configs:
+                if cfg['id'] == cam_id:
+                    raw_type = cfg.get('raw_type', 'uint8')
+                    break
+            
+            camera.listen(lambda image, cid=cam_id, rt=raw_type: CameraManager._camera_callback(weak_self, cid, image, rt))
 
-        print(f"[GrayCameraManager] 已启动所有相机监听")
+        print(f"[CameraManager] 已启动所有相机监听")
 
     @staticmethod
-    def _camera_callback(weak_self, cam_id: str, image: carla.Image):
+    def _camera_callback(weak_self, cam_id: str, image: carla.Image, raw_type: str):
         """
         相机回调函数
         Args:
             weak_self: 弱引用
             cam_id: 相机ID
             image: CARLA Image对象
+            raw_type: 数据类型 ('bayer_rggb' or 'uint8')
         """
         self = weak_self()
         if self is None:
             return
 
         try:
-            # 转换为numpy数组
-            gray_image = GrayCameraManager.convert_to_grayscale(image)
+            processed_data = None
+            
+            if raw_type == 'bayer_rggb':
+                # 转换为 Bayer RGGB (uint16)
+                processed_data = CameraManager.convert_to_bayer(image)
+            else:
+                # 默认: 转灰度 float16 (兼容旧逻辑)
+                processed_data = CameraManager.convert_to_grayscale(image)
 
             # 放入队列
             if self.data_queues[cam_id].full():
@@ -121,22 +140,47 @@ class GrayCameraManager:
                     pass
 
             self.data_queues[cam_id].put({
-                'image': gray_image,          # (1, 960, 1280) float16
+                'data': processed_data,
                 'timestamp': image.timestamp,
                 'frame': image.frame,
+                'raw_type': raw_type
             })
 
         except Exception as e:
-            print(f"[GrayCameraManager] {cam_id} 回调错误: {e}")
+            print(f"[CameraManager] {cam_id} 回调错误: {e}")
+
+    @staticmethod
+    def convert_to_bayer(image: carla.Image) -> np.ndarray:
+        """
+        将CARLA RGB图像转换为单通道 Bayer RGGB (uint16)
+        """
+        # 解析BGRA数据
+        bgra = np.frombuffer(image.raw_data, dtype=np.uint8)
+        bgra = bgra.reshape((image.height, image.width, 4))
+        
+        # 创建 Bayer 容器
+        bayer = np.zeros((image.height, image.width), dtype=np.uint8)
+        
+        # RGGB 采样:
+        # R: (0,0), (0,2)... -> bgra[..., 2]
+        # G: (0,1), (1,0)... -> bgra[..., 1]
+        # B: (1,1), (1,3)... -> bgra[..., 0]
+        
+        # Row 0, 2, ... (Even rows)
+        bayer[0::2, 0::2] = bgra[0::2, 0::2, 2] # R
+        bayer[0::2, 1::2] = bgra[0::2, 1::2, 1] # G
+        
+        # Row 1, 3, ... (Odd rows)
+        bayer[1::2, 0::2] = bgra[1::2, 0::2, 1] # G
+        bayer[1::2, 1::2] = bgra[1::2, 1::2, 0] # B
+        
+        # 转为 uint16 (左移 8 位, 模拟 16-bit 传感器)
+        return bayer.astype(np.uint16) << 8
 
     @staticmethod
     def convert_to_grayscale(image: carla.Image) -> np.ndarray:
         """
         将CARLA RGB图像转换为单通道灰度图像
-
-        Args:
-            image: CARLA Image对象 (BGRA格式)
-
         Returns:
             gray_image: (1, H, W) float16, 归一化到 [0, 1]
         """
@@ -148,7 +192,6 @@ class GrayCameraManager:
         bgr = array[:, :, :3]  # (H, W, 3)
 
         # 转灰度: Y = 0.299*R + 0.587*G + 0.114*B (ITU-R BT.601标准)
-        # CARLA是BGR顺序
         gray = (
             0.114 * bgr[:, :, 0].astype(np.float32) +  # B
             0.587 * bgr[:, :, 1].astype(np.float32) +  # G
@@ -167,14 +210,9 @@ class GrayCameraManager:
     def get_synced_frame(self, timeout: float = 2.0) -> Optional[Dict]:
         """
         获取同步的一帧数据 (8个相机)
-
-        Args:
-            timeout: 超时时间(秒)
-
         Returns:
             {
-                'cam_front_main': {'image': (1,960,1280), 'timestamp': float, 'frame': int},
-                'cam_front_wide': {...},
+                'cam_front_main': {'data': array, 'timestamp': float, 'frame': int, 'raw_type': str},
                 ...
             }
             如果超时返回None
@@ -200,10 +238,6 @@ class GrayCameraManager:
     def get_intrinsics(self, cam_id: str) -> np.ndarray:
         """
         获取相机内参矩阵
-
-        Args:
-            cam_id: 相机ID
-
         Returns:
             K: (3, 3) 内参矩阵
         """
@@ -236,10 +270,6 @@ class GrayCameraManager:
     def get_extrinsics(self, cam_id: str) -> np.ndarray:
         """
         获取相机外参矩阵 (相机相对车辆的变换)
-
-        Args:
-            cam_id: 相机ID
-
         Returns:
             T: (4, 4) 外参矩阵 (车辆→相机)
         """
@@ -278,4 +308,4 @@ class GrayCameraManager:
 
         self.cameras.clear()
         self.data_queues.clear()
-        print(f"[GrayCameraManager] 已销毁所有相机")
+        print(f"[CameraManager] 已销毁所有相机")

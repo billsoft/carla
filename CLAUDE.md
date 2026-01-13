@@ -11,6 +11,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Fix bugs directly in the original file, do NOT create new files with suffixes like `_fix`, `_fixed`, `_new`, etc.
 - 直接修改源文件，保持代码库整洁
 
+**⚠️ 关键教训：相机方向和地面渲染问题 / Critical Lessons Learned:**
+
+**1. 相机坐标系方向 (Camera Coordinate System):**
+- ❌ **错误**: 在CARLA中，Y轴正方向是"右侧"，负方向是"左侧" (从驾驶员视角)
+- ⚠️ 之前的错误配置: `left_pillar: [0.5, 0.9, 1.3]` (实际在右侧)
+- ✅ 正确配置: `left_pillar: [0.5, -0.9, 1.3]` (真正的左侧)
+- 📌 口诀: **想象你坐在驾驶位，左手侧 = Y负值，右手侧 = Y正值**
+- 📌 后视相机需要向后延伸 (X轴负值增大) 避免车内玻璃遮挡
+- 📌 侧后视相机需要向外延伸 (Y轴绝对值增大) 避免车架遮挡
+
+**2. 地面层双重渲染问题 (Double Ground Layer Issue):**
+- ❌ **根本原因**: Map API 和 Static Mesh 同时生成地面，导致"双层地面"和"浮空灰层"
+- 问题现象:
+  - 地面上随机出现灰色/白色条纹层
+  - 路沿石 (Barrier) 覆盖在泥土 (Terrain) 之上
+  - 地面下方出现灰色墙体 (向下填充复制了地表颜色)
+- ✅ **修复方案** (已在 ground_truth_voxel_generator.py 中实现):
+  1. **排除地面类型的 Static Mesh 光栅化**: 在 `_fill_static_environment()` 中跳过 `Roads, Sidewalks, Terrain, Ground, RoadLines` 的 EnvironmentObjects
+  2. **地下填充统一使用 Terrain (14)**: 不再复制地表材质，统一填充棕色泥土
+  3. **地面保护机制**: Actor BBox 不能覆盖已存在的地面体素 (防止车辆 BBox 插入地下形成坑洞)
+- 📌 诊断工具: `occnetv3_data_generator/diagnose_ground_layer.py` 可分析体素分布
+
+**3. DNG 格式支持 (Bayer RAW Image Format):**
+- ⚠️ 需要安装: `pip install Pillow piexif` (在 carla 环境中)
+- ⚠️ OpenCV 不支持 CFA PhotometricInterpretation=32803 格式的 DNG
+- ✅ 备用方案: 使用 `rawpy` 库 (`pip install rawpy`)
+- ✅ 降级方案: 如果两者都不可用，自动保存为 .npy 格式
+
 **Python 环境管理 / Python Environment:**
 - 本项目使用 **conda** 管理 Python 环境
 - **主环境名称：carla** (用于 CARLA 数据采集和训练)
