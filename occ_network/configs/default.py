@@ -4,9 +4,9 @@ class Config:
     patch_size = 16
     num_cameras = 8
     in_channels = 1
-    voxel_size = (512, 512, 40)
+    voxel_size = (400, 400, 32)
     voxel_resolution = 0.2
-    pc_range = [-51.2, -51.2, -2.0, 51.2, 51.2, 6.0]
+    pc_range = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
     num_classes = 18
     class_names = ['empty', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle', 'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck', 'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade', 'vegetation', 'free']
     class_weights = [0.1, 3.0, 12.0, 5.0, 3.0, 8.0, 12.0, 15.0, 10.0, 5.0, 5.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 0.5]
@@ -27,7 +27,7 @@ class Config:
     use_flow = True
     use_sparse = True
     use_coarse_to_fine = True
-    coarse_voxel_size = (128, 128, 10)
+    coarse_voxel_size = (100, 100, 8)
     chunk_size_z = 10
     sparsity_threshold = 0.1
     use_fp16_input = True
@@ -46,7 +46,7 @@ class Config:
         'rear': {'id': 7, 'fov': 80.0, 'position': [-1.5, 0.0, 1.2], 'rotation': [0.0, 0.0, 180.0]},
     }
     batch_size = 1
-    num_workers = 4
+    num_workers = 0
     max_epochs = 100
     lr = 1e-4
     weight_decay = 0.01

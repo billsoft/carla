@@ -1,26 +1,26 @@
 """
-OccNetV3 体素配置 - 512x512x40 体素网格
-对齐网络输入输出要求
+OccNetV3 体素配置 - 400x400x32 体素网格
+用户自定义高分辨率配置 (0.2m分辨率, 80m×80m×6.4m覆盖范围)
 """
 
 # ========== 体素空间定义 ==========
 # 车辆坐标系 (右手系): X前 Y左 Z上
 # 原点: 车辆后轴中心地面 (Z=0)
 
-X_RANGE = [-51.2, 51.2]  # 前后各51.2米
-Y_RANGE = [-51.2, 51.2]  # 左右各51.2米
-Z_RANGE = [-1.0, 5.4]    # 地下1米到地上5.4米 (对齐 nuScenes/Occ3D 标准)
+X_RANGE = [-40.0, 40.0]  # 前后各40米 (总80米)
+Y_RANGE = [-40.0, 40.0]  # 左右各40米 (总80米)
+Z_RANGE = [-1.0, 5.4]    # 地下1米到地上5.4米 (总6.4米)
 
 RESOLUTION = 0.2  # 每个体素边长 0.2米 (20cm)
 
 # 计算网格尺寸: (X_max - X_min) / resolution
 GRID_SIZE = (
-    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 512
-    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 512
-    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 32 (原40改为32)
+    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 400
+    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 400
+    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 32
 )
 
-assert GRID_SIZE == (512, 512, 32), f"网格尺寸计算错误: {GRID_SIZE}"
+assert GRID_SIZE == (400, 400, 32), f"网格尺寸计算错误: {GRID_SIZE}"
 
 PC_RANGE = [X_RANGE[0], Y_RANGE[0], Z_RANGE[0], X_RANGE[1], Y_RANGE[1], Z_RANGE[1]]
 

@@ -173,9 +173,9 @@ class OccNetDataSaver:
             images: {cam_id: data}
                     data可以是 np.ndarray (float16)
                     也可以是 {'data': np.ndarray, 'raw_type': str} (Bayer)
-            occupancy: (512, 512, 40) uint8 语义标签
-            flow: (3, 512, 512, 40) float16 流场 (可选)
-            flow_mask: (512, 512, 40) uint8 流场掩码 (可选)
+            occupancy: (400, 400, 32) uint8 语义标签
+            flow: (3, 400, 400, 32) float16 流场 (可选)
+            flow_mask: (400, 400, 32) uint8 流场掩码 (可选)
             ego_pose: (4, 4) float32 全局位姿 (可选)
             ego_motion: (4, 4) float32 帧间运动 (可选)
         """
@@ -206,7 +206,7 @@ class OccNetDataSaver:
                 np.save(img_dir / f'cam_{cam_index}.npy', img)
 
         # 2. 保存occupancy
-        assert occupancy.shape == (512, 512, 32), f"occupancy形状错误: {occupancy.shape}"
+        assert occupancy.shape == (400, 400, 32), f"occupancy形状错误: {occupancy.shape}"
         np.save(self.output_dir / 'occupancy' / f'{sample_id}.npy', occupancy.astype(np.uint8))
 
         # 3. 保存flow (可选)

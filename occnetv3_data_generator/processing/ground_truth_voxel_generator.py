@@ -26,9 +26,9 @@ class GroundTruthVoxelGenerator:
     """
     
     def __init__(self,
-                 x_range=(-51.2, 51.2),  # ⭐ 更新默认值
-                 y_range=(-51.2, 51.2),  # ⭐ 更新默认值
-                 z_range=(-4.0, 4.0),
+                 x_range=(-40.0, 40.0),  # ⭐ 更新默认值
+                 y_range=(-40.0, 40.0),  # ⭐ 更新默认值
+                 z_range=(-1.0, 5.4),
                  resolution=0.2):  # ⭐ 修正默认值: 0.5 -> 0.2
         self.x_range = x_range
         self.y_range = y_range
@@ -48,7 +48,7 @@ class GroundTruthVoxelGenerator:
         # self.cache_resolution = 0.5 # Deprecated: use self.resolution
 
         # ⭐ 添加验证
-        expected_grid_size = [512, 512, 40]
+        expected_grid_size = [400, 400, 32]
         if self.grid_size != expected_grid_size:
             print(f"[警告] 体素网格尺寸 {self.grid_size} 与标准 {expected_grid_size} 不一致")
 

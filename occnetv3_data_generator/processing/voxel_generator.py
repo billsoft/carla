@@ -41,8 +41,8 @@ except ImportError:
         return points_ego
 
 # OccNet V3 配置
-GRID_SIZE = (512, 512, 40)
-PC_RANGE = [-51.2, -51.2, -2.0, 51.2, 51.2, 6.0]  # x_min, y_min, z_min, x_max, y_max, z_max
+GRID_SIZE = (400, 400, 32)
+PC_RANGE = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]  # x_min, y_min, z_min, x_max, y_max, z_max
 RESOLUTION = 0.2
 
 # CARLA 语义标签 -> OccNet 类别映射

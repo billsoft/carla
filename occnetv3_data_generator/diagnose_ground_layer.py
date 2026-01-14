@@ -56,8 +56,8 @@ def load_occupancy(file_path):
         occupancy = np.load(file_path)
         data = {
             'occupancy': occupancy,
-            'x_range': [-51.2, 51.2],
-            'y_range': [-51.2, 51.2],
+            'x_range': [-40.0, 40.0],
+            'y_range': [-40.0, 40.0],
             'z_range': [-4.0, 4.0],
             'resolution': 0.2,
             'grid_size': occupancy.shape
@@ -70,7 +70,7 @@ def load_occupancy(file_path):
         raise ValueError(f"不支持的文件格式: {file_path.suffix}")
 
     # 验证形状
-    expected_shape = (512, 512, 40)
+    expected_shape = (400, 400, 32)
     if occupancy.shape != expected_shape:
         print(f"⚠️ 警告: 体素形状 {occupancy.shape} 与预期 {expected_shape} 不一致")
 

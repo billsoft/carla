@@ -50,7 +50,11 @@ class LightweightTemporalFusion(nn.Module):
         device = current_bev.device
         hist_bev, hist_pose = self.history[-1], self.history_poses[-1]
         if current_pose is not None and hist_pose is not None:
-            rel_pose = torch.bmm(torch.inverse(current_pose), hist_pose)
+            # torch.inverse() 不支持 FP16, 需要临时转换到 FP32
+            dtype = current_pose.dtype
+            current_pose_fp32 = current_pose.float()
+            hist_pose_fp32 = hist_pose.float()
+            rel_pose = torch.bmm(torch.inverse(current_pose_fp32), hist_pose_fp32).to(dtype)
         else:
             rel_pose = ego_motion if ego_motion is not None else torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1)
         aligned = self.motion_comp(hist_bev.to(device), rel_pose)

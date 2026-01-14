@@ -268,7 +268,7 @@ def get_occupancy(frame_id):
         return abort(404)
         
     try:
-        # 加载 npy: (512, 512, 40) uint8
+        # 加载 npy: (400, 400, 32) uint8
         grid = np.load(occ_path)
 
         # 提取非空体素 (排除 free=0)

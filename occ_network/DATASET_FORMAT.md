@@ -42,11 +42,11 @@
 │    ├── cam_6.npy   │                                                    │
 │    └── cam_7.npy  ─┘                                                    │
 │                                                                         │
-│  occupancy.npy  ────────→  semantic: [B, 512, 512, 40]  (int64)        │
+│  occupancy.npy  ────────→  semantic: [B, 400, 400, 32]  (int64)        │
 │                                                                         │
-│  flow.npy  ─────────────→  flow: [B, 3, 512, 512, 40]  (float16)       │
+│  flow.npy  ─────────────→  flow: [B, 3, 400, 400, 32]  (float16)       │
 │                                                                         │
-│  flow_mask.npy  ────────→  flow_mask: [B, 512, 512, 40]  (bool)        │
+│  flow_mask.npy  ────────→  flow_mask: [B, 400, 400, 32]  (bool)        │
 │                                                                         │
 │  ego_motion.npy  ───────→  ego_motion: [B, 4, 4]  (float32)            │
 │                                                                         │
@@ -81,11 +81,11 @@
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| X范围 | [-51.2m, 51.2m] | 前后各51.2米 |
-| Y范围 | [-51.2m, 51.2m] | 左右各51.2米 |
-| Z范围 | [-2.0m, 6.0m] | 地下2米到地上6米 |
+| X范围 | [-40.0m, 40.0m] | 前后各40米 |
+| Y范围 | [-40.0m, 40.0m] | 左右各40米 |
+| Z范围 | [-1.0m, 5.4m] | 地下1米到地上5.4米 |
 | 体素分辨率 | 0.2m | 每个体素20cm边长 |
-| 体素网格 | 512 × 512 × 40 | 约1050万个体素 |
+| 体素网格 | 400 × 400 × 32 | 约512万个体素 |
 
 **体素索引到世界坐标的转换**：
 
@@ -93,17 +93,44 @@
 def voxel_to_world(voxel_idx, pc_range, resolution=0.2):
     """
     voxel_idx: [i, j, k] 体素索引
-    pc_range: [-51.2, -51.2, -2.0, 51.2, 51.2, 6.0]
+    pc_range: [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
     """
     x = voxel_idx[0] * resolution + pc_range[0]  # X世界坐标
     y = voxel_idx[1] * resolution + pc_range[1]  # Y世界坐标
     z = voxel_idx[2] * resolution + pc_range[2]  # Z世界坐标
     return [x, y, z]
 
-# 示例：体素 [256, 256, 10] 对应世界坐标
-# x = 256 * 0.2 + (-51.2) = 0.0  (车辆正中央)
-# y = 256 * 0.2 + (-51.2) = 0.0  (车辆正中央)
-# z = 10 * 0.2 + (-2.0) = 0.0    (地面高度)
+# 示例：体素 [200, 200, 5] 对应世界坐标
+# x = 200 * 0.2 + (-40.0) = 0.0  (车辆正中央)
+# y = 200 * 0.2 + (-40.0) = 0.0  (车辆正中央)
+# z = 5 * 0.2 + (-1.0) = 0.0     (地面高度)
+```
+
+### 1.4 图像格式支持
+
+OccNetV3 数据加载器支持两种图像格式:
+
+**1. DNG (推荐) - 12-bit Bayer RGGB 原始格式**
+- 直接从 CARLA 相机读取,无损质量
+- 格式: 单通道 12-bit (0-4095)
+- 尺寸: 1280×960 (W×H)
+- 加载时自动归一化到 [0, 1]
+- **依赖**: `pip install rawpy` (推荐) 或 OpenCV
+- **路径**: `dataset/cameras/cam_<camera_id>/<frame_id>.dng`
+
+**2. NPY - float16 预处理格式**
+- 已归一化的单通道图像
+- 形状: (1, 960, 1280) - CHW格式
+- 数据类型: float16 或 float32
+- 值范围: [0, 1]
+- **路径**: `dataset/images/<frame_id>/cam_<camera_id>.npy`
+
+**数据加载器会自动识别格式**，优先尝试 NPY，如果不存在则尝试 DNG。无需手动转换。
+
+**示例: 安装 DNG 加载依赖**
+```bash
+# 在 deepsys 或 carla 环境中
+pip install rawpy
 ```
 
 ---
@@ -328,7 +355,7 @@ IGNORE_LABEL = 255  # 忽略标签 (不计入loss)
 
 ```python
 occupancy_spec = {
-    'shape': (512, 512, 40),     # (X, Y, Z)
+    'shape': (400, 400, 32),     # (X, Y, Z)
     'dtype': np.int64,           # 或 np.uint8 (如果类别<256)
     'value_range': [0, 17],      # 18个类别
     'special_values': {
@@ -342,9 +369,9 @@ occupancy_spec = {
 ```python
 def save_occupancy(sample_id, occupancy, output_dir):
     """
-    occupancy: np.array of shape (512, 512, 40), dtype=int64
+    occupancy: np.array of shape (400, 400, 32), dtype=int64
     """
-    assert occupancy.shape == (512, 512, 40)
+    assert occupancy.shape == (400, 400, 32)
     assert occupancy.dtype in [np.int64, np.uint8, np.int32]
     
     # 检查值范围
@@ -365,15 +392,15 @@ def pointcloud_to_occupancy(points, labels, pc_range, voxel_size=0.2):
     """
     points: (N, 3) 点云坐标 [x, y, z]
     labels: (N,) 每个点的语义标签
-    pc_range: [-51.2, -51.2, -2.0, 51.2, 51.2, 6.0]
+    pc_range: [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
     
-    返回: (512, 512, 40) 占用网格
+    返回: (400, 400, 32) 占用网格
     """
     # 计算网格尺寸
     grid_size = [
-        int((pc_range[3] - pc_range[0]) / voxel_size),  # 512
-        int((pc_range[4] - pc_range[1]) / voxel_size),  # 512
-        int((pc_range[5] - pc_range[2]) / voxel_size),  # 40
+        int((pc_range[3] - pc_range[0]) / voxel_size),  # 400
+        int((pc_range[4] - pc_range[1]) / voxel_size),  # 400
+        int((pc_range[5] - pc_range[2]) / voxel_size),  # 32
     ]
     
     # 初始化为空
@@ -411,9 +438,9 @@ def bbox3d_to_occupancy(bboxes, labels, pc_range, voxel_size=0.2):
         - rotation: yaw angle (radians)
     labels: list of int, semantic label for each bbox
     
-    返回: (512, 512, 40) 占用网格
+    返回: (400, 400, 32) 占用网格
     """
-    grid_size = [512, 512, 40]
+    grid_size = [400, 400, 32]
     occupancy = np.zeros(grid_size, dtype=np.uint8)
     
     for bbox, label in zip(bboxes, labels):
@@ -448,7 +475,7 @@ def bbox3d_to_occupancy(bboxes, labels, pc_range, voxel_size=0.2):
 
 ```python
 flow_spec = {
-    'shape': (3, 512, 512, 40),   # (方向, X, Y, Z)
+    'shape': (3, 400, 400, 32),   # (方向, X, Y, Z)
     'dtype': np.float16,
     'channels': {
         0: 'flow_x',              # X方向速度 (m/frame)
@@ -465,7 +492,7 @@ flow_spec = {
 
 ```python
 flow_mask_spec = {
-    'shape': (512, 512, 40),
+    'shape': (400, 400, 32),
     'dtype': np.bool_,            # 或 np.uint8
     'meaning': {
         True: '有效流场 (动态物体)',
@@ -481,8 +508,8 @@ DYNAMIC_CLASSES = {2, 3, 4, 5, 6, 7, 9, 10}  # bicycle, bus, car, 等
 
 ```python
 def generate_flow_from_tracking(
-    occupancy_t0,      # 当前帧占用 (512, 512, 40)
-    occupancy_t1,      # 下一帧占用 (512, 512, 40)
+    occupancy_t0,      # 当前帧占用 (400, 400, 32)
+    occupancy_t1,      # 下一帧占用 (400, 400, 32)
     tracking_info,     # 物体追踪信息
     pc_range,
     voxel_size=0.2
@@ -494,8 +521,8 @@ def generate_flow_from_tracking(
         - center_t0: [x, y, z]
         - center_t1: [x, y, z]
     """
-    flow = np.zeros((3, 512, 512, 40), dtype=np.float32)
-    flow_mask = np.zeros((512, 512, 40), dtype=np.bool_)
+    flow = np.zeros((3, 400, 400, 32), dtype=np.float32)
+    flow_mask = np.zeros((400, 400, 32), dtype=np.bool_)
     
     for obj in tracking_info:
         if obj['class_id'] not in DYNAMIC_CLASSES:
@@ -521,8 +548,8 @@ def generate_flow_from_tracking(
 ```python
 def save_flow(sample_id, flow, flow_mask, output_dir):
     """
-    flow: (3, 512, 512, 40) float16
-    flow_mask: (512, 512, 40) bool
+    flow: (3, 400, 400, 32) float16
+    flow_mask: (400, 400, 32) bool
     """
     # 保存流场
     flow_path = os.path.join(output_dir, 'flow', f'{sample_id}.npy')
@@ -811,9 +838,9 @@ def create_sample(
     sample_id,
     output_dir,
     camera_images,      # dict: {cam_0: (1,960,1280), ...}
-    occupancy,          # (512, 512, 40) int
-    flow,               # (3, 512, 512, 40) float
-    flow_mask,          # (512, 512, 40) bool
+    occupancy,          # (400, 400, 32) int
+    flow,               # (3, 400, 400, 32) float
+    flow_mask,          # (400, 400, 32) bool
     ego_pose,           # (4, 4) float
     ego_motion,         # (4, 4) float
 ):
@@ -831,19 +858,19 @@ def create_sample(
     # 2. 保存占用标签
     occ_dir = os.path.join(output_dir, 'occupancy')
     os.makedirs(occ_dir, exist_ok=True)
-    assert occupancy.shape == (512, 512, 40)
+    assert occupancy.shape == (400, 400, 32)
     np.save(os.path.join(occ_dir, f'{sample_id}.npy'), occupancy.astype(np.uint8))
     
     # 3. 保存流场
     flow_dir = os.path.join(output_dir, 'flow')
     os.makedirs(flow_dir, exist_ok=True)
-    assert flow.shape == (3, 512, 512, 40)
+    assert flow.shape == (3, 400, 400, 32)
     np.save(os.path.join(flow_dir, f'{sample_id}.npy'), flow.astype(np.float16))
     
     # 4. 保存流场掩码
     mask_dir = os.path.join(output_dir, 'flow_mask')
     os.makedirs(mask_dir, exist_ok=True)
-    assert flow_mask.shape == (512, 512, 40)
+    assert flow_mask.shape == (400, 400, 32)
     np.save(os.path.join(mask_dir, f'{sample_id}.npy'), flow_mask.astype(np.uint8))
     
     # 5. 保存时序数据
@@ -874,7 +901,7 @@ def generate_synthetic_sample(sample_id, output_dir):
         camera_images[f'cam_{cam_id}'] = img
     
     # 2. 生成占用标签
-    occupancy = np.zeros((512, 512, 40), dtype=np.uint8)
+    occupancy = np.zeros((400, 400, 32), dtype=np.uint8)
     
     # 地面 (z = 0~2，对应体素索引 10~12)
     occupancy[:, :, 10:12] = 11  # driveable_surface
@@ -892,8 +919,8 @@ def generate_synthetic_sample(sample_id, output_dir):
         occupancy[px-1:px+1, py-1:py+1, 12:20] = 7  # pedestrian
     
     # 3. 生成流场
-    flow = np.zeros((3, 512, 512, 40), dtype=np.float16)
-    flow_mask = np.zeros((512, 512, 40), dtype=np.uint8)
+    flow = np.zeros((3, 400, 400, 32), dtype=np.float16)
+    flow_mask = np.zeros((400, 400, 32), dtype=np.uint8)
     
     # 给车辆添加流场
     car_mask = (occupancy == 4)
@@ -996,7 +1023,7 @@ def validate_dataset(dataset_dir):
             occ_path = os.path.join(dataset_dir, 'occupancy', f'{sample_id}.npy')
             if os.path.exists(occ_path):
                 occ = np.load(occ_path)
-                if occ.shape != (512, 512, 40):
+                if occ.shape != (400, 400, 32):
                     errors.append(f"{sample_id} occupancy: 形状错误 {occ.shape}")
                 unique = np.unique(occ)
                 invalid = [v for v in unique if v not in range(18) and v != 255]
@@ -1009,7 +1036,7 @@ def validate_dataset(dataset_dir):
             flow_path = os.path.join(dataset_dir, 'flow', f'{sample_id}.npy')
             if os.path.exists(flow_path):
                 flow = np.load(flow_path)
-                if flow.shape != (3, 512, 512, 40):
+                if flow.shape != (3, 400, 400, 32):
                     errors.append(f"{sample_id} flow: 形状错误 {flow.shape}")
     else:
         warnings.append("缺少 train.txt")
@@ -1093,7 +1120,7 @@ def get_occupancy_from_carla(world, ego_location, pc_range, voxel_size=0.2):
     """
     从CARLA获取3D占用标签
     """
-    grid_size = (512, 512, 40)
+    grid_size = (400, 400, 32)
     occupancy = np.zeros(grid_size, dtype=np.uint8)
     
     # CARLA类别到我们类别的映射
@@ -1141,9 +1168,9 @@ def get_occupancy_from_carla(world, ego_location, pc_range, voxel_size=0.2):
 | 数据类型 | 文件格式 | 形状 | dtype | 必需 |
 |---------|---------|------|-------|-----|
 | 相机图像 | npy | (1, 960, 1280) × 8 | float16 | ✅ |
-| 占用标签 | npy | (512, 512, 40) | uint8 | ✅ |
-| 流场 | npy | (3, 512, 512, 40) | float16 | ⚪ |
-| 流场掩码 | npy | (512, 512, 40) | uint8 | ⚪ |
+| 占用标签 | npy | (400, 400, 32) | uint8 | ✅ |
+| 流场 | npy | (3, 400, 400, 32) | float16 | ⚪ |
+| 流场掩码 | npy | (400, 400, 32) | uint8 | ⚪ |
 | Ego Pose | npy | (4, 4) | float32 | ⚪ |
 | Ego Motion | npy | (4, 4) | float32 | ⚪ |
 | 内参 | json | - | - | ✅ |
@@ -1151,7 +1178,7 @@ def get_occupancy_from_carla(world, ego_location, pc_range, voxel_size=0.2):
 
 **关键要点**：
 1. 图像必须是 **(1, 960, 1280)** 单通道，归一化到 **[0, 1]**
-2. 占用标签必须是 **(512, 512, 40)**，值范围 **[0, 17]** + **255**(忽略)
+2. 占用标签必须是 **(400, 400, 32)**，值范围 **[0, 17]** + **255**(忽略)
 3. 体素坐标系遵循 **右手系**，原点在车辆后轴中心
 4. 时序数据需要按场景连续，支持帧间对齐
 

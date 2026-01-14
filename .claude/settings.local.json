@@ -98,7 +98,13 @@
       "Bash(/c/Users/bills/.conda/envs/car/python.exe:*)",
       "Bash(C:Usersbills.condaenvscarlapython.exe d:codecarlaverify_occnet_v3_data.py)",
       "Bash( wc -l /d/code/carla/dataset_10k_bak/*.txt)",
-      "Read(//tmp/claude/d--code-carla/tasks/**)"
+      "Read(//tmp/claude/d--code-carla/tasks/**)",
+      "Bash(wc:*)",
+      "Bash(/c/ProgramData/anaconda3/envs/deepsys/python.exe d:/code/carla/occ_network/verify_network_shapes.py)",
+      "Read(//c/Users/bills/.claude/plans/**)",
+      "Bash(/c/ProgramData/anaconda3/envs/deepsys/python.exe:*)",
+      "Bash(/c/ProgramData/anaconda3/envs/carla/python.exe:*)",
+      "Bash(tee:*)"
     ],
     "deny": [],
     "ask": []

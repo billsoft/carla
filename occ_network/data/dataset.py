@@ -20,6 +20,38 @@ class OccDataset(Dataset):
                 return [line.strip() for line in f.readlines()]
         return []
 
+    def _load_dng_image(self, dng_path):
+        """加载DNG格式图像 (12-bit Bayer RAW)"""
+        try:
+            # 方法1: 使用 rawpy (推荐,速度快)
+            import rawpy
+            with rawpy.imread(dng_path) as raw:
+                # 读取原始 Bayer 数据
+                img = raw.raw_image_visible.astype(np.float32)
+                # 归一化到 [0, 1]
+                img = img / raw.white_level  # 12-bit: white_level=4095
+                # 添加通道维度 (1, H, W)
+                img = img[np.newaxis, :, :]
+                return img
+        except ImportError:
+            print(f"⚠️ rawpy 未安装,尝试使用 OpenCV 加载 DNG...")
+        except Exception as e:
+            print(f"⚠️ rawpy 加载失败: {e}, 尝试使用 OpenCV...")
+
+        # 方法2: 使用 OpenCV (备用)
+        try:
+            import cv2
+            img = cv2.imread(dng_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise ValueError(f"无法加载 DNG: {dng_path}")
+            # 12-bit归一化
+            img = img.astype(np.float32) / 4095.0
+            # 添加通道维度
+            img = img[np.newaxis, :, :]
+            return img
+        except Exception as e:
+            raise ValueError(f"DNG加载失败 (rawpy和OpenCV均失败): {e}\n请安装 rawpy: pip install rawpy")
+
     def __len__(self):
         return max(len(self.samples), 100)
 
@@ -32,31 +64,50 @@ class OccDataset(Dataset):
         sample_id = self.samples[idx]
         images = []
         for cam_id in range(self.config.num_cameras if self.config else 8):
-            img_path = os.path.join(self.data_dir, 'images', sample_id, f'cam_{cam_id}.npy')
-            if os.path.exists(img_path):
-                img = np.load(img_path)
+            # 支持 DNG 和 NPY 两种格式
+            img_path_npy = os.path.join(self.data_dir, 'images', sample_id, f'cam_{cam_id}.npy')
+            img_path_dng = os.path.join(self.data_dir, 'cameras', f'cam_{cam_id}', f'{sample_id}.dng')
+
+            if os.path.exists(img_path_npy):
+                # NPY 格式 (已归一化的 float16)
+                img = np.load(img_path_npy)
+            elif os.path.exists(img_path_dng):
+                # DNG 格式 (12-bit Bayer RAW)
+                img = self._load_dng_image(img_path_dng)
             else:
+                # 降级: 生成随机数据
                 img = np.random.randn(1, 960, 1280).astype(np.float32)
             images.append(img)
         images = np.stack(images, axis=0)
+
+        # 从 config 动态读取体素尺寸
+        voxel_size = self.config.voxel_size if self.config else (400, 400, 32)
+
         occ_path = os.path.join(self.data_dir, 'occupancy', f'{sample_id}.npy')
         if os.path.exists(occ_path):
             occupancy = np.load(occ_path)
         else:
-            occupancy = np.zeros((512, 512, 40), dtype=np.int64)
+            occupancy = np.zeros(voxel_size, dtype=np.int64)
+
         flow_path = os.path.join(self.data_dir, 'flow', f'{sample_id}.npy')
         if os.path.exists(flow_path):
             flow = np.load(flow_path)
         else:
-            flow = np.zeros((3, 512, 512, 40), dtype=np.float32)
+            flow = np.zeros((3,) + voxel_size, dtype=np.float32)
+
         dtype = torch.float16 if self.use_fp16 else torch.float32
-        return {'images': torch.from_numpy(images).to(dtype), 'semantic': torch.from_numpy(occupancy).long(), 'flow': torch.from_numpy(flow).to(dtype), 'flow_mask': torch.ones(512, 512, 40, dtype=torch.bool)}
+        return {
+            'images': torch.from_numpy(images).to(dtype),
+            'semantic': torch.from_numpy(occupancy).long(),
+            'flow': torch.from_numpy(flow).to(dtype),
+            'flow_mask': torch.ones(voxel_size, dtype=torch.bool)
+        }
 
     def _generate_synthetic_sample(self, idx):
         config = self.config
         num_cameras = config.num_cameras if config else 8
         image_size = config.image_size if config else (960, 1280)
-        voxel_size = config.voxel_size if config else (512, 512, 40)
+        voxel_size = config.voxel_size if config else (400, 400, 32)
         num_classes = config.num_classes if config else 18
         dtype = torch.float16 if self.use_fp16 else torch.float32
         images = torch.randn(num_cameras, 1, *image_size, dtype=dtype)
