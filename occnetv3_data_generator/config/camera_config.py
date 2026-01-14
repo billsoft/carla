@@ -39,14 +39,15 @@ TESLA_CAMERAS = [
         'bit_depth': 12,
     },
 
-    # 侧向前视 (B柱) - 参考 dense_occupancy_collection
+    # 侧向前视 (B柱) - ⭐ 修复: 增大Y轴偏移量,避免拍摄车内
+    # 特斯拉实际安装: B柱靠近车窗外侧,朝向侧前方约60°
     {
         'id': 'left_pillar',
         'index': 3,
         'fov': 80.0,
-        'position': [0.0, -0.9, 1.7],   # B柱左侧 (x=0, z=1.7 对齐 dense_occupancy)
-        'rotation': [0.0, -60.0, 0.0],  # yaw=-60° 左前方 (对齐 dense_occupancy)
-        'description': '左B柱 (Left Pillar, 左前方 -60°)',
+        'position': [0.0, -1.1, 1.7],   # ⭐ Y=-1.1 (增加向左偏移,避免车架遮挡)
+        'rotation': [0.0, -55.0, 0.0],  # ⭐ yaw=-55° (轻微调整朝向,更贴近侧前方)
+        'description': '左B柱 (Left Pillar, 左前方 -55°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
@@ -54,43 +55,45 @@ TESLA_CAMERAS = [
         'id': 'right_pillar',
         'index': 4,
         'fov': 80.0,
-        'position': [0.0, 0.9, 1.7],    # B柱右侧 (x=0, z=1.7 对齐 dense_occupancy)
-        'rotation': [0.0, 60.0, 0.0],   # yaw=60° 右前方 (对齐 dense_occupancy)
-        'description': '右B柱 (Right Pillar, 右前方 60°)',
+        'position': [0.0, 1.1, 1.7],    # ⭐ Y=1.1 (增加向右偏移,避免车架遮挡)
+        'rotation': [0.0, 55.0, 0.0],   # ⭐ yaw=55° (轻微调整朝向,更贴近侧前方)
+        'description': '右B柱 (Right Pillar, 右前方 55°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
 
-    # 侧向后视 (翼子板/Repeater) - 参考 dense_occupancy_collection
+    # 侧向后视 (翼子板/Repeater) - ⭐ 修复: 调整朝向角度避免拍摄车内
+    # 特斯拉实际安装: 翼子板前轮上方,朝向侧后方约45°
     {
         'id': 'left_repeater',
         'index': 5,
-        'fov': 100.0,                   # FOV=100 (对齐 dense_occupancy)
-        'position': [1.2, -0.9, 1.0],   # x=1.2, z=1.0 (对齐 dense_occupancy)
-        'rotation': [0.0, -160.0, 0.0], # yaw=-160° 左后方 (对齐 dense_occupancy)
-        'description': '左后视镜 (Left Repeater, 左后方 -160°)',
+        'fov': 100.0,
+        'position': [1.0, -1.0, 1.0],   # ⭐ X=1.0 (靠近前轮), Y=-1.0 (翼子板外侧)
+        'rotation': [0.0, -130.0, 0.0], # ⭐ yaw=-130° (侧后方45°, 避免拍摄车身)
+        'description': '左Repeater (Left Repeater, 左后方 -130°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
     {
         'id': 'right_repeater',
         'index': 6,
-        'fov': 100.0,                   # FOV=100 (对齐 dense_occupancy)
-        'position': [1.2, 0.9, 1.0],    # x=1.2, z=1.0 (对齐 dense_occupancy)
-        'rotation': [0.0, 160.0, 0.0],  # yaw=160° 右后方 (对齐 dense_occupancy)
-        'description': '右后视镜 (Right Repeater, 右后方 160°)',
+        'fov': 100.0,
+        'position': [1.0, 1.0, 1.0],    # ⭐ X=1.0 (靠近前轮), Y=1.0 (翼子板外侧)
+        'rotation': [0.0, 130.0, 0.0],  # ⭐ yaw=130° (侧后方45°, 避免拍摄车身)
+        'description': '右Repeater (Right Repeater, 右后方 130°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
 
-    # 后视 - 参考 dense_occupancy_collection
+    # 后视 - ⭐ 修复: 向车尾外延15-20cm,避免穿模遮挡
+    # 特斯拉实际安装: 车牌上方,轻微俯仰向下,视距50米
     {
         'id': 'rear',
         'index': 7,
-        'fov': 120.0,                   # FOV=120 (对齐 dense_occupancy, 广角)
-        'position': [-2.5, 0.0, 1.2],   # x=-2.5 (对齐 dense_occupancy)
-        'rotation': [-5.0, 180.0, 0.0], # pitch=-5°, yaw=180° (对齐 dense_occupancy)
-        'description': '后视 (Rear, 正后方 180°, 俯仰 -5°)',
+        'fov': 120.0,
+        'position': [-2.7, 0.0, 1.2],   # ⭐ X=-2.7 (向车尾外延20cm, 原-2.5)
+        'rotation': [-8.0, 180.0, 0.0], # ⭐ pitch=-8° (增加俯仰角,看清地面)
+        'description': '后视 (Rear, 正后方 180°, 俯仰 -8°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
