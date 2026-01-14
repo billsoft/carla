@@ -5,11 +5,11 @@ OccNetV3 体素配置 - 512x512x40 体素网格
 
 # ========== 体素空间定义 ==========
 # 车辆坐标系 (右手系): X前 Y左 Z上
-# 原点: 车辆后轴中心地面
+# 原点: 车辆后轴中心地面 (Z=0)
 
 X_RANGE = [-51.2, 51.2]  # 前后各51.2米
 Y_RANGE = [-51.2, 51.2]  # 左右各51.2米
-Z_RANGE = [-2.0, 6.0]    # 地下2米到地上6米
+Z_RANGE = [-1.0, 5.4]    # 地下1米到地上5.4米 (对齐 nuScenes/Occ3D 标准)
 
 RESOLUTION = 0.2  # 每个体素边长 0.2米 (20cm)
 
@@ -17,10 +17,10 @@ RESOLUTION = 0.2  # 每个体素边长 0.2米 (20cm)
 GRID_SIZE = (
     int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 512
     int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 512
-    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 40
+    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 32 (原40改为32)
 )
 
-assert GRID_SIZE == (512, 512, 40), f"网格尺寸计算错误: {GRID_SIZE}"
+assert GRID_SIZE == (512, 512, 32), f"网格尺寸计算错误: {GRID_SIZE}"
 
 PC_RANGE = [X_RANGE[0], Y_RANGE[0], Z_RANGE[0], X_RANGE[1], Y_RANGE[1], Z_RANGE[1]]
 

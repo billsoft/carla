@@ -87,13 +87,28 @@ class ScenarioManager:
     def spawn_npcs(self, num_vehicles=30, num_walkers=10):
         """生成 NPC (车辆 + 行人)"""
         print(f"\n[Scenario] 正在生成 NPC (Vehicles={num_vehicles}, Walkers={num_walkers})...")
+        start_time = time.time()
+
+        vehicle_start = time.time()
         self._spawn_vehicles(num_vehicles)
+        vehicle_time = time.time() - vehicle_start
+        print(f"  ⏱️  车辆生成耗时: {vehicle_time:.2f}s")
+
+        walker_start = time.time()
         self._spawn_walkers(num_walkers)
-        
+        walker_time = time.time() - walker_start
+        print(f"  ⏱️  行人生成耗时: {walker_time:.2f}s")
+
         # 稳定物理
         print("  [Scenario] 等待 NPC 物理稳定...")
+        stab_start = time.time()
         for _ in range(10):
             self.world.tick()
+        stab_time = time.time() - stab_start
+        print(f"  ⏱️  物理稳定耗时: {stab_time:.2f}s")
+
+        total_time = time.time() - start_time
+        print(f"  ✅ NPC 生成完成，总耗时: {total_time:.2f}s")
 
     def _spawn_vehicles(self, count):
         """生成 NPC 车辆 (按比例)"""

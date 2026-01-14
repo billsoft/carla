@@ -77,7 +77,7 @@ class CameraManager:
             rot = cam_config['rotation']
             transform = carla.Transform(
                 carla.Location(x=pos[0], y=pos[1], z=pos[2]),
-                carla.Rotation(pitch=rot[0], yaw=rot[2], roll=rot[1])  # CARLA: pitch, yaw, roll
+                carla.Rotation(pitch=rot[0], yaw=rot[1], roll=rot[2])  # CARLA: pitch, yaw, roll (修复: rotation数组顺序)
             )
 
             # 生成相机

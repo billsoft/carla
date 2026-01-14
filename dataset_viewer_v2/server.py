@@ -129,19 +129,50 @@ def set_dataset():
 
 @app.route('/api/image/<frame_id>/<int:cam_idx>')
 def get_image(frame_id, cam_idx):
-    """获取指定帧和相机的图像 (支持 DNG 和 NPY)"""
+    """获取指定帧和相机的图像 (优先 PNG > DNG > NPY)"""
     dataset_path = Path(CURRENT_DATASET_DIR)
     img_dir = dataset_path / 'images' / frame_id
 
-    # 1. 尝试加载 DNG
+    # 🔥 0. 优先加载 PNG 缩略图 (最快, 无需处理)
+    png_path = img_dir / f"cam_{cam_idx}.png"
+    if png_path.exists():
+        try:
+            logger.debug(f"✓ Loading PNG thumbnail: {png_path.name}")
+            return send_file(str(png_path), mimetype='image/png')
+        except Exception as e:
+            logger.warning(f"PNG loading failed: {e}, falling back to DNG")
+
+    # 1. 尝试加载 DNG (需要实时处理)
     dng_path = img_dir / f"cam_{cam_idx}.dng"
 
     if dng_path.exists():
         try:
+            # ⭐⭐⭐ 性能优化: DNG-to-PNG 持久化缓存 ⭐⭐⭐
+            # 为每个 DNG 生成对应的 PNG 缓存文件
+            # 缓存路径: dataset/.png_cache/images/frame_id/cam_idx.png
+
+            cache_dir = dataset_path / '.png_cache' / 'images' / frame_id
+            cache_png = cache_dir / f"cam_{cam_idx}.png"
+
+            # 检查缓存是否存在且比 DNG 新
+            use_cache = False
+            if cache_png.exists():
+                dng_mtime = dng_path.stat().st_mtime
+                png_mtime = cache_png.stat().st_mtime
+                if png_mtime >= dng_mtime:
+                    use_cache = True
+                    logger.debug(f"✓ Using PNG cache: {cache_png.relative_to(dataset_path)}")
+
+            # 如果缓存可用，直接返回
+            if use_cache:
+                return send_file(str(cache_png), mimetype='image/png')
+
+            # 缓存不可用，需要加载 DNG 并生成缓存
+            logger.debug(f"⚙ Generating PNG cache for: {dng_path.name}")
+
             # 尝试使用 rawpy (最佳质量 + 缓存 + 性能优化)
             try:
                 import rawpy
-                logger.debug(f"Loading DNG with rawpy: {dng_path.name}")
                 # 使用缓存处理
                 rgb = process_dng_cached(str(dng_path))
 
@@ -174,11 +205,13 @@ def get_image(frame_id, cam_idx):
             # 转换为 PIL Image
             img_pil = Image.fromarray(rgb)
 
-            # 转为 JPEG
-            img_io = io.BytesIO()
-            img_pil.save(img_io, 'JPEG', quality=85)
-            img_io.seek(0)
-            return send_file(img_io, mimetype='image/jpeg')
+            # 保存 PNG 缓存到磁盘
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            img_pil.save(str(cache_png), 'PNG', optimize=True)
+            logger.debug(f"✓ PNG cache saved: {cache_png.relative_to(dataset_path)}")
+
+            # 返回 PNG (直接发送缓存文件，避免二次编码)
+            return send_file(str(cache_png), mimetype='image/png')
 
         except Exception as e:
             logger.error(f"❌ Error loading DNG {dng_path.name}: {type(e).__name__}: {e}")

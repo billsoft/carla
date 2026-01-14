@@ -37,11 +37,11 @@ class OccNetDataSaver:
         │       ├── cam_0.dng  (12-bit Bayer RGGB)
         │       └── ...
         ├── occupancy/
-        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 40) uint8
+        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 32) uint8
         ├── flow/
-        │   └── scene_XXXX_frame_YYYY.npy  (3, 512, 512, 40) float16
+        │   └── scene_XXXX_frame_YYYY.npy  (3, 512, 512, 32) float16
         ├── flow_mask/
-        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 40) uint8
+        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 32) uint8
         ├── ego_pose/
         │   └── scene_XXXX_frame_YYYY.npy  (4, 4) float32
         ├── ego_motion/
@@ -206,16 +206,16 @@ class OccNetDataSaver:
                 np.save(img_dir / f'cam_{cam_index}.npy', img)
 
         # 2. 保存occupancy
-        assert occupancy.shape == (512, 512, 40), f"occupancy形状错误: {occupancy.shape}"
+        assert occupancy.shape == (512, 512, 32), f"occupancy形状错误: {occupancy.shape}"
         np.save(self.output_dir / 'occupancy' / f'{sample_id}.npy', occupancy.astype(np.uint8))
 
         # 3. 保存flow (可选)
         if flow is not None:
-            assert flow.shape == (3, 512, 512, 40), f"flow形状错误: {flow.shape}"
+            assert flow.shape == (3, 512, 512, 32), f"flow形状错误: {flow.shape}"
             np.save(self.output_dir / 'flow' / f'{sample_id}.npy', flow.astype(np.float16))
 
         if flow_mask is not None:
-            assert flow_mask.shape == (512, 512, 40), f"flow_mask形状错误: {flow_mask.shape}"
+            assert flow_mask.shape == (512, 512, 32), f"flow_mask形状错误: {flow_mask.shape}"
             np.save(self.output_dir / 'flow_mask' / f'{sample_id}.npy', flow_mask.astype(np.uint8))
 
         # 4. 保存ego数据 (可选)
@@ -233,14 +233,15 @@ class OccNetDataSaver:
     def _save_bayer_dng(self, bayer_data: np.ndarray, path: Path):
         """
         保存单通道 Bayer RGGB 为 12-bit DNG/TIFF 格式
+        同时生成 PNG 缩略图用于 Web 加载
         """
         # 转换为 uint16
         bayer_u16 = bayer_data.astype(np.uint16)
-        
+
         # 16-bit → 12-bit: 右移 4 位
         # [0, 65535] → [0, 4095]
         bayer_12bit = (bayer_u16 >> 4).astype(np.uint16)
-        
+
         try:
             # 使用 PIL/Pillow 保存单通道 16-bit TIFF（DNG 兼容）
             if DNG_AVAILABLE:
@@ -263,6 +264,9 @@ class OccNetDataSaver:
                 # 保存为 TIFF（DNG 本质上是特殊的 TIFF）
                 img_pil.save(str(path), format='TIFF', compression='none', exif=exif_bytes)
 
+                # 🔥 新增：生成 PNG 缩略图 (640×480)
+                self._generate_png_thumbnail(bayer_data, path)
+
             else:
                 # 降级: 使用 OpenCV 保存为 TIFF 后重命名
                 path_tif = path.with_suffix('.tif')
@@ -277,11 +281,72 @@ class OccNetDataSaver:
                     path.unlink()
                 path_tif.rename(path)
 
+                # 🔥 新增：生成 PNG 缩略图
+                self._generate_png_thumbnail(bayer_data, path)
+
         except Exception as e:
             print(f"  [错误] DNG保存失败: {e}")
             # Fallback: 保存为 NPY
             path_npy = path.with_suffix('.npy')
             np.save(path_npy, bayer_data)
+
+    def _generate_png_thumbnail(self, bayer_data: np.ndarray, dng_path: Path):
+        """
+        从 Bayer RAW 数据生成 PNG 缩略图
+
+        Args:
+            bayer_data: (H, W) uint16 Bayer RGGB 数据
+            dng_path: DNG 文件路径 (用于生成 PNG 路径)
+        """
+        try:
+            # PNG 路径: cam_0.dng → cam_0.png
+            png_path = dng_path.with_suffix('.png')
+
+            # 简单 Bayer → RGB 转换
+            if CV2_AVAILABLE:
+                # 方法1: 使用 OpenCV (更快)
+                bayer_u16 = bayer_data.astype(np.uint16)
+                rgb = cv2.cvtColor(bayer_u16, cv2.COLOR_BAYER_RGGB2RGB)
+
+                # 归一化到 8-bit
+                max_val = np.max(rgb)
+                if max_val > 0:
+                    rgb_u8 = (rgb / max_val * 255).astype(np.uint8)
+                else:
+                    rgb_u8 = rgb.astype(np.uint8)
+
+                # 缩放到 640×480 (原始 1280×960 的一半)
+                rgb_small = cv2.resize(rgb_u8, (640, 480), interpolation=cv2.INTER_AREA)
+
+                # 保存 PNG
+                cv2.imwrite(str(png_path), cv2.cvtColor(rgb_small, cv2.COLOR_RGB2BGR), [
+                    cv2.IMWRITE_PNG_COMPRESSION, 3  # 压缩等级 3 (快速)
+                ])
+
+            elif DNG_AVAILABLE:
+                # 方法2: 使用 PIL (降级方案)
+                # 直接将 Bayer 数据归一化为灰度图
+                bayer_u16 = bayer_data.astype(np.uint16)
+                max_val = np.max(bayer_u16)
+                if max_val > 0:
+                    gray_u8 = (bayer_u16 / max_val * 255).astype(np.uint8)
+                else:
+                    gray_u8 = bayer_u16.astype(np.uint8)
+
+                # 创建 PIL 图像并缩放
+                img_pil = Image.fromarray(gray_u8, mode='L')
+                img_small = img_pil.resize((640, 480), Image.Resampling.LANCZOS)
+
+                # 保存 PNG
+                img_small.save(str(png_path), format='PNG', compress_level=3)
+
+            else:
+                # 无可用库，跳过缩略图生成
+                return
+
+        except Exception as e:
+            # 缩略图生成失败不影响主流程
+            print(f"  [警告] PNG 缩略图生成失败: {e}")
 
     def _get_cam_index(self, cam_id: str) -> int:
         """从相机ID提取索引"""

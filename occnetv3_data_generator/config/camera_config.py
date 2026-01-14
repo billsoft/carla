@@ -7,12 +7,12 @@ Tesla 8相机配置 - 用于OccNetV3
 # 与occ_network/configs/default.py完全对齐
 
 TESLA_CAMERAS = [
-    # 前方3相机 (三焦段)
+    # 前方3相机 (三焦段) - 对齐 dense_occupancy_collection
     {
         'id': 'front_main',
         'index': 0,
         'fov': 50.0,
-        'position': [1.5, 0.0, 1.5],    # (x, y, z) 米
+        'position': [1.0, 0.0, 1.6],    # (x, y, z) 米 (对齐 dense_occupancy)
         'rotation': [0.0, 0.0, 0.0],    # (pitch, yaw, roll) 度
         'description': '前主相机 (Main, 50° 标准视野)',
         'raw_type': 'bayer_rggb',
@@ -22,7 +22,7 @@ TESLA_CAMERAS = [
         'id': 'front_wide',
         'index': 1,
         'fov': 120.0,
-        'position': [1.5, 0.0, 1.5],
+        'position': [1.0, 0.0, 1.6],    # 对齐 dense_occupancy
         'rotation': [0.0, 0.0, 0.0],
         'description': '前广角 (Wide, 120° 广角)',
         'raw_type': 'bayer_rggb',
@@ -32,21 +32,21 @@ TESLA_CAMERAS = [
         'id': 'front_narrow',
         'index': 2,
         'fov': 35.0,
-        'position': [1.5, 0.0, 1.5],
+        'position': [1.0, 0.0, 1.6],    # 对齐 dense_occupancy
         'rotation': [0.0, 0.0, 0.0],
         'description': '前窄角/长焦 (Narrow, 35° 长焦)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
 
-    # 侧向前视 (B柱) - ⚠️ 修复: 交换左右侧位置 (Y坐标取反)
+    # 侧向前视 (B柱) - 参考 dense_occupancy_collection
     {
         'id': 'left_pillar',
         'index': 3,
         'fov': 80.0,
-        'position': [0.5, -0.9, 1.3],   # B柱左侧 (驾驶员左手侧)
-        'rotation': [0.0, 0.0, 55.0],   # 指向左前方
-        'description': '左B柱 (Left Pillar, 55° 朝向)',
+        'position': [0.0, -0.9, 1.7],   # B柱左侧 (x=0, z=1.7 对齐 dense_occupancy)
+        'rotation': [0.0, -60.0, 0.0],  # yaw=-60° 左前方 (对齐 dense_occupancy)
+        'description': '左B柱 (Left Pillar, 左前方 -60°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
@@ -54,43 +54,43 @@ TESLA_CAMERAS = [
         'id': 'right_pillar',
         'index': 4,
         'fov': 80.0,
-        'position': [0.5, 0.9, 1.3],    # B柱右侧 (驾驶员右手侧)
-        'rotation': [0.0, 0.0, -55.0],  # 指向右前方
-        'description': '右B柱 (Right Pillar, -55° 朝向)',
+        'position': [0.0, 0.9, 1.7],    # B柱右侧 (x=0, z=1.7 对齐 dense_occupancy)
+        'rotation': [0.0, 60.0, 0.0],   # yaw=60° 右前方 (对齐 dense_occupancy)
+        'description': '右B柱 (Right Pillar, 右前方 60°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
 
-    # 侧向后视 (翼子板/Repeater) - ⚠️ 修复: 交换左右侧位置 + 向外延伸避免玻璃遮挡
+    # 侧向后视 (翼子板/Repeater) - 参考 dense_occupancy_collection
     {
         'id': 'left_repeater',
         'index': 5,
-        'fov': 80.0,
-        'position': [1.0, -1.2, 0.8],   # 左翼子板 (向外延伸到 -1.2)
-        'rotation': [0.0, 0.0, 135.0],  # 指向左后方
-        'description': '左后视镜 (Left Repeater, 135° 朝向)',
+        'fov': 100.0,                   # FOV=100 (对齐 dense_occupancy)
+        'position': [1.2, -0.9, 1.0],   # x=1.2, z=1.0 (对齐 dense_occupancy)
+        'rotation': [0.0, -160.0, 0.0], # yaw=-160° 左后方 (对齐 dense_occupancy)
+        'description': '左后视镜 (Left Repeater, 左后方 -160°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
     {
         'id': 'right_repeater',
         'index': 6,
-        'fov': 80.0,
-        'position': [1.0, 1.2, 0.8],    # 右翼子板 (向外延伸到 1.2)
-        'rotation': [0.0, 0.0, -135.0], # 指向右后方
-        'description': '右后视镜 (Right Repeater, -135° 朝向)',
+        'fov': 100.0,                   # FOV=100 (对齐 dense_occupancy)
+        'position': [1.2, 0.9, 1.0],    # x=1.2, z=1.0 (对齐 dense_occupancy)
+        'rotation': [0.0, 160.0, 0.0],  # yaw=160° 右后方 (对齐 dense_occupancy)
+        'description': '右后视镜 (Right Repeater, 右后方 160°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
 
-    # 后视 - ⚠️ 修复: 向后移动避免车内遮挡
+    # 后视 - 参考 dense_occupancy_collection
     {
         'id': 'rear',
         'index': 7,
-        'fov': 80.0,
-        'position': [-2.0, 0.0, 1.2],   # 车尾 (向后移动到 -2.0)
-        'rotation': [0.0, 0.0, 180.0],  # 朝向后方
-        'description': '后视 (Rear, 180° 朝向)',
+        'fov': 120.0,                   # FOV=120 (对齐 dense_occupancy, 广角)
+        'position': [-2.5, 0.0, 1.2],   # x=-2.5 (对齐 dense_occupancy)
+        'rotation': [-5.0, 180.0, 0.0], # pitch=-5°, yaw=180° (对齐 dense_occupancy)
+        'description': '后视 (Rear, 正后方 180°, 俯仰 -5°)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },

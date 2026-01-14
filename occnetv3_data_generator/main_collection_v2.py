@@ -120,33 +120,56 @@ def spawn_vehicle(world, spawn_point=None):
         spawn_points = world.get_map().get_spawn_points()
         if not spawn_points:
              raise RuntimeError("地图没有定义生成点!")
-        spawn_point = np.random.choice(spawn_points)
 
-    vehicle = world.spawn_actor(vehicle_bp, spawn_point)
-    print(f"[Vehicle] 已生成: {vehicle.type_id}")
+        # 尝试多个生成点（避免碰撞）
+        vehicle = None
+        for attempt in range(min(10, len(spawn_points))):
+            try:
+                spawn_point = spawn_points[attempt]
+                vehicle = world.spawn_actor(vehicle_bp, spawn_point)
+                print(f"[Vehicle] 已生成: {vehicle.type_id} (尝试 {attempt+1} 次)")
+                break
+            except RuntimeError as e:
+                if "collision" in str(e).lower():
+                    continue  # 尝试下一个点
+                raise
 
-    # 物理稳定
-    for _ in range(10):
-        world.tick()
+        if vehicle is None:
+            raise RuntimeError("无法找到空闲的生成点!")
+    else:
+        vehicle = world.spawn_actor(vehicle_bp, spawn_point)
+        print(f"[Vehicle] 已生成: {vehicle.type_id}")
 
+    # ⭐ 先启用 autopilot，再物理稳定（避免同步模式 tick 死锁）
     # 启用 autopilot (尝试多个 TM 端口)
     tm_ports = [8000, 8001, 8002, 8010, 8015]
+    autopilot_enabled = False
     for port in tm_ports:
         try:
             vehicle.set_autopilot(True, port)
             print(f"  ✓ Autopilot 已启用 (TM Port: {port})")
-            return vehicle
+            autopilot_enabled = True
+            break
         except RuntimeError as e:
             if "bind" in str(e).lower():
                 continue
             raise
 
-    print(f"  ⚠️ Autopilot 无法启用,但车辆已生成")
+    if not autopilot_enabled:
+        print(f"  ⚠️ Autopilot 无法启用,但车辆已生成")
+
+    # 物理稳定（必须在 autopilot 启用后，否则同步模式会死锁）
+    for _ in range(10):
+        world.tick()
+
     return vehicle
 
 
-def spawn_npcs(world, num_vehicles=30, num_walkers=10):
+def spawn_npcs(world, num_vehicles=30, num_walkers=10, tm_port=8001):
     """生成 NPC 车辆和行人 (参考 scenario_manager.py)"""
+    import time
+    total_start = time.time()
+
     bp_lib = world.get_blueprint_library()
     spawn_points = world.get_map().get_spawn_points()
     npc_actors = []
@@ -154,6 +177,7 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10):
     print(f"\n[NPC] 生成 NPC: {num_vehicles} 辆车, {num_walkers} 个行人...")
 
     # 1. NPC 车辆
+    vehicle_start = time.time()
     vehicle_categories = {
         'car': {
             'patterns': ['vehicle.audi.*', 'vehicle.bmw.*', 'vehicle.tesla.*',
@@ -208,10 +232,12 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10):
                 npc = world.try_spawn_actor(bp, spawn_points[spawn_idx])
                 spawn_idx += 1
                 if npc:
+                    # ⭐ 性能优化: 必须指定 TM 端口, 否则会尝试创建新TM (极慢 ~10秒/辆)
                     try:
-                        npc.set_autopilot(True)
-                    except:
-                        pass
+                        npc.set_autopilot(True, tm_port)
+                    except RuntimeError as e:
+                        if "bind error" not in str(e).lower():
+                            pass  # 忽略其他错误
 
                     npc_actors.append(npc)
                     spawned_count += 1
@@ -219,7 +245,11 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10):
 
         print(f"  - {cat_name}: {spawned_count} 辆")
 
+    vehicle_time = time.time() - vehicle_start
+    print(f"  ⏱️  车辆生成耗时: {vehicle_time:.2f}s")
+
     # 2. 行人
+    walker_start = time.time()
     walker_bps = list(bp_lib.filter('walker.pedestrian.*'))
     controller_bp = bp_lib.find('controller.ai.walker')
 
@@ -255,15 +285,26 @@ def spawn_npcs(world, num_vehicles=30, num_walkers=10):
         world.tick()
         for controller in controllers:
             controller.start()
-            controller.go_to_location(world.get_random_location_from_navigation())
-            controller.set_max_speed(1.4)
+            # ⭐ 性能优化: 移除 go_to_location() 调用
+            # go_to_location(world.get_random_location_from_navigation()) 查询导航网格极慢
+            # (~15秒/个 × 10个 = 150秒), 直接使用 start() 让行人随机游荡
+            controller.set_max_speed(1.0 + np.random.random())
 
         print(f"  - pedestrian: {spawned_walkers} 个")
 
+    walker_time = time.time() - walker_start
+    print(f"  ⏱️  行人生成耗时: {walker_time:.2f}s")
+
     # 物理稳定 (重要!)
     print("  等待 NPC 物理稳定...")
+    stab_start = time.time()
     for _ in range(10):
         world.tick()
+
+    stab_time = time.time() - stab_start
+    total_time = time.time() - total_start
+    print(f"  ⏱️  物理稳定耗时: {stab_time:.2f}s")
+    print(f"  ⏱️  总耗时: {total_time:.2f}s (车辆{vehicle_time:.1f}s + 行人{walker_time:.1f}s + 稳定{stab_time:.1f}s)")
 
     return npc_actors
 
@@ -297,26 +338,35 @@ def main():
 
     try:
         # 1. 设置CARLA
+        step_start = time.time()
         client, world = setup_carla(args.host, args.port, args.town)
+        print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 2. 生成车辆
         print("\n[1/5] 生成 ego 车辆...")
+        step_start = time.time()
         vehicle = spawn_vehicle(world)
+        print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 3. 生成 NPC
         print("\n[2/5] 生成 NPC...")
-        npc_actors = spawn_npcs(world, args.num_vehicles, args.num_walkers)
+        step_start = time.time()
+        npc_actors = spawn_npcs(world, args.num_vehicles, args.num_walkers, tm_port=8001)
+        print(f"  ✅ NPC 生成完成，耗时: {(time.time()-step_start):.2f}s")
 
         # 4. 附加传感器
         print("\n[3/5] 附加传感器...")
+        step_start = time.time()
         camera_manager = CameraManager(world, vehicle)
         camera_manager.start_listening()
         print(f"  ✓ 相机: {len(TESLA_CAMERAS)} 个")
 
         depth_suite = DepthSuite(world, vehicle, DEPTH_CAMERA_CONFIG)
         print(f"  ✓ 深度相机: 8 个")
+        print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 5. 初始化生成器和保存器
+        step_start = time.time()
         voxel_generator = GroundTruthVoxelGenerator(
             x_range=X_RANGE,
             y_range=Y_RANGE,
@@ -331,14 +381,16 @@ def main():
         extrinsics = {cam['id']: camera_manager.get_extrinsics(cam['id']) for cam in TESLA_CAMERAS}
         data_saver.save_calibration(intrinsics, extrinsics, TESLA_CAMERAS)
         print(f"  ✓ 相机标定已保存")
+        print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 7. 等待传感器初始化 (重要!)
         print("\n[4/5] 等待传感器初始化...")
+        step_start = time.time()
         for i in range(10):
             world.tick()
             if i % 2 == 0:
                 print(f"  {(i+1)*10}%")
-        print("  ✓ 传感器就绪")
+        print(f"  ✓ 传感器就绪，耗时: {(time.time()-step_start):.2f}s")
 
         # 8. 开始采集
         print(f"\n{'='*60}")
@@ -348,29 +400,46 @@ def main():
         ego_pose_prev = None
 
         for frame_idx in range(args.frames):
-            start_time = time.time()
+            frame_start = time.time()
+            print(f"\n[帧 {frame_idx+1}/{args.frames}]")
 
+            # Step 1: World Tick
+            step_start = time.time()
             world.tick()
+            print(f"  [1/6] World Tick: {(time.time()-step_start)*1000:.1f}ms")
 
+            # Step 2: 采集相机数据
+            step_start = time.time()
             camera_data = camera_manager.get_synced_frame(timeout=2.0)
             if camera_data is None:
-                print(f"  帧 {frame_idx}: 相机数据同步失败,跳过")
+                print(f"  ❌ 相机数据同步失败,跳过")
                 continue
+            print(f"  [2/6] 相机采集 (8个): {(time.time()-step_start)*1000:.1f}ms")
 
+            # Step 3: 采集深度数据
+            step_start = time.time()
             try:
                 depth_data = depth_suite.get_data(timeout=2.0)
+                print(f"  [3/6] 深度采集 (8个): {(time.time()-step_start)*1000:.1f}ms")
             except Exception as e:
-                print(f"  帧 {frame_idx}: 深度相机失败 ({e}),跳过")
+                print(f"  ❌ 深度相机失败 ({e}),跳过")
                 continue
 
+            # Step 4: 获取 Ego Pose
+            step_start = time.time()
             ego_transform = vehicle.get_transform()
             ego_pose = np.array(ego_transform.get_matrix(), dtype=np.float32)
+            print(f"  [4/6] Ego Pose: {(time.time()-step_start)*1000:.1f}ms")
 
+            # Step 5: 生成体素 (最耗时)
+            step_start = time.time()
             occupancy, actor_ids = voxel_generator.generate(
                 world,
                 vehicle,
                 visibility_data=None
             )
+            voxel_time = (time.time() - step_start) * 1000
+            print(f"  [5/6] 体素生成: {voxel_time:.1f}ms ⭐")
 
             non_empty_count = np.count_nonzero(occupancy)
 
@@ -385,6 +454,8 @@ def main():
 
             sample_id = data_saver.generate_sample_id()
 
+            # Step 6: 保存数据
+            step_start = time.time()
             data_saver.save_sample(
                 sample_id=sample_id,
                 images=images,
@@ -394,11 +465,11 @@ def main():
                 ego_pose=ego_pose,
                 ego_motion=ego_motion,
             )
+            save_time = (time.time() - step_start) * 1000
+            print(f"  [6/6] 数据保存 (8 DNG + 1 NPY): {save_time:.1f}ms")
 
-            elapsed_time = time.time() - start_time
-            print(f"  ✓ 帧 {frame_idx+1}/{args.frames}: {sample_id} "
-                  f"非空={non_empty_count:,} "
-                  f"耗时={elapsed_time:.2f}s")
+            frame_time = (time.time() - frame_start) * 1000
+            print(f"  ✅ 帧完成: 总耗时={frame_time:.0f}ms, 非空体素={non_empty_count:,}")
 
         # 9. 完成
         data_saver.finalize()
@@ -436,13 +507,19 @@ def main():
             except:
                 pass
 
-        # 清理 NPC
+        # 清理 NPC (带详细错误处理)
         for npc in npc_actors:
             try:
                 if npc.is_alive:
                     npc.destroy()
-            except:
-                pass
+            except RuntimeError as e:
+                # Actor 已经被自动销毁（如行人 AI Controller），忽略
+                if "unable to destroy actor" in str(e) and "not found" in str(e):
+                    pass
+                else:
+                    print(f"  ⚠️ 清理 Actor {npc.id if hasattr(npc, 'id') else 'unknown'} 失败: {e}")
+            except Exception as e:
+                print(f"  ⚠️ 清理 NPC 时发生未知错误: {e}")
 
         # 关闭同步模式
         if world:
