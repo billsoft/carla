@@ -8,7 +8,7 @@ from .decoder import BEVDecoder, CoarseHeightExpansion, LightweightUpsampler
 from .temporal import LightweightTemporalFusion
 from .heads import MultiTaskHead, CoarseToFineHead
 from .position_encoding import CameraPositionEncoding
-from .sparse_modules import AdaptiveSparseProcessor, SPCONV_AVAILABLE
+from .sparse_modules import AdaptiveSparseProcessor, SPCONV_AVAILABLE, TORCHSPARSE_AVAILABLE
 
 class OccNetV3(nn.Module):
     def __init__(self, config):
@@ -25,7 +25,10 @@ class OccNetV3(nn.Module):
         self.height_expand = CoarseHeightExpansion(config.embed_dim, num_heights)
         self.upsampler = LightweightUpsampler(in_channels=config.embed_dim, out_channels=config.embed_dim // 2, target_size=tuple(config.voxel_size), use_checkpoint=config.use_checkpoint)
         self.use_coarse_to_fine = getattr(config, 'use_coarse_to_fine', True)
-        self.use_sparse = getattr(config, 'use_sparse', False) and SPCONV_AVAILABLE
+        
+        # Sparse Backend Logic
+        self.use_sparse = getattr(config, 'use_sparse', False) and (SPCONV_AVAILABLE or TORCHSPARSE_AVAILABLE)
+        
         if self.use_coarse_to_fine:
             self.head = CoarseToFineHead(in_channels=config.embed_dim // 2, num_classes=config.num_classes, coarse_size=tuple(config.coarse_voxel_size), fine_size=tuple(config.voxel_size), use_flow=config.use_flow, chunk_size_z=config.chunk_size_z)
         else:
@@ -71,7 +74,17 @@ def build_model(config):
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters: {num_params / 1e6:.2f}M")
     print(f"Trainable parameters: {num_trainable / 1e6:.2f}M")
-    print(f"Sparse convolution: {'Enabled' if SPCONV_AVAILABLE and config.use_sparse else 'Disabled'}")
+    
+    sparse_status = 'Disabled'
+    if config.use_sparse:
+        if SPCONV_AVAILABLE:
+            sparse_status = 'Enabled (spconv)'
+        elif TORCHSPARSE_AVAILABLE:
+            sparse_status = 'Enabled (torchsparse)'
+        else:
+            sparse_status = 'Disabled (No backend found)'
+            
+    print(f"Sparse convolution: {sparse_status}")
     print(f"Coarse-to-Fine: {'Enabled' if config.use_coarse_to_fine else 'Disabled'}")
     print(f"Flash Attention: {'Available' if hasattr(F, 'scaled_dot_product_attention') else 'Not available'}")
     return model

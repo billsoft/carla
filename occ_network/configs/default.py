@@ -55,7 +55,14 @@ class Config:
     use_amp = True
     use_checkpoint = True
     save_dir = './checkpoints'
-    log_interval = 50
-    save_interval = 5
-    eval_interval = 5
+    # Logging
+    log_interval = 10
+    save_interval = 1
+    eval_interval = 1
+
+    # Optimization
+    use_mc_dropout = False
+    mc_samples = 10
+    mc_temperature = 1.0
+    sparse_backend = 'auto'  # 'auto' / 'spconv' / 'torchsparse' / 'dense'
 config = Config()

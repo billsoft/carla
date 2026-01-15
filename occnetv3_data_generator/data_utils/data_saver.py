@@ -400,12 +400,25 @@ class OccNetDataSaver:
         np.random.shuffle(scene_list)
 
         # 划分
-        n_train = int(len(scene_list) * train_ratio)
-        n_val = int(len(scene_list) * val_ratio)
-
-        train_scenes = scene_list[:n_train]
-        val_scenes = scene_list[n_train:n_train+n_val]
-        test_scenes = scene_list[n_train+n_val:]
+        n_scenes = len(scene_list)
+        if n_scenes == 1:
+            # 特殊处理：只有一个场景时，用于训练和验证，以便调试
+            print("[OccNetDataSaver] 提示: 只有一个场景，将同时用于训练和验证")
+            train_scenes = scene_list
+            val_scenes = scene_list
+            test_scenes = []
+        else:
+            n_train = int(n_scenes * train_ratio)
+            n_val = int(n_scenes * val_ratio)
+            
+            # 确保至少分配一个给训练集
+            if n_train == 0 and n_scenes > 0:
+                n_train = 1
+                n_val = 0
+            
+            train_scenes = scene_list[:n_train]
+            val_scenes = scene_list[n_train:n_train+n_val]
+            test_scenes = scene_list[n_train+n_val:]
 
         # 展开为样本列表
         train_samples = [s for sc in train_scenes for s in scenes[sc]]

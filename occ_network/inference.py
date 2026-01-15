@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import time
 import argparse
 from torch.cuda.amp import autocast
@@ -66,6 +67,63 @@ def benchmark_training_memory(model, config, device):
     print(f"{'='*50}")
     return peak_mem
 
+@torch.no_grad()
+def inference_with_uncertainty(model, config, device, num_samples=10, temperature=1.0):
+    """
+    Perform MC Dropout Inference to estimate uncertainty.
+    """
+    print(f"Running MC Dropout Inference (Samples={num_samples}, Temp={temperature})...")
+    
+    # 1. Force model to training mode (to activate dropout)
+    model.train()
+    
+    # 2. Prepare dummy input (or real input if available)
+    dummy_input = torch.randn(1, config.num_cameras, config.in_channels, *config.image_size, dtype=torch.float16, device=device)
+    
+    logits_list = []
+    
+    start_time = time.time()
+    
+    # 3. Multiple forward passes
+    for i in range(num_samples):
+        with autocast(enabled=True):
+            outputs = model(dummy_input)
+            # Apply temperature scaling
+            logits = outputs['semantic'] / temperature
+            logits_list.append(logits)
+            
+    torch.cuda.synchronize()
+    total_time = time.time() - start_time
+    
+    # 4. Statistical Analysis
+    logits_stack = torch.stack(logits_list, dim=0) # [samples, B, C, X, Y, Z]
+    probs = F.softmax(logits_stack, dim=2)
+    
+    mean_probs = probs.mean(0)
+    pred = mean_probs.argmax(1)
+    
+    # Uncertainty metrics
+    variance = probs.var(0).mean(1) # Average variance across classes
+    entropy = - (mean_probs * torch.log(mean_probs + 1e-6)).sum(1)
+    
+    print(f"\n{'='*50}")
+    print(f"MC Dropout Uncertainty Results")
+    print(f"{'='*50}")
+    print(f"Total Time: {total_time:.4f}s")
+    print(f"Avg Time per Pass: {total_time/num_samples:.4f}s")
+    print(f"Estimated FPS: {num_samples/total_time:.2f}")
+    print(f"Uncertainty (Variance) Mean: {variance.mean().item():.6f}")
+    print(f"Uncertainty (Entropy) Mean: {entropy.mean().item():.6f}")
+    print(f"{'='*50}")
+    
+    return {
+        'pred': pred,
+        'uncertainty_variance': variance,
+        'uncertainty_entropy': entropy,
+        'logits_mean': mean_probs
+    }
+
+
 def export_onnx(model, config, output_path='occ_net_v3.onnx'):
     model.eval()
     dummy_input = torch.randn(1, config.num_cameras, config.in_channels, *config.image_size)
@@ -78,6 +136,9 @@ def main():
     parser.add_argument('--benchmark', action='store_true')
     parser.add_argument('--train_mem', action='store_true')
     parser.add_argument('--export', action='store_true')
+    parser.add_argument('--uncertainty', action='store_true', help='Enable MC Dropout Uncertainty Estimation')
+    parser.add_argument('--mc-samples', type=int, default=10, help='Number of MC samples')
+    parser.add_argument('--mc-temp', type=float, default=1.0, help='Temperature for Softmax')
     args = parser.parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = build_model(config).to(device)
@@ -89,6 +150,8 @@ def main():
         benchmark_memory(model, config, device)
     if args.train_mem:
         benchmark_training_memory(model, config, device)
+    if args.uncertainty:
+        inference_with_uncertainty(model, config, device, args.mc_samples, args.mc_temp)
     if args.export:
         export_onnx(model, config)
 
