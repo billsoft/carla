@@ -21,7 +21,7 @@ class Config:
     bev_size = (128, 128)
     bev_embed_dim = 192
     num_points = 4
-    num_frames = 2
+    num_frames = 2  # Already enabled for temporal fusion
     temporal_embed_dim = 192
     use_uncertainty = False
     use_flow = True

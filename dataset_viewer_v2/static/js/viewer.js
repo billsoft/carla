@@ -149,7 +149,7 @@ class Viewer {
     }
     
     updateFrame(idx) {
-        if (idx < 0 || idx >= this.frames.length) return;
+        if (idx < 0 || idx >= this.frames.length) return Promise.resolve();
         
         const frameId = this.frames[idx];
         
@@ -194,7 +194,7 @@ class Viewer {
         loadingOverlay.style.display = 'block';
         console.log(`[Viewer] Loading occupancy for frame ${frameId}...`);
         
-        fetch(`/api/occupancy/${frameId}`)
+        return fetch(`/api/occupancy/${frameId}`)
             .then(res => {
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 return res.json();
@@ -226,6 +226,27 @@ class Viewer {
         
         const labels = data.labels;
         
+        // Update Voxel List (Statistics)
+        const counts = {};
+        labels.forEach(l => counts[l] = (counts[l] || 0) + 1);
+        
+        const list = document.getElementById('voxel-list');
+        if (list) {
+            list.innerHTML = '';
+            Object.keys(counts).map(Number).sort((a,b) => a-b).forEach(label => {
+                const count = counts[label];
+                const name = OCCUPANCY_NAMES[label] || 'Unknown';
+                const colorHex = OCCUPANCY_COLORS[label] || 0xFFFFFF;
+                const color = '#' + colorHex.toString(16).padStart(6, '0');
+                
+                const div = document.createElement('div');
+                div.className = 'legend-item';
+                div.style.padding = '2px 0';
+                div.innerHTML = `<div class="color-box" style="background:${color}"></div><span style="flex:1">${name}</span><span>${count}</span>`;
+                list.appendChild(div);
+            });
+        }
+        
         // Use InstancedMesh for high performance
         const geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2); // Resolution 0.2m
         const material = new THREE.MeshLambertMaterial({ color: 0xffffff });
@@ -244,9 +265,9 @@ class Viewer {
         // index 0 -> -51.2 + 0.1 (center)
         
         const res = 0.2;
-        const xMin = -51.2;
-        const yMin = -51.2;
-        const zMin = -4.0; // Fixed: Match occupancy_config.py Z_RANGE [-4.0, 4.0]
+        const xMin = -40.0;
+        const yMin = -40.0;
+        const zMin = -1.0; // Fixed: Match occupancy_config.py Z_RANGE [-4.0, 4.0]
         
         for (let i = 0; i < points.length; i++) {
             const p = points[i];
