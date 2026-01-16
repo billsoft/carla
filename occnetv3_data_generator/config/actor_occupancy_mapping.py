@@ -30,39 +30,48 @@ OCCUPANCY_COLORS = {i: OCCUPANCY_COLORS_LIST[i] for i in range(18)}
 
 # 车辆类型映射（基于实际Town10HD_Opt场景查询结果）
 VEHICLE_MAPPING = {
-    # Bus (3) - 公交车/面包车
-    3: [
-        'vehicle.volkswagen.t2',
-        'vehicle.fuso.mitsubishi',  # 三菱Fuso (semantic_tag=16=Bus)
-        'vehicle.mitsubishi.fusorosa', # 别名
-    ],
-
-    # Truck (10) - 卡车/货车/特种车辆
+    # Truck (10)
     10: [
-        'vehicle.carlacola.actors',      # 可乐卡车 (semantic_tag=15=Truck)
-        'vehicle.firetruck.actors',      # 消防车 (semantic_tag=15=Truck)
-        'vehicle.ambulance.ford',        # 救护车 (semantic_tag=15=Truck)
-        'vehicle.sprinter.mercedes',     # 奔驰货车 (semantic_tag=15=Truck)
-        'vehicle.tesla.cybertruck',      # 赛博卡车
-        'vehicle.carlamotors.carlacola', # 别名
-        'vehicle.carlamotors.firetruck', # 别名
-        'vehicle.ford.ambulance',        # 别名
-        'vehicle.mercedes.sprinter',     # 别名
+        'vehicle.carlamotors.carlacola',
+        'vehicle.carlamotors.firetruck',
+        'vehicle.ford.ambulance',
+        'vehicle.mercedes.sprinter',
+        'vehicle.tesla.cybertruck',
+        'vehicle.miningtruck.miningtruck', 
+        'vehicle.volkswagen.t2',
+        
+        # Scanned Real IDs
+        'vehicle.ambulance.ford',
+        'vehicle.carlacola.actors',
+        'vehicle.firetruck.actors',
+        'vehicle.sprinter.mercedes',
+    ],
+    
+    # Construction Vehicle (5)
+    5: [
+        # currently mapped to truck or car
     ],
 
-    # Bicycle (2) - 自行车
+    # Bus (3)
+    3: [
+        'vehicle.mitsubishi.fusorosa',
+        # Scanned Real IDs
+        'vehicle.fuso.mitsubishi', # Was misclassified as Car
+    ],
+    
+    # Motorcycle (6)
+    6: [
+        'vehicle.harley-davidson.low_rider',
+        'vehicle.kawasaki.ninja',
+        'vehicle.yamaha.yzf',
+        'vehicle.vespa.zx125',
+    ],
+
+    # Bicycle (2)
     2: [
         'vehicle.bh.crossbike',
         'vehicle.diamondback.century',
         'vehicle.gazelle.omafiets',
-    ],
-
-    # Motorcycle (6) - 摩托车
-    6: [
-        'vehicle.harley-davidson.low_rider',
-        'vehicle.kawasaki.ninja',
-        'vehicle.vespa.zx125',
-        'vehicle.yamaha.yzf',
     ],
 
     # Car (4) - 小汽车（默认）

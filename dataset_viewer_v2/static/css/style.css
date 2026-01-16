@@ -68,13 +68,15 @@ body {
 
 #loading-overlay {
     position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+    top: 10px;
+    right: 10px;
     background: rgba(0,0,0,0.7);
-    padding: 10px 20px;
+    padding: 5px 10px;
     border-radius: 5px;
     display: none;
+    font-size: 12px;
+    color: #0f0;
+    pointer-events: none; /* Make non-blocking */
 }
 
 /* Control Panel */
@@ -143,23 +145,31 @@ input[type="range"] {
     margin-top: 2px;
 }
 
-#legend {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 2px;
-    font-size: 11px;
-    max-height: 300px;
+/* Frame List */
+#frame-list {
+    min-height: 200px;
+    max-height: 400px;
     overflow-y: auto;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    padding: 5px;
 }
 
-.legend-item {
-    display: flex;
-    align-items: center;
-    gap: 5px;
+.frame-item {
+    padding: 6px 8px;
+    cursor: pointer;
+    border-bottom: 1px solid #333;
+    font-size: 13px;
+    color: #ccc;
+    transition: background 0.2s, color 0.2s;
 }
 
-.color-box {
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
+.frame-item:hover {
+    background-color: #333;
+    color: #fff;
+}
+
+.frame-item.active {
+    background-color: #4169E1;
+    color: white;
 }

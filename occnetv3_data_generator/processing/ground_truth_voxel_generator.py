@@ -48,13 +48,151 @@ class GroundTruthVoxelGenerator:
         # self.cache_resolution = 0.5 # Deprecated: use self.resolution
 
         # ⭐ 添加验证
-        expected_grid_size = [400, 400, 32]
+        expected_grid_size = [512, 512, 40]
         if self.grid_size != expected_grid_size:
             print(f"[警告] 体素网格尺寸 {self.grid_size} 与标准 {expected_grid_size} 不一致")
 
         # DepthVisibilityFilter 已移除
         # 不可见区域直接设置为 Label 0 (Free)，无需 mask
         
+    def generate_flow(self, world, ego_vehicle, dt=0.05):
+        """
+        生成 3D 场景流 (Scene Flow) 和 动态掩码 (Flow Mask)
+        基于 Ego 坐标系: Flow = V_ego * dt
+        
+        Args:
+            world: carla.World
+            ego_vehicle: carla.Actor (hero vehicle)
+            dt: float, 帧间时间 (秒)
+            
+        Returns:
+            flow: (3, X, Y, Z) float32 array - 位移向量 (dx, dy, dz)
+            flow_mask: (X, Y, Z) bool array - 动态区域掩码
+        """
+        flow = np.zeros((3,) + tuple(self.grid_size), dtype=np.float32)
+        flow_mask = np.zeros(self.grid_size, dtype=bool)
+        
+        ego_transform = ego_vehicle.get_transform()
+        grid_to_world_matrix = np.array(ego_transform.get_matrix())
+        
+        # World -> Grid (Ego) 旋转矩阵 (3x3)
+        # V_ego = R_world_to_ego * V_world
+        # R_world_to_ego = R_grid_to_world.T (因为是正交矩阵)
+        world_to_grid_rot = grid_to_world_matrix[:3, :3].T
+        
+        # 获取所有动态 Actor
+        actors = world.get_actors()
+        vehicles = actors.filter('vehicle.*')
+        walkers = actors.filter('walker.pedestrian.*')
+        dynamic_actors = list(vehicles) + list(walkers)
+        
+        # 获取 Ego 速度 (World Frame)
+        v_ego_world = ego_vehicle.get_velocity()
+        v_ego_vec_world = np.array([v_ego_world.x, v_ego_world.y, v_ego_world.z])
+        
+        # 遍历动态 Actor
+        for actor in dynamic_actors:
+            # 距离粗筛
+            if actor.get_location().distance(ego_vehicle.get_location()) > 60.0:
+                continue
+                
+            # 1. 获取 Actor 速度 (World Frame)
+            v_actor_world = actor.get_velocity()
+            v_actor_vec_world = np.array([v_actor_world.x, v_actor_world.y, v_actor_world.z])
+            
+            # 2. 计算相对速度 (World Frame)
+            # Flow 定义: 物体相对于 Ego 的运动
+            # V_rel_world = V_actor_world - V_ego_world
+            # 注意: 如果我们希望 Flow 表示"物体在世界中的绝对运动投影到Ego系"，则不需要减去 V_ego
+            # 但通常 Scene Flow 用于预测下一帧物体在当前 Ego 系中的位置，或者是物体相对于相机的运动
+            # OccNetV3 论文通常定义 Flow 为绝对运动或相对运动。
+            # 为了支持时序融合 (Temporal Fusion)，我们需要将 t-1 帧的特征 warp 到 t 帧
+            # Backward Flow: grid_t + flow = grid_{t-1}
+            # 这里我们生成 Forward Flow (位移): displacement = velocity * dt
+            # 采用相对速度: V_rel = V_actor - V_ego
+            v_rel_world = v_actor_vec_world - v_ego_vec_world
+            
+            # 3. 转换到 Ego Frame
+            v_rel_ego = world_to_grid_rot @ v_rel_world
+            
+            # 4. 计算位移 (Flow)
+            displacement = v_rel_ego * dt
+            
+            # 5. 填充 Flow Grid (Rasterize Actor BBox)
+            # 复用 _fill_actor_bb 的逻辑，但不修改 occupancy，而是填充 flow
+            # 为了代码复用，我们将核心光栅化逻辑提取出来，或者简化处理
+            # 这里简化处理：直接光栅化 BBox
+            
+            try:
+                bb = actor.bounding_box
+                actor_transform = actor.get_transform()
+            except:
+                continue
+
+            # World -> Grid Transform
+            try:
+                world_to_grid_matrix = np.linalg.inv(grid_to_world_matrix)
+            except np.linalg.LinAlgError:
+                continue
+
+            verts_world = bb.get_world_vertices(actor_transform)
+            if not verts_world: continue
+            
+            verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
+            verts_grid_np = world_to_grid_matrix @ verts_world_np
+            
+            xs, ys, zs = verts_grid_np[0, :], verts_grid_np[1, :], verts_grid_np[2, :]
+            
+            min_ix = max(0, int(np.floor((np.min(xs) - self.x_range[0]) / self.resolution)))
+            max_ix = min(self.grid_size[0], int(np.ceil((np.max(xs) - self.x_range[0]) / self.resolution)))
+            min_iy = max(0, int(np.floor((np.min(ys) - self.y_range[0]) / self.resolution)))
+            max_iy = min(self.grid_size[1], int(np.ceil((np.max(ys) - self.y_range[0]) / self.resolution)))
+            min_iz = max(0, int(np.floor((np.min(zs) - self.z_range[0]) / self.resolution)))
+            max_iz = min(self.grid_size[2], int(np.ceil((np.max(zs) - self.z_range[0]) / self.resolution)))
+            
+            if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
+                continue
+                
+            # 简化版 OBB 检测 (为了速度，直接使用 AABB 填充 Flow)
+            # 如果需要更精确，可以复制 _fill_actor_bb 的 OBB 逻辑
+            # 考虑到 Flow 主要是用于运动补偿，AABB 覆盖通常是可以接受的，
+            # 或者我们可以复用 occupancy 的 mask (如果先生成了 occupancy)
+            # 但这里是独立的 flow 生成。
+            
+            # 使用简单的 AABB 填充
+            # flow[:, min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = displacement[:, None, None, None]
+            # flow_mask[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = True
+            
+            # 为了更精确，我们还是使用 OBB check (复制简化版)
+            lx = self.x_range[0] + (np.arange(min_ix, max_ix) + 0.5) * self.resolution
+            ly = self.y_range[0] + (np.arange(min_iy, max_iy) + 0.5) * self.resolution
+            lz = self.z_range[0] + (np.arange(min_iz, max_iz) + 0.5) * self.resolution
+            sub_xv, sub_yv, sub_zv = np.meshgrid(lx, ly, lz, indexing='ij')
+            sub_points_grid = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
+            
+            sub_points_world = sub_points_grid @ grid_to_world_matrix.T
+            box_matrix_inv = np.linalg.inv(np.array(actor_transform.get_matrix()))
+            points_in_actor = sub_points_world[:, :3] @ box_matrix_inv[:3, :3].T + box_matrix_inv[:3, 3]
+            
+            in_x = np.abs(points_in_actor[:, 0] - bb.location.x) <= bb.extent.x
+            in_y = np.abs(points_in_actor[:, 1] - bb.location.y) <= bb.extent.y
+            in_z = np.abs(points_in_actor[:, 2] - bb.location.z) <= bb.extent.z
+            mask_in = (in_x & in_y & in_z).reshape(max_ix-min_ix, max_iy-min_iy, max_iz-min_iz)
+            
+            if np.any(mask_in):
+                # 填充 Flow
+                # displacement shape: (3,)
+                # target slice shape: (3, nx, ny, nz)
+                flow_slice = flow[:, min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
+                # Broadcast displacement to mask
+                for i in range(3):
+                    flow_slice[i][mask_in] = displacement[i]
+                
+                flow_mask_slice = flow_mask[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
+                flow_mask_slice[mask_in] = True
+
+        return flow, flow_mask
+
     def generate(self, world, ego_vehicle, visibility_data=None):
         """
         生成一帧的体素数据
@@ -134,6 +272,21 @@ class GroundTruthVoxelGenerator:
         # 4. 填充自车
         self._fill_actor_bb(occupancy, actor_ids, ego_vehicle, grid_to_world_matrix, is_ego=True)
         filled_actor_ids.append(ego_vehicle.id)
+        
+        # [调试] 验证自车中心位置 (在填充后)
+        # 查找 Label 4 (Car) 且 ID 为 Ego ID 的体素
+        ego_mask = (occupancy == 4) & (actor_ids == ego_vehicle.id)
+        if np.any(ego_mask):
+            ego_indices = np.argwhere(ego_mask)
+            ego_center = np.mean(ego_indices, axis=0)
+            print(f"[体素生成] ✅ Ego Vehicle Voxel Center: {ego_center} (Expected ~[256, 256, 20])")
+            
+            # 检查偏移
+            offset = ego_center - np.array([self.grid_size[0]/2, self.grid_size[1]/2, (0 - self.z_range[0])/self.resolution])
+            if np.linalg.norm(offset[:2]) > 5.0: # >1m offset
+                print(f"[体素生成] ⚠️ 警告: Ego 偏离中心 {offset} (Grid Units)")
+        else:
+            print(f"[体素生成] ❌ 错误: 未找到 Ego Vehicle 体素!")
 
         print(f"[体素生成] 填充到体素的Actor IDs ({len(filled_actor_ids)}个): {sorted(filled_actor_ids)}")
         print(f"[体素生成]   车辆: {len(filled_by_type['vehicles'])}个, 行人: {len(filled_by_type['walkers'])}个")
@@ -170,8 +323,8 @@ class GroundTruthVoxelGenerator:
         #         仅查询 Cache 中缺失的点 (车辆移动产生的新边缘)
         #         Cache 持续保留，支持任意旋转和移动，无需清空
         
-        # self.ground_cache.clear() # ❌ 不再清空
-        # print(f"[地面填充] 已清空旧 Cache (Ego-Aligned Grid 旋转后坐标映射改变)")
+        self.ground_cache.clear() # 强制清空，确保无历史累积误差
+        print(f"[地面填充] 已清空旧 Cache (Ego-Aligned Grid 旋转后坐标映射改变)")
 
         # --- A. 地面与道路 (Inverse Mapping Grid -> World) ---
         # 修复: 使用世界网格索引作为 Cache Key

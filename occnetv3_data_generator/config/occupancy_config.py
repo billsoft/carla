@@ -4,23 +4,26 @@ OccNetV3 体素配置 - 400x400x32 体素网格
 """
 
 # ========== 体素空间定义 ==========
-# 车辆坐标系 (右手系): X前 Y左 Z上
+# 车辆坐标系 (右手系): X前 Y左 Z上 -> 修正: CARLA 原生坐标系 (左手系 X前 Y右 Z上)
+# 注意: 虽然 nuScenes 是 Y左，但为了保持与 CARLA 传感器一致，我们暂保持 Y右。
+#       如果在后续训练中需要 Y左，请在 Dataset Loader 中进行 flip(axis=1)。
 # 原点: 车辆后轴中心地面 (Z=0)
 
-X_RANGE = [-40.0, 40.0]  # 前后各40米 (总80米)
-Y_RANGE = [-40.0, 40.0]  # 左右各40米 (总80米)
-Z_RANGE = [-1.0, 5.4]    # 地下1米到地上5.4米 (总6.4米)
+# 对齐 OccNetV3 / nuScenes 范围标准 (51.2m)
+X_RANGE = [-51.2, 51.2]  # 前后 102.4m
+Y_RANGE = [-51.2, 51.2]  # 左右 102.4m
+Z_RANGE = [-4.0, 4.0]    # 上下 8m
 
-RESOLUTION = 0.2  # 每个体素边长 0.2米 (20cm)
+RESOLUTION = 0.2  # 每个体素边长 0.2m
 
 # 计算网格尺寸: (X_max - X_min) / resolution
 GRID_SIZE = (
-    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 400
-    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 400
-    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 32
+    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 512
+    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 512
+    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 40
 )
 
-assert GRID_SIZE == (400, 400, 32), f"网格尺寸计算错误: {GRID_SIZE}"
+assert GRID_SIZE == (512, 512, 40), f"网格尺寸计算错误: {GRID_SIZE}"
 
 PC_RANGE = [X_RANGE[0], Y_RANGE[0], Z_RANGE[0], X_RANGE[1], Y_RANGE[1], Z_RANGE[1]]
 
@@ -94,6 +97,10 @@ CARLA_TO_OCCUPANCY = {
     0: 0,    # unlabeled → empty
 }
 
+# 强制保留的地面/标线类别 (不参与过滤)
+# 11:Driveable, 12:OtherFlat, 13:Sidewalk, 14:Terrain, 6:RoadLine
+GROUND_LABELS = [11, 12, 13, 14, 6]
+
 # ========== Actor类型映射 (更细粒度) ==========
 ACTOR_TYPE_MAPPING = {
     # 车辆细分
@@ -147,9 +154,9 @@ MAX_DEPTH = 100.0
 
 # ========== 语义激光雷达配置 (新增) ==========
 SEMANTIC_LIDAR_CONFIG = {
-    'channels': 64,              # 64 线
-    'points_per_second': 1200000,  # 每秒 120 万点
-    'rotation_frequency': 10,    # 10Hz 旋转 (与仿真同步)
+    'channels': 256,             # 256 线 (高密度)
+    'points_per_second': 2000000,  # 每秒 200 万点
+    'rotation_frequency': 20,    # 20Hz 旋转 (与仿真同步)
     'range': 100.0,              # 100 米探测范围
     'upper_fov': 15.0,           # 上视角 15°
     'lower_fov': -25.0,          # 下视角 -25°

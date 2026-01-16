@@ -13,6 +13,17 @@ except ImportError:
     CV2_AVAILABLE = False
 from pathlib import Path
 from typing import Dict, List, Union
+# 导入配置中的 GRID_SIZE
+try:
+    from config.occupancy_config import GRID_SIZE
+except ImportError:
+    # 如果作为模块导入失败，尝试相对导入
+    try:
+        from ..config.occupancy_config import GRID_SIZE
+    except ImportError:
+         # Fallback default
+         GRID_SIZE = (512, 512, 40)
+         print(f"[Warning] Could not import GRID_SIZE, using default: {GRID_SIZE}")
 
 # DNG支持（可选）
 try:
@@ -164,6 +175,7 @@ class OccNetDataSaver:
         flow_mask: np.ndarray = None,
         ego_pose: np.ndarray = None,
         ego_motion: np.ndarray = None,
+        depth: Dict[str, np.ndarray] = None, # ⭐ 新增
     ):
         """
         保存一个训练样本
@@ -178,6 +190,7 @@ class OccNetDataSaver:
             flow_mask: (400, 400, 32) uint8 流场掩码 (可选)
             ego_pose: (4, 4) float32 全局位姿 (可选)
             ego_motion: (4, 4) float32 帧间运动 (可选)
+            depth: {cam_id: (H, W) float32} 深度图 (可选, meters)
         """
         # 1. 保存图像
         img_dir = self.output_dir / 'images' / sample_id
@@ -206,16 +219,17 @@ class OccNetDataSaver:
                 np.save(img_dir / f'cam_{cam_index}.npy', img)
 
         # 2. 保存occupancy
-        assert occupancy.shape == (400, 400, 32), f"occupancy形状错误: {occupancy.shape}"
+        assert occupancy.shape == GRID_SIZE, f"occupancy形状错误: {occupancy.shape} (expected {GRID_SIZE})"
         np.save(self.output_dir / 'occupancy' / f'{sample_id}.npy', occupancy.astype(np.uint8))
 
         # 3. 保存flow (可选)
         if flow is not None:
-            assert flow.shape == (3, 512, 512, 32), f"flow形状错误: {flow.shape}"
+            expected_flow_shape = (3,) + GRID_SIZE
+            assert flow.shape == expected_flow_shape, f"flow形状错误: {flow.shape} (expected {expected_flow_shape})"
             np.save(self.output_dir / 'flow' / f'{sample_id}.npy', flow.astype(np.float16))
 
         if flow_mask is not None:
-            assert flow_mask.shape == (512, 512, 32), f"flow_mask形状错误: {flow_mask.shape}"
+            assert flow_mask.shape == GRID_SIZE, f"flow_mask形状错误: {flow_mask.shape} (expected {GRID_SIZE})"
             np.save(self.output_dir / 'flow_mask' / f'{sample_id}.npy', flow_mask.astype(np.uint8))
 
         # 4. 保存ego数据 (可选)
@@ -230,11 +244,8 @@ class OccNetDataSaver:
         # 记录sample_id
         self.sample_ids.append(sample_id)
 
-    def _save_bayer_dng(self, bayer_data: np.ndarray, path: Path):
-        """
-        保存单通道 Bayer RGGB 为 12-bit DNG/TIFF 格式
-        同时生成 PNG 缩略图用于 Web 加载
-        """
+    def _save_bayer_dng(self, bayer_data, output_path):
+        """保存 Bayer RGGB 数据为 DNG 格式"""
         # 转换为 uint16
         bayer_u16 = bayer_data.astype(np.uint16)
 
@@ -262,14 +273,11 @@ class OccNetDataSaver:
                 exif_bytes = piexif.dump(exif_dict)
 
                 # 保存为 TIFF（DNG 本质上是特殊的 TIFF）
-                img_pil.save(str(path), format='TIFF', compression='none', exif=exif_bytes)
-
-                # 🔥 新增：生成 PNG 缩略图 (640×480)
-                self._generate_png_thumbnail(bayer_data, path)
+                img_pil.save(str(output_path), format='TIFF', compression='none', exif=exif_bytes)
 
             else:
                 # 降级: 使用 OpenCV 保存为 TIFF 后重命名
-                path_tif = path.with_suffix('.tif')
+                path_tif = output_path.with_suffix('.tif')
                 success = cv2.imwrite(str(path_tif), bayer_12bit, [
                     cv2.IMWRITE_TIFF_COMPRESSION, 1  # 无压缩
                 ])
@@ -277,18 +285,18 @@ class OccNetDataSaver:
                     raise IOError("cv2.imwrite returned False")
 
                 # 重命名为 .dng
-                if path.exists():
-                    path.unlink()
-                path_tif.rename(path)
-
-                # 🔥 新增：生成 PNG 缩略图
-                self._generate_png_thumbnail(bayer_data, path)
+                if output_path.exists():
+                    output_path.unlink()
+                path_tif.rename(output_path)
 
         except Exception as e:
             print(f"  [错误] DNG保存失败: {e}")
             # Fallback: 保存为 NPY
-            path_npy = path.with_suffix('.npy')
+            path_npy = output_path.with_suffix('.npy')
             np.save(path_npy, bayer_data)
+
+        # 注意: 缩略图生成已移至外部调用，避免重复逻辑
+        height, width = bayer_data.shape
 
     def _generate_png_thumbnail(self, bayer_data: np.ndarray, dng_path: Path):
         """

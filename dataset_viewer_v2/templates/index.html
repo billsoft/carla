@@ -71,12 +71,17 @@
             </div>
 
             <div class="control-group">
-                <h3>Legend</h3>
-                <div id="legend"></div>
+                <h3>Frame List</h3>
+                <div id="frame-list"></div>
             </div>
         </div>
     </div>
 
-    <script src="/static/js/viewer.js"></script>
+    <script>
+        // Force reload viewer.js with timestamp
+        var script = document.createElement('script');
+        script.src = "/static/js/viewer.js?v=" + new Date().getTime();
+        document.body.appendChild(script);
+    </script>
 </body>
 </html>

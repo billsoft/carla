@@ -68,43 +68,82 @@ class SemanticLidarSensor:
         """将数据推送到队列"""
         def queue_callback(lidar_data):
             try:
+                # copy raw_data to bytes to avoid memory corruption
+                # when the C++ object is destroyed
+                data_copy = bytes(lidar_data.raw_data)
+                
                 self.data_queue.put_nowait({
                     'timestamp': lidar_data.timestamp,
                     'frame': lidar_data.frame,
-                    'raw_data': lidar_data.raw_data
+                    'raw_data': data_copy
                 })
             except queue.Full:
                 # 队列满,丢弃旧数据
-                self.data_queue.get()
+                try:
+                    self.data_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                
+                data_copy = bytes(lidar_data.raw_data)
                 self.data_queue.put_nowait({
                     'timestamp': lidar_data.timestamp,
                     'frame': lidar_data.frame,
-                    'raw_data': lidar_data.raw_data
+                    'raw_data': data_copy
                 })
 
         self.sensor.listen(queue_callback)
 
-    def parse_lidar_data(self, raw_data: bytes) -> Tuple[np.ndarray, np.ndarray]:
+    def get_data(self, timeout: float = 2.0):
         """
-        解析激光雷达原始数据
-
-        Args:
-            raw_data: CARLA 激光雷达原始二进制数据
-
+        获取一帧 LiDAR 数据
         Returns:
-            xyz_world: (N, 3) 世界坐标系下的点云
-            semantic_tags: (N,) 每个点的语义标签 (CARLA 标签)
+            {
+                'points': (N, 3),
+                'obj_idx': (N,),
+                'tags': (N,),
+                'timestamp': float,
+                'frame': int
+            }
         """
-        # 原始数据格式: 每个点 6 个 float32
-        # [x, y, z, cos_angle, object_idx, semantic_tag]
-        points = np.frombuffer(raw_data, dtype=np.float32)
-        points = points.reshape(-1, 6)
+        try:
+            data = self.data_queue.get(timeout=timeout)
+            parsed = self._parse_lidar_data(data['raw_data']) # Pass bytes directly
+            parsed['timestamp'] = data['timestamp']
+            parsed['frame'] = data['frame']
+            return parsed
+        except queue.Empty:
+            raise TimeoutError("Semantic LiDAR data timeout")
 
-        # 提取坐标和语义标签
-        xyz_world = points[:, 0:3]  # (N, 3) 世界坐标
-        semantic_tags = points[:, 5].astype(np.int32)  # (N,) 语义标签
-
-        return xyz_world, semantic_tags
+    def _parse_lidar_data(self, raw_bytes):
+        """
+        解析 Semantic LiDAR 数据 (结构化 numpy 数组)
+        Format: x, y, z, cos_angle, object_idx, semantic_tag
+        """
+        # 定义混合结构
+        dtype = np.dtype([
+            ('x', np.float32), 
+            ('y', np.float32), 
+            ('z', np.float32), 
+            ('cos', np.float32), 
+            ('obj_idx', np.uint32), 
+            ('tag', np.uint32)
+        ])
+        
+        # 从 raw_data 直接读取
+        data = np.frombuffer(raw_bytes, dtype=dtype)
+        
+        # 提取坐标 (N, 3)
+        points = np.stack((data['x'], data['y'], data['z']), axis=-1)
+        
+        # 坐标系转换: CARLA (X-Forward, Y-Right, Z-Up) -> Custom if needed
+        # 这里保持 CARLA 坐标系，后续在 Filter 中处理转换
+        # points[:, 1] = -points[:, 1] # Flip Y if converting to Left-Handed
+        
+        return {
+            'points': points,             # (N, 3) float32
+            'obj_idx': data['obj_idx'],   # (N,) uint32
+            'tags': data['tag']           # (N,) uint32
+        }
 
     def get_point_cloud_stats(self, xyz_world: np.ndarray, semantic_tags: np.ndarray):
         """

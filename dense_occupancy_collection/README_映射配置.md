@@ -45,8 +45,8 @@ VEHICLE_MAPPING = {
 ### 2. 映射配置的三个部分
 
 #### A. 车辆映射 (VEHICLE_MAPPING)
-- Bus (3): VW T2面包车, Mitsubishi Fuso
-- Truck (10): 货车、消防车、救护车、Cybertruck, Sprinter, Carlacola
+- Bus (3): Mitsubishi Fuso
+- Truck (10): 货车、消防车、救护车、Cybertruck, Sprinter, Carlacola, **Mining Truck**, **VW T2 (Van)**
 - Bicycle (2): Crossbike, Diamondback, Gazelle
 - Motorcycle (6): Harley, Kawasaki, Yamaha, Vespa
 - Car (4): 其他所有轿车（默认）

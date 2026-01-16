@@ -105,7 +105,10 @@ def get_frames():
 
 @app.route('/')
 def index():
-    return send_file('templates/index.html')
+    return send_file('templates/index.html') # Flask send_file doesn't process templates
+    # To use templates properly we should use render_template, but let's just stick to static file for now
+    # and use client-side cache busting
+
 
 @app.route('/api/dataset_info')
 def dataset_info():

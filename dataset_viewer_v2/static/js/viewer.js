@@ -34,6 +34,10 @@ class Viewer {
         this.isPlaying = false;
         this.playTimer = null;
         
+        // Task Management
+        this.abortController = null; // For cancelling fetch requests
+        this.activeTimeouts = [];    // For cancelling staggered loading
+        
         // Three.js
         this.scene = null;
         this.camera = null;
@@ -76,6 +80,24 @@ class Viewer {
         grid.rotation.x = Math.PI / 2; // Rotate to XY plane
         this.scene.add(grid);
         
+        // --- Hero Vehicle Marker ---
+        // Car dimensions approx: 4.8m x 2.2m x 1.6m
+        const heroGeo = new THREE.BoxGeometry(4.8, 2.2, 1.6);
+        const heroMat = new THREE.MeshBasicMaterial({ 
+            color: 0x00FFFF, 
+            wireframe: true,
+            transparent: true,
+            opacity: 0.8
+        });
+        const heroMesh = new THREE.Mesh(heroGeo, heroMat);
+        heroMesh.position.set(0, 0, 0.8); // Center at z=0.8 (assuming ground is z=0)
+        this.scene.add(heroMesh);
+
+        // Hero Axes
+        const heroAxes = new THREE.AxesHelper(3);
+        heroMesh.add(heroAxes); // Attach to hero
+        // ---------------------------
+        
         const axes = new THREE.AxesHelper(5);
         this.scene.add(axes);
         
@@ -96,15 +118,8 @@ class Viewer {
     }
     
     initUI() {
-        // Legend
-        const legend = document.getElementById('legend');
-        OCCUPANCY_NAMES.forEach((name, i) => {
-            const div = document.createElement('div');
-            div.className = 'legend-item';
-            const color = '#' + OCCUPANCY_COLORS[i].toString(16).padStart(6, '0');
-            div.innerHTML = `<div class="color-box" style="background:${color}"></div>${name}`;
-            legend.appendChild(div);
-        });
+        // Frame List (Replaces Legend)
+        // Legend is now removed from right panel as per user request
         
         // Controls
         document.getElementById('load-dataset-btn').onclick = () => {
@@ -145,11 +160,25 @@ class Viewer {
                     this.currentFrameIdx = 0;
                     this.updateFrame(0);
                 }
+                
+                // ⭐ 确保每次加载新数据集后，都重新渲染帧列表
+                this.renderFrameList();
             });
     }
     
     updateFrame(idx) {
         if (idx < 0 || idx >= this.frames.length) return Promise.resolve();
+        
+        // 1. Cancel previous tasks
+        if (this.abortController) {
+            this.abortController.abort();
+        }
+        this.abortController = new AbortController();
+        const signal = this.abortController.signal;
+        
+        // Clear pending timeouts
+        this.activeTimeouts.forEach(id => clearTimeout(id));
+        this.activeTimeouts = [];
         
         const frameId = this.frames[idx];
         
@@ -158,58 +187,69 @@ class Viewer {
         document.getElementById('frame-counter').innerText = `${idx + 1} / ${this.frames.length}`;
         document.getElementById('frame-name').innerText = `ID: ${frameId}`;
         
-        // 1. Load Images (Staggered to prevent blocking)
-        // 错峰加载: 每 50ms 加载一张图片，避免瞬间 8 个请求阻塞体素加载
-        const loadCamera = (idx) => {
-            if (idx >= 8) return;
+        // Highlight in list
+        this.highlightCurrentFrame();
+        
+        // 2. Load Images (Staggered to prevent blocking, but faster)
+        // 错峰加载: 每 10ms 加载一张图片 (faster response)
+        const loadCamera = (camIdx) => {
+            if (camIdx >= 8) return;
             
-            const img = document.getElementById(`cam_${idx}`);
+            const img = document.getElementById(`cam_${camIdx}`);
             // Use timestamp to prevent caching issues
-            const src = `/api/image/${frameId}/${idx}?t=${Date.now()}`;
+            const src = `/api/image/${frameId}/${camIdx}?t=${Date.now()}`;
             
-            img.onload = () => {
-                // Success
+            // Create a new image object to preload
+            const preloadImg = new Image();
+            
+            preloadImg.onload = () => {
+                if (signal.aborted) return; // Ignore if cancelled
+                img.src = src;
                 img.style.opacity = 1.0;
             };
             
-            img.onerror = () => {
+            preloadImg.onerror = () => {
+                if (signal.aborted) return;
                 console.warn(`Failed to load image: ${src}`);
-                // Stop retrying to avoid flickering
                 img.style.opacity = 0.2;
-                // Optional: set a placeholder if needed
             };
             
             img.style.opacity = 0.5; // Dim while loading
-            img.src = src;
+            preloadImg.src = src;
             
             // Next one
-            setTimeout(() => loadCamera(idx + 1), 50);
+            const timeoutId = setTimeout(() => loadCamera(camIdx + 1), 10);
+            this.activeTimeouts.push(timeoutId);
         };
         
         // Start loading cameras
         loadCamera(0);
         
-        // 2. Load Occupancy
+        // 3. Load Occupancy
         const loadingOverlay = document.getElementById('loading-overlay');
         loadingOverlay.style.display = 'block';
-        console.log(`[Viewer] Loading occupancy for frame ${frameId}...`);
+        // console.log(`[Viewer] Loading occupancy for frame ${frameId}...`);
         
-        return fetch(`/api/occupancy/${frameId}`)
+        return fetch(`/api/occupancy/${frameId}`, { signal })
             .then(res => {
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 return res.json();
             })
             .then(data => {
-                console.log(`[Viewer] Loaded occupancy: ${data.points ? data.points.length : 0} voxels`);
+                if (signal.aborted) return;
+                // console.log(`[Viewer] Loaded occupancy: ${data.points ? data.points.length : 0} voxels`);
                 this.renderVoxels(data);
                 loadingOverlay.style.display = 'none';
                 document.getElementById('voxel-stats').innerText = `Voxels: ${data.points ? data.points.length : 0}`;
             })
             .catch(err => {
-                console.error("[Viewer] Error loading occupancy:", err);
-                loadingOverlay.style.display = 'none';
-                // 可选: 显示错误提示给用户
-                document.getElementById('voxel-stats').innerText = `Error: ${err.message}`;
+                if (err.name === 'AbortError') {
+                    // console.log('Fetch aborted');
+                } else {
+                    console.error("[Viewer] Error loading occupancy:", err);
+                    loadingOverlay.style.display = 'none';
+                    document.getElementById('voxel-stats').innerText = `Error: ${err.message}`;
+                }
             });
     }
     
@@ -257,17 +297,16 @@ class Viewer {
         // Center offset: 512*0.2 / 2 = 51.2
         const offsetX = 51.2;
         const offsetY = 51.2;
-        const offsetZ = 2.0; // Assuming z starts from -2.0m, index 0 is -2.0m.
-        // Actually, we should map indices to world coordinates.
-        // Voxel Generator:
-        // x_range = [-51.2, 51.2], y_range = [-51.2, 51.2], z_range = [-2.0, 6.0]
+        const offsetZ = 4.0; 
+        
+        // Voxel Generator Config (occupancy_config.py):
+        // x_range = [-51.2, 51.2], y_range = [-51.2, 51.2], z_range = [-4.0, 4.0]
         // resolution = 0.2
-        // index 0 -> -51.2 + 0.1 (center)
         
         const res = 0.2;
-        const xMin = -40.0;
-        const yMin = -40.0;
-        const zMin = -1.0; // Fixed: Match occupancy_config.py Z_RANGE [-4.0, 4.0]
+        const xMin = -51.2;
+        const yMin = -51.2;
+        const zMin = -4.0;
         
         for (let i = 0; i < points.length; i++) {
             const p = points[i];
@@ -275,7 +314,10 @@ class Viewer {
             
             // Calculate world position
             const x = xMin + p[0] * res + res/2;
-            const y = yMin + p[1] * res + res/2;
+            // Flip Y to match Three.js coordinate system (Right-handed vs Left-handed)
+            // CARLA Y is Right (+), Three.js Y is Left (+) when looking from behind (X-)
+            // So we negate Y to map Right to Right.
+            const y = -(yMin + p[1] * res + res/2);
             const z = zMin + p[2] * res + res/2;
             
             dummy.position.set(x, y, z);
@@ -294,6 +336,52 @@ class Viewer {
         this.voxelMesh = mesh;
     }
     
+    renderFrameList() {
+        const listContainer = document.getElementById('frame-list');
+        if (!listContainer) return;
+        
+        console.log(`[Viewer] Rendering frame list with ${this.frames.length} frames`);
+        listContainer.innerHTML = '';
+        
+        if (this.frames.length === 0) {
+            listContainer.innerHTML = '<div style="padding:10px; color:#888;">No frames found</div>';
+            return;
+        }
+        
+        this.frames.forEach((frameId, idx) => {
+            const div = document.createElement('div');
+            div.className = 'frame-item';
+            div.id = `frame-item-${idx}`;
+            div.innerText = frameId;
+            
+            div.onclick = () => {
+                this.currentFrameIdx = idx;
+                this.updateFrame(idx);
+            };
+            
+            listContainer.appendChild(div);
+        });
+        
+        this.highlightCurrentFrame();
+    }
+    
+    highlightCurrentFrame() {
+        // Remove active class from all
+        const items = document.querySelectorAll('.frame-item');
+        items.forEach(item => {
+            item.classList.remove('active');
+        });
+        
+        // Add active class to current
+        const current = document.getElementById(`frame-item-${this.currentFrameIdx}`);
+        if (current) {
+            current.classList.add('active');
+            
+            // Auto scroll to keep visible
+            current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+
     nextFrame() {
         if (this.currentFrameIdx < this.frames.length - 1) {
             this.currentFrameIdx++;

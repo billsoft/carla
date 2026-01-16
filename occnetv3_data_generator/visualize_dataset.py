@@ -112,10 +112,26 @@ def visualize_sample(dataset_dir, sample_id):
         # BEV View (Top-down) -> 放在第3行左侧
         ax_bev = fig.add_subplot(gs[2, 0:2])
         bev = np.max(occupancy, axis=2) # Z max
+        # Transpose: X (vertical), Y (horizontal)
+        # origin='lower': (0,0) at bottom-left
+        # Plot X-axis: Grid Y index (0=Left/NegY, 512=Right/PosY if Y=Right)
+        # Plot Y-axis: Grid X index (0=Back/NegX, 512=Front/PosX)
         im1 = ax_bev.imshow(bev.T, origin='lower', cmap='tab20', vmin=0, vmax=17)
-        ax_bev.set_title("Occupancy BEV")
-        ax_bev.set_xlabel("X (Forward)")
-        ax_bev.set_ylabel("Y (Left)")
+        ax_bev.set_title("Occupancy BEV (Max Z)")
+        ax_bev.set_xlabel("Y Axis (Right?)") # TBD: Verify
+        ax_bev.set_ylabel("X Axis (Forward)")
+        
+        # Draw Center Crosshair (Hero Position)
+        cx, cy = occupancy.shape[0]//2, occupancy.shape[1]//2
+        ax_bev.axhline(cx, color='white', alpha=0.5, linestyle='--') # Horizontal line at X center (in plot coords, this is Y axis)
+        ax_bev.axvline(cy, color='white', alpha=0.5, linestyle='--') # Vertical line at Y center
+        
+        # Mark Hero Box (Approx 5m x 2m)
+        # 5m / 0.2 = 25 voxels
+        # 2m / 0.2 = 10 voxels
+        rect = plt.Rectangle((cy-5, cx-12), 10, 25, linewidth=2, edgecolor='red', facecolor='none')
+        ax_bev.add_patch(rect)
+        
         plt.colorbar(im1, ax=ax_bev)
         
         # Front View (Side) -> 放在第3行右侧
@@ -123,9 +139,18 @@ def visualize_sample(dataset_dir, sample_id):
         # Y max (side projection)
         front = np.max(occupancy, axis=1) 
         im2 = ax_front.imshow(front.T, origin='lower', cmap='tab20', vmin=0, vmax=17)
-        ax_front.set_title("Occupancy Front View (Side Projection)")
+        ax_front.set_title("Occupancy Side View (Y-Max)")
         ax_front.set_xlabel("X (Forward)")
         ax_front.set_ylabel("Z (Up)")
+        
+        # Draw Center Crosshair
+        cz = occupancy.shape[2]//2
+        # Z range [-4, 4], center is 0.
+        # Grid Z=0 is at index 20 (for 40 height)
+        z_zero_idx = int((0 - (-4.0)) / 0.2)
+        ax_front.axhline(z_zero_idx, color='white', alpha=0.5, linestyle='--') # Ground level
+        ax_front.axvline(cx, color='white', alpha=0.5, linestyle='--') # Ego X center
+        
         plt.colorbar(im2, ax=ax_front)
         
     else:
