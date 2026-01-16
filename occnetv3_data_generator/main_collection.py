@@ -444,6 +444,12 @@ def main():
                 print(f"  {(i+1)*10}%")
         print(f"  ✓ 传感器就绪，耗时: {(time.time()-step_start):.2f}s")
 
+        # 7.5 清空队列 (关键: 修复前3帧数据不同步问题)
+        # 传感器初始化期间积累了旧数据，必须在正式采集前清空
+        print("\n[4.5/5] 清空传感器队列...")
+        camera_manager.clear_queues()
+        semantic_lidar.clear_queues()
+
         # 8. 开始采集
         print(f"\n{'='*60}")
         print(f"[5/5] 开始采集 {args.frames} 帧".center(60))

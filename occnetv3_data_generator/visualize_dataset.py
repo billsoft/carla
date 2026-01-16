@@ -114,8 +114,8 @@ def visualize_sample(dataset_dir, sample_id):
         bev = np.max(occupancy, axis=2) # Z max
         # Transpose: X (vertical), Y (horizontal)
         # origin='lower': (0,0) at bottom-left
-        # Plot X-axis: Grid Y index (0=Left/NegY, 512=Right/PosY if Y=Right)
-        # Plot Y-axis: Grid X index (0=Back/NegX, 512=Front/PosX)
+        # Plot X-axis: Grid Y index (0=Left/NegY, 400=Right/PosY if Y=Right)
+        # Plot Y-axis: Grid X index (0=Back/NegX, 400=Front/PosX)
         im1 = ax_bev.imshow(bev.T, origin='lower', cmap='tab20', vmin=0, vmax=17)
         ax_bev.set_title("Occupancy BEV (Max Z)")
         ax_bev.set_xlabel("Y Axis (Right?)") # TBD: Verify
@@ -145,9 +145,9 @@ def visualize_sample(dataset_dir, sample_id):
         
         # Draw Center Crosshair
         cz = occupancy.shape[2]//2
-        # Z range [-4, 4], center is 0.
-        # Grid Z=0 is at index 20 (for 40 height)
-        z_zero_idx = int((0 - (-4.0)) / 0.2)
+        # Z range [-1.0, 5.4], center is 0.
+        # Grid Z=0 is at index 5 (for 32 height) -> (0 - (-1.0)) / 0.2 = 5
+        z_zero_idx = int((0 - (-1.0)) / 0.2)
         ax_front.axhline(z_zero_idx, color='white', alpha=0.5, linestyle='--') # Ground level
         ax_front.axvline(cx, color='white', alpha=0.5, linestyle='--') # Ego X center
         

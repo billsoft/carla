@@ -118,6 +118,15 @@ class SemanticLidarSensor:
         except queue.Empty:
             raise TimeoutError("Semantic LiDAR data timeout")
 
+    def clear_queues(self):
+        """清空数据队列"""
+        while not self.data_queue.empty():
+            try:
+                self.data_queue.get_nowait()
+            except queue.Empty:
+                break
+        print(f"[SemanticLidar] 已清空数据队列")
+
     def _parse_lidar_data(self, raw_bytes):
         """
         解析 Semantic LiDAR 数据 (结构化 numpy 数组)

@@ -55,7 +55,7 @@ class OccNetDataset(Dataset):
         image_tensor = torch.stack(images)
         
         # 2. 加载 Occupancy Label
-        # (512, 512, 40) uint8 -> (512, 512, 40) long
+        # (400, 400, 32) uint8 -> (400, 400, 32) long
         occ_path = self.data_root / 'occupancy' / f'{sample_id}.npy'
         occupancy = np.load(occ_path).astype(np.int64)
         
@@ -84,7 +84,7 @@ class SimpleOccNet(nn.Module):
         # x: images (B, 8, 1, H, W)
         # 这里省略复杂的 2D->3D 变换
         # 假设我们直接生成一个随机的 Voxel Feature (B, 64, 128, 128, 10)
-        # 然后上采样到 (512, 512, 40)
+        # 然后上采样到 (400, 400, 32)
         
         B = x.shape[0]
         dummy_voxel_feat = torch.randn(B, 64, 128, 128, 10).to(x.device)
@@ -92,7 +92,7 @@ class SimpleOccNet(nn.Module):
         out = self.voxel_head(dummy_voxel_feat)
         
         # 上采样到目标尺寸
-        out = torch.nn.functional.interpolate(out, size=(512, 512, 40), mode='trilinear', align_corners=False)
+        out = torch.nn.functional.interpolate(out, size=(400, 400, 32), mode='trilinear', align_corners=False)
         return out
 
 def train():

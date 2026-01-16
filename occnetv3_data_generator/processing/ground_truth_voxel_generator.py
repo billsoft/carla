@@ -575,15 +575,15 @@ class GroundTruthVoxelGenerator:
                                0)
 
         # 3. 创建 3D Z 坐标网格
-        Z_grid = np.arange(self.grid_size[2])[None, None, :]  # shape: (1, 1, 40)
-        surface_z_3d = surface_z[:, :, None]  # shape: (512, 512, 1)
+        Z_grid = np.arange(self.grid_size[2])[None, None, :]  # shape: (1, 1, 32)
+        surface_z_3d = surface_z[:, :, None]  # shape: (400, 400, 1)
 
         # 4. 生成填充掩码: Z < surface_z 且 occupancy == 0
         fill_mask = (Z_grid < surface_z_3d) & (occupancy == 0) & has_surface[:, :, None]
 
         # 5. 向量化填充 (广播操作)
         # 将 surface_labels 和 surface_aids 广播到 3D
-        # surface_labels_3d = surface_labels[:, :, None]  # (512, 512, 1)
+        # surface_labels_3d = surface_labels[:, :, None]  # (400, 400, 1)
         # surface_aids_3d = surface_aids[:, :, None]
 
         # ⭐⭐⭐ FIX: 地下填充统一使用 Terrain (泥土) ⭐⭐⭐

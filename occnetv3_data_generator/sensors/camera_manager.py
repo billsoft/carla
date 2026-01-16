@@ -235,6 +235,16 @@ class CameraManager:
 
         return synced_data
 
+    def clear_queues(self):
+        """清空所有相机的队列"""
+        for cam_id in self.data_queues:
+            while not self.data_queues[cam_id].empty():
+                try:
+                    self.data_queues[cam_id].get_nowait()
+                except queue.Empty:
+                    break
+        print(f"[CameraManager] 已清空所有数据队列")
+
     def get_intrinsics(self, cam_id: str) -> np.ndarray:
         """
         获取相机内参矩阵
