@@ -9,21 +9,21 @@ OccNetV3 体素配置 - 400x400x32 体素网格
 #       如果在后续训练中需要 Y左，请在 Dataset Loader 中进行 flip(axis=1)。
 # 原点: 车辆后轴中心地面 (Z=0)
 
-# 对齐 OccNetV3 / nuScenes 范围标准 (51.2m)
-X_RANGE = [-51.2, 51.2]  # 前后 102.4m
-Y_RANGE = [-51.2, 51.2]  # 左右 102.4m
-Z_RANGE = [-4.0, 4.0]    # 上下 8m
+# 对齐 OccNetV3 / nuScenes 范围标准 (40.0m)
+X_RANGE = [-40.0, 40.0]  # 前后 80.0m
+Y_RANGE = [-40.0, 40.0]  # 左右 80.0m
+Z_RANGE = [-1.0, 5.4]    # 上下 6.4m
 
 RESOLUTION = 0.2  # 每个体素边长 0.2m
 
 # 计算网格尺寸: (X_max - X_min) / resolution
 GRID_SIZE = (
-    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 512
-    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 512
-    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 40
+    int((X_RANGE[1] - X_RANGE[0]) / RESOLUTION),  # 400
+    int((Y_RANGE[1] - Y_RANGE[0]) / RESOLUTION),  # 400
+    int((Z_RANGE[1] - Z_RANGE[0]) / RESOLUTION),  # 32
 )
 
-assert GRID_SIZE == (512, 512, 40), f"网格尺寸计算错误: {GRID_SIZE}"
+assert GRID_SIZE == (400, 400, 32), f"网格尺寸计算错误: {GRID_SIZE}"
 
 PC_RANGE = [X_RANGE[0], Y_RANGE[0], Z_RANGE[0], X_RANGE[1], Y_RANGE[1], Z_RANGE[1]]
 
@@ -153,16 +153,23 @@ DEPTH_IMAGE_SIZE = 512
 MAX_DEPTH = 100.0
 
 # ========== 语义激光雷达配置 (新增) ==========
+# 垂直 FOV 计算: 匹配相机最大垂直 FOV (约 110度)
+# 相机 Max HFOV = 120 (Rear), Aspect Ratio = 0.75 -> VFOV ~ 105度
+# 设置 range=120度 (+60/-60) 以确保覆盖
 SEMANTIC_LIDAR_CONFIG = {
     'channels': 256,             # 256 线 (高密度)
     'points_per_second': 2000000,  # 每秒 200 万点
     'rotation_frequency': 20,    # 20Hz 旋转 (与仿真同步)
     'range': 100.0,              # 100 米探测范围
-    'upper_fov': 15.0,           # 上视角 15°
-    'lower_fov': -25.0,          # 下视角 -25°
+    'upper_fov': 45.0,           # 上视角 45°
+    'lower_fov': -45.0,          # 下视角 -45°
+    'horizontal_fov': 360.0,     # 水平 360°
 
     # 安装位置 (相对车辆)
-    'position': {'x': 0.0, 'y': 0.0, 'z': 2.5},  # 车顶中央
+    # 尽量接近相机中心高度 (约1.4-1.6m)，但必须高于车顶以免被遮挡
+    # Model 3 车高约 1.44m，B柱相机 1.7m
+    # 设置 Z=1.0m (用户指定)
+    'position': {'x': 0.0, 'y': 0.0, 'z': 1.0}, 
     'rotation': {'pitch': 0, 'yaw': 0, 'roll': 0},
 }
 

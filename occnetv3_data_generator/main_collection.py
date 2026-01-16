@@ -498,14 +498,14 @@ def main():
                 dt=0.05
             )
             # 5.3 可见性过滤 (基于 LiDAR)
-            # ⭐ 禁用可见性过滤: LiDAR 点云太稀疏，导致远处或未击中的车辆被错误过滤
-            # 用户反馈 "相机能看到车但体素没有"，因此我们保留完整的 Ground Truth 体素
-            # occupancy, actor_ids = visibility_filter.run(
-            #     occupancy,
-            #     actor_ids,
-            #     {'x_range': X_RANGE, 'y_range': Y_RANGE, 'z_range': Z_RANGE, 'resolution': RESOLUTION},
-            #     lidar_data
-            # )
+            # 使用 Semantic LiDAR 过滤被遮挡的物体，但保留地面和 Ego
+            occupancy, actor_ids = visibility_filter.run(
+                occupancy,
+                actor_ids,
+                {'x_range': X_RANGE, 'y_range': Y_RANGE, 'z_range': Z_RANGE, 'resolution': RESOLUTION},
+                lidar_data,
+                ego_id=vehicle.id
+            )
             # print(f"  [Visibility] Filter Disabled (Full Ground Truth)")
 
             voxel_time = (time.time() - step_start) * 1000

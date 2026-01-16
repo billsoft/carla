@@ -22,7 +22,7 @@ except ImportError:
         from ..config.occupancy_config import GRID_SIZE
     except ImportError:
          # Fallback default
-         GRID_SIZE = (512, 512, 40)
+         GRID_SIZE = (400, 400, 32)
          print(f"[Warning] Could not import GRID_SIZE, using default: {GRID_SIZE}")
 
 # DNG支持（可选）
@@ -48,11 +48,11 @@ class OccNetDataSaver:
         │       ├── cam_0.dng  (12-bit Bayer RGGB)
         │       └── ...
         ├── occupancy/
-        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 32) uint8
+        │   └── scene_XXXX_frame_YYYY.npy  (400, 400, 32) uint8
         ├── flow/
-        │   └── scene_XXXX_frame_YYYY.npy  (3, 512, 512, 32) float16
+        │   └── scene_XXXX_frame_YYYY.npy  (3, 400, 400, 32) float16
         ├── flow_mask/
-        │   └── scene_XXXX_frame_YYYY.npy  (512, 512, 32) uint8
+        │   └── scene_XXXX_frame_YYYY.npy  (400, 400, 32) uint8
         ├── ego_pose/
         │   └── scene_XXXX_frame_YYYY.npy  (4, 4) float32
         ├── ego_motion/

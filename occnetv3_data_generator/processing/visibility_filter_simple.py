@@ -23,7 +23,7 @@ class VisibilityFilterSimple:
         # LiDAR 安装位置 (相对 Ego), 用于坐标转换
         self.lidar_offset = np.array([0.0, 0.0, 2.5], dtype=np.float32)
 
-    def run(self, occupancy, actor_ids, grid_config, lidar_data, dt=0.05):
+    def run(self, occupancy, actor_ids, grid_config, lidar_data, ego_id=None, dt=0.05):
         """
         基于 ID 聚类的可见性过滤器 (Instance-based Visibility Filter)
         
@@ -32,6 +32,9 @@ class VisibilityFilterSimple:
         2. 读取这些坐标处的 ID (包括动态 Actor ID 和静态虚拟 ID)。
         3. 将这些 ID 加入 "保留列表" (Keep Set)。
         4. 保留网格中所有 ID 在 "保留列表" 中的体素 (整体保留)。
+        
+        Args:
+            ego_id: 自车 ID (强制保留)
         """
         self.current_time += dt
         
@@ -79,6 +82,10 @@ class VisibilityFilterSimple:
         # 3. 更新时序缓存 (防止闪烁)
         for aid in current_hit_ids:
             self.visibility_cache[aid] = self.current_time
+        
+        # ⭐ 强制保留 Ego ID
+        if ego_id is not None:
+            self.visibility_cache[ego_id] = self.current_time
             
         # 清理过期缓存，生成最终保留列表
         final_keep_ids = []
@@ -102,7 +109,24 @@ class VisibilityFilterSimple:
             instance_mask = np.zeros(occupancy.shape, dtype=bool)
             
         # Mask B: 地面/标线保护 (强制保留)
-        ground_mask = np.isin(occupancy, self.GROUND_LABELS)
+        # 1. 语义标签保护 (Road, Sidewalk, etc.)
+        semantic_ground_mask = np.isin(occupancy, self.GROUND_LABELS)
+        
+        # 2. 高度保护 (Z < threshold) - 防止语义映射错误导致地面被切
+        # Z range: [-1.0, 5.4], Resolution: 0.2
+        # Index 0 -> -1.0 ~ -0.8
+        # Index 1 -> -0.8 ~ -0.6
+        # Index 5 ->  0.0 ~  0.2
+        # Index 10 -> 1.0 ~  1.2
+        # 保护 Z <= 1.0m (Index <= 10) 的所有体素
+        # 注意: 只保护非空体素 (occupancy > 0)，避免保留地下噪声
+        z_indices = np.arange(occupancy.shape[2])
+        z_mask_2d = z_indices <= 10  # Z <= 1.0m
+        height_protection_mask = np.zeros_like(occupancy, dtype=bool)
+        height_protection_mask[:, :, z_mask_2d] = True
+        height_protection_mask = height_protection_mask & (occupancy > 0) # 仅保护非空体素
+
+        ground_mask = semantic_ground_mask | height_protection_mask
         
         # 组合
         final_mask = instance_mask | ground_mask

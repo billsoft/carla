@@ -48,7 +48,7 @@ class GroundTruthVoxelGenerator:
         # self.cache_resolution = 0.5 # Deprecated: use self.resolution
 
         # ⭐ 添加验证
-        expected_grid_size = [512, 512, 40]
+        expected_grid_size = [400, 400, 32]
         if self.grid_size != expected_grid_size:
             print(f"[警告] 体素网格尺寸 {self.grid_size} 与标准 {expected_grid_size} 不一致")
 

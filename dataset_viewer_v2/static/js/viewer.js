@@ -294,19 +294,19 @@ class Viewer {
         
         const dummy = new THREE.Object3D();
         
-        // Center offset: 512*0.2 / 2 = 51.2
-        const offsetX = 51.2;
-        const offsetY = 51.2;
-        const offsetZ = 4.0; 
+        // Center offset: 400*0.2 / 2 = 40.0
+        const offsetX = 40.0;
+        const offsetY = 40.0;
+        const offsetZ = 1.0; 
         
         // Voxel Generator Config (occupancy_config.py):
-        // x_range = [-51.2, 51.2], y_range = [-51.2, 51.2], z_range = [-4.0, 4.0]
+        // x_range = [-40.0, 40.0], y_range = [-40.0, 40.0], z_range = [-1.0, 5.4]
         // resolution = 0.2
         
         const res = 0.2;
-        const xMin = -51.2;
-        const yMin = -51.2;
-        const zMin = -4.0;
+        const xMin = -40.0;
+        const yMin = -40.0;
+        const zMin = -1.0;
         
         for (let i = 0; i < points.length; i++) {
             const p = points[i];

@@ -21,7 +21,7 @@ dataset/
 │   └── scene_0000_frame_0000/
 │       ├── cam_front_main.npy
 │       ├── ...
-├── occupancy/           # 3D 占用网格 GT (512x512x40)
+├── occupancy/           # 3D 占用网格 GT (400x400x32)
 │   └── scene_0000_frame_0000.npy
 ├── flow/                # 3D 场景流 GT
 ├── flow_mask/           # 流场掩码

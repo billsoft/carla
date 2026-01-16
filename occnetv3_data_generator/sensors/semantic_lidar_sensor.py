@@ -45,6 +45,10 @@ class SemanticLidarSensor:
         lidar_bp.set_attribute('range', str(self.config['range']))
         lidar_bp.set_attribute('upper_fov', str(self.config['upper_fov']))
         lidar_bp.set_attribute('lower_fov', str(self.config['lower_fov']))
+        
+        # ⭐ 支持水平 FOV 设置 (默认 360)
+        if 'horizontal_fov' in self.config:
+             lidar_bp.set_attribute('horizontal_fov', str(self.config['horizontal_fov']))
 
         # 创建 Transform
         position = self.config['position']
