@@ -35,6 +35,11 @@ class Config:
     focal_alpha = 0.25
     flow_loss_weight = 0.5
     coarse_loss_weight = 0.3
+    # Distance-Aware Loss (近距离体素权重更高)
+    use_distance_aware = True
+    distance_loss_weight = 0.2
+    # Ray Direction Encoding (射线方向编码)
+    use_ray_encoding = True
     cameras = {
         'front_main': {'id': 0, 'fov': 50.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
         'front_wide': {'id': 1, 'fov': 120.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},

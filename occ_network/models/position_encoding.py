@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 
 class PositionEncoding2D(nn.Module):
     def __init__(self, dim: int, h: int, w: int, temperature: float = 10000):
@@ -79,13 +79,186 @@ class MultiCameraPositionEncoding(nn.Module):
         k = self.camera_rope(k, yaw)
         return q, k
 
+class RayDirectionEncoding(nn.Module):
+    """
+    射线方向编码
+
+    将每个像素的 3D 射线方向编码为特征向量
+    这帮助模型理解不同相机像素在 3D 空间中"指向"的方向
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        image_size: Tuple[int, int],
+        camera_configs: Dict,
+        patch_size: int = 16,
+        temperature: float = 10000.0
+    ):
+        super().__init__()
+        self.dim = dim
+        self.image_size = image_size
+        self.patch_size = patch_size
+
+        # 预计算每个相机的射线方向
+        for cam_name, cfg in camera_configs.items():
+            cam_id = cfg['id']
+            rays = self._compute_ray_directions(
+                cfg['fov'],
+                cfg['rotation'],
+                image_size,
+                patch_size
+            )
+            # rays: [H_patches, W_patches, 3]
+            self.register_buffer(f'rays_{cam_id}', rays)
+
+        # 正弦编码频率
+        inv_freq = 1.0 / (temperature ** (torch.arange(0, dim, 6).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def _compute_ray_directions(
+        self,
+        fov: float,
+        rotation: List[float],
+        image_size: Tuple[int, int],
+        patch_size: int
+    ) -> torch.Tensor:
+        """
+        计算 patch 中心点的射线方向
+
+        Returns:
+            rays: [H_patches, W_patches, 3] 归一化射线方向
+        """
+        H, W = image_size
+        H_p, W_p = H // patch_size, W // patch_size
+
+        # 计算内参
+        fx = W / (2 * math.tan(math.radians(fov / 2)))
+        fy = fx  # 假设正方形像素
+        cx, cy = W / 2, H / 2
+
+        # Patch 中心坐标
+        u = torch.linspace(patch_size/2, W - patch_size/2, W_p)
+        v = torch.linspace(patch_size/2, H - patch_size/2, H_p)
+        vv, uu = torch.meshgrid(v, u, indexing='ij')  # [H_p, W_p]
+
+        # 相机坐标系下的射线方向
+        dx = (uu - cx) / fx
+        dy = (vv - cy) / fy
+        dz = torch.ones_like(dx)
+
+        rays_cam = torch.stack([dx, dy, dz], dim=-1)  # [H_p, W_p, 3]
+
+        # 归一化
+        rays_cam = rays_cam / rays_cam.norm(dim=-1, keepdim=True)
+
+        # 转换到车辆坐标系
+        R = self._rotation_matrix(rotation)  # [3, 3]
+        rays_world = torch.einsum('ij,hwj->hwi', R, rays_cam)
+
+        return rays_world
+
+    def _rotation_matrix(self, rotation: List[float]) -> torch.Tensor:
+        """
+        从欧拉角计算旋转矩阵
+        rotation: [pitch, roll, yaw] in degrees
+        """
+        pitch, roll, yaw = [math.radians(r) for r in rotation]
+
+        # Rz @ Ry @ Rx
+        Rx = torch.tensor([
+            [1, 0, 0],
+            [0, math.cos(pitch), -math.sin(pitch)],
+            [0, math.sin(pitch), math.cos(pitch)]
+        ], dtype=torch.float32)
+
+        Ry = torch.tensor([
+            [math.cos(roll), 0, math.sin(roll)],
+            [0, 1, 0],
+            [-math.sin(roll), 0, math.cos(roll)]
+        ], dtype=torch.float32)
+
+        Rz = torch.tensor([
+            [math.cos(yaw), -math.sin(yaw), 0],
+            [math.sin(yaw), math.cos(yaw), 0],
+            [0, 0, 1]
+        ], dtype=torch.float32)
+
+        return Rz @ Ry @ Rx
+
+    def _sinusoidal_encode(self, rays: torch.Tensor) -> torch.Tensor:
+        """
+        正弦编码射线方向
+
+        rays: [..., 3] 射线方向向量
+        returns: [..., dim] 编码后特征
+        """
+        shape = rays.shape[:-1]
+        rays_flat = rays.view(-1, 3)  # [*, 3]
+
+        encodings = []
+        for i in range(3):  # x, y, z
+            coord = rays_flat[:, i:i+1]  # [*, 1]
+            freq = coord * self.inv_freq  # [*, dim//6]
+            enc = torch.cat([freq.sin(), freq.cos()], dim=-1)  # [*, dim//3]
+            encodings.append(enc)
+
+        encoded = torch.cat(encodings, dim=-1)  # [*, dim]
+
+        # 调整到目标维度
+        if encoded.shape[-1] > self.dim:
+            encoded = encoded[..., :self.dim]
+        elif encoded.shape[-1] < self.dim:
+            padding = torch.zeros(*encoded.shape[:-1], self.dim - encoded.shape[-1],
+                                  device=encoded.device, dtype=encoded.dtype)
+            encoded = torch.cat([encoded, padding], dim=-1)
+
+        return encoded.view(*shape, self.dim)
+
+    def forward(self, camera_id: int, batch_size: int, device: torch.device = None) -> torch.Tensor:
+        """
+        获取指定相机的射线编码
+
+        Args:
+            camera_id: 相机ID
+            batch_size: batch大小
+            device: 目标设备
+
+        Returns:
+            ray_encoding: [B, H_p * W_p, dim]
+        """
+        rays = getattr(self, f'rays_{camera_id}')  # [H_p, W_p, 3]
+        H_p, W_p, _ = rays.shape
+
+        # 编码
+        encoded = self._sinusoidal_encode(rays)  # [H_p, W_p, dim]
+
+        # Flatten 并 batch expand
+        encoded = encoded.view(H_p * W_p, self.dim)  # [N, dim]
+        encoded = encoded.unsqueeze(0).expand(batch_size, -1, -1)  # [B, N, dim]
+
+        if device is not None:
+            encoded = encoded.to(device)
+
+        return encoded
+
+
 class CameraPositionEncoding(nn.Module):
-    def __init__(self, dim, num_cameras, image_size, camera_configs, patch_size=16):
+    def __init__(self, dim, num_cameras, image_size, camera_configs, patch_size=16, use_ray_encoding=True):
         super().__init__()
         self.encoder = MultiCameraPositionEncoding(dim, num_cameras, image_size, camera_configs, patch_size)
+        self.use_ray_encoding = use_ray_encoding
+        if use_ray_encoding:
+            self.ray_encoder = RayDirectionEncoding(dim, image_size, camera_configs, patch_size)
 
     def forward(self, x):
         return self.encoder.add_pixel_pe(x)
 
     def encode_qk_single_camera(self, q, k, camera_id):
         return self.encoder.encode_qk_single_camera(q, k, camera_id)
+
+    def get_ray_encoding(self, camera_id: int, batch_size: int, device: torch.device = None) -> Optional[torch.Tensor]:
+        """获取射线方向编码"""
+        if self.use_ray_encoding:
+            return self.ray_encoder(camera_id, batch_size, device)
+        return None

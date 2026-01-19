@@ -1,6 +1,10 @@
 """
 OccNetV3 网络结构验证脚本
 验证每个模块的输入输出形状,诊断数据集兼容性问题
+
+新增功能:
+- 验证 Ray Direction Encoding (射线方向编码)
+- 验证 Distance-Aware Loss (距离感知损失)
 """
 import torch
 import torch.nn as nn
@@ -12,6 +16,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from configs.default import config
 from models.occ_net import build_model
+from losses.losses import DistanceAwareLoss, OccLoss
+from models.position_encoding import RayDirectionEncoding
+from inference import inference_with_uncertainty
+from models.sparse_modules import get_backend, SPCONV_AVAILABLE, TORCHSPARSE_AVAILABLE
 
 def print_section(title):
     """打印分隔线"""
@@ -207,8 +215,89 @@ def main():
     print("    3. 验证数据: python verify_occupancy.py")
     print("    4. 开始训练: python train.py --dataset dataset_10k --batch-size 1 --epochs 2 --amp")
 
+    # 新增: 验证优化功能
+    print_section("13. 优化功能验证")
+
+    print("\n  【优化1: 距离感知损失 (Distance-Aware Loss)】")
+    print(f"    启用状态: {'✅ 启用' if config.use_distance_aware else '❌ 禁用'}")
+    print(f"    损失权重: {config.distance_loss_weight}")
+
+    if config.use_distance_aware:
+        try:
+            dist_loss = DistanceAwareLoss(
+                voxel_size=config.voxel_size,
+                pc_range=config.pc_range
+            )
+            # 测试距离权重
+            weight = dist_loss.distance_weight
+            print(f"    距离权重形状: {weight.shape}")
+            print(f"    中心点权重 (0m): {weight[200, 200, 0]:.3f}")
+            print(f"    边缘权重 (40m): {weight[0, 200, 0]:.3f}")
+            print("    ✅ Distance-Aware Loss 初始化成功")
+        except Exception as e:
+            print(f"    ❌ 初始化失败: {e}")
+
+    print("\n  【优化2: 射线方向编码 (Ray Direction Encoding)】")
+    print(f"    启用状态: {'✅ 启用' if config.use_ray_encoding else '❌ 禁用'}")
+
+    if config.use_ray_encoding:
+        try:
+            ray_enc = RayDirectionEncoding(
+                dim=config.embed_dim,
+                image_size=config.image_size,
+                camera_configs=config.cameras,
+                patch_size=config.patch_size
+            )
+            # 测试射线编码
+            enc = ray_enc(camera_id=0, batch_size=1)
+            print(f"    编码输出形状: {enc.shape}")
+
+            # 显示前视相机射线方向示例
+            rays = ray_enc.rays_0
+            print(f"    射线方向形状: {rays.shape}")
+            center_ray = rays[rays.shape[0]//2, rays.shape[1]//2]
+            print(f"    中心像素射线: ({center_ray[0]:.3f}, {center_ray[1]:.3f}, {center_ray[2]:.3f})")
+            print("    ✅ Ray Direction Encoding 初始化成功")
+        except Exception as e:
+            print(f"    ❌ 初始化失败: {e}")
+
+    print("\n  【优化3: 时序帧数】")
+    print(f"    当前帧数: {config.num_frames} 帧")
+    print(f"    建议: 2-4帧 (每增加1帧约+100MB显存)")
+
+    print("\n  【优化4: MC Dropout (不确定性估计)】")
+    print(f"    启用状态: {'✅ 启用' if config.use_mc_dropout else '❌ 禁用 (配置文件)'}")
+    print(f"    采样次数: {config.mc_samples}")
+    
+    # 验证 MC Dropout 推理
+    try:
+        print("    正在运行 MC Dropout 推理测试...")
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+            model.to(device)
+            # 使用较小的采样数进行测试
+            result = inference_with_uncertainty(model, config, device, num_samples=2)
+            print(f"    ✅ MC Dropout 推理成功")
+            print(f"    不确定性方差均值: {result['uncertainty_variance'].mean().item():.6f}")
+            print(f"    不确定性熵均值: {result['uncertainty_entropy'].mean().item():.6f}")
+        else:
+            print("    ⚠️ 跳过 MC Dropout 测试 (无 CUDA)")
+    except Exception as e:
+        print(f"    ❌ MC Dropout 测试失败: {e}")
+
+    print("\n  【优化5: 稀疏卷积后端 (Sparse Convolution)】")
+    backend = get_backend()
+    print(f"    当前后端: {backend}")
+    print(f"    spconv可用: {'✅' if SPCONV_AVAILABLE else '❌'}")
+    print(f"    torchsparse可用: {'✅' if TORCHSPARSE_AVAILABLE else '❌'}")
+    
+    if backend == 'dense':
+        print("    ⚠️ 警告: 正在使用 Dense 后端 (速度较慢，显存占用高)")
+    else:
+        print(f"    ✅ 正在使用加速后端: {backend}")
+
     # 显存估算
-    print_section("13. 显存占用估算")
+    print_section("14. 显存占用估算")
 
     def estimate_memory(shape, dtype=torch.float32):
         """估算张量显存占用"""
@@ -243,11 +332,24 @@ def main():
     print(f"  训练时 (×3倍): ≈ {total_mem*3/1024:.2f} GB")
 
     print_section("验证完成")
-    print("\n  🎯 下一步建议:")
-    print("     1. 决定采用哪个方案解决 500 vs 512 不匹配")
-    print("     2. 修改 occnetv3_data_generator 或 occ_network 配置")
-    print("     3. 生成测试数据集验证训练流程")
-    print("     4. 运行完整训练测试")
+    print("\n  🎯 实施的优化:")
+    print("     ✅ 优化2: Ray Direction Encoding (射线方向编码)")
+    print("        - 每个像素编码其3D射线方向")
+    print("        - 帮助多视角特征融合")
+    print("     ✅ 优化3: Distance-Aware Loss (距离感知损失)")
+    print("        - 近距离体素权重更高")
+    print("        - 提升安全关键区域精度")
+    print("     ✅ 优化4: MC Dropout (不确定性估计)")
+    print("        - 训练时使用 Dropout")
+    print("        - 推理时多次采样估计不确定性")
+    print("     ✅ 优化5: Sparse Convolution (稀疏卷积)")
+    print("        - 3D卷积使用稀疏后端加速")
+    print("        - 减少显存占用和计算量")
+    print()
+    print("  🎯 下一步建议:")
+    print("     1. 运行训练: python train.py --dataset D:/code/carla/dataset_10k_bak --batch-size 1 --epochs 2 --amp")
+    print("     2. 监控 distance 损失是否正常下降")
+    print("     3. 检验近距离物体 IoU 是否提升")
     print()
 
 if __name__ == '__main__':

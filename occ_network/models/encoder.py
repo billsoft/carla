@@ -90,4 +90,14 @@ class MultiCameraEncoder(nn.Module):
 
     def forward(self, camera_tokens, spatial_shape, position_encoder=None):
         H, W = spatial_shape
-        return [self.encoder(tokens, H, W, position_encoder, cam_idx) for cam_idx, tokens in enumerate(camera_tokens)]
+        encoded_list = []
+        for cam_idx, tokens in enumerate(camera_tokens):
+            # 添加射线方向编码 (如果可用)
+            if position_encoder is not None and hasattr(position_encoder, 'get_ray_encoding'):
+                ray_enc = position_encoder.get_ray_encoding(cam_idx, tokens.shape[0], tokens.device)
+                if ray_enc is not None:
+                    tokens = tokens + ray_enc
+            # 编码
+            encoded = self.encoder(tokens, H, W, position_encoder, cam_idx)
+            encoded_list.append(encoded)
+        return encoded_list

@@ -55,8 +55,11 @@ def train_one_epoch(model, loader, optimizer, scaler, loss_fn, epoch, config):
         
         if step % config.log_interval == 0:
             mem = torch.cuda.max_memory_allocated() / 1024**3
-            # 增加时间统计
-            print(f"Epoch {epoch} Step {step} Loss: {loss.item():.4f} Focal: {losses.get('focal', 0):.4f} Dice: {losses.get('dice', 0):.4f} GPU Mem: {mem:.2f}GB Data: {data_time:.3f}s Batch: {batch_time:.3f}s")
+            # 增加时间统计和距离损失
+            dist_loss = losses.get('distance', 0)
+            if isinstance(dist_loss, torch.Tensor):
+                dist_loss = dist_loss.item()
+            print(f"Epoch {epoch} Step {step} Loss: {loss.item():.4f} Focal: {losses.get('focal', 0):.4f} Dice: {losses.get('dice', 0):.4f} Dist: {dist_loss:.4f} GPU Mem: {mem:.2f}GB Data: {data_time:.3f}s Batch: {batch_time:.3f}s")
             
         batch = prefetcher.next()
         step += 1
