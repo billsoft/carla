@@ -5,12 +5,13 @@ import numpy as np
 import os
 
 class OccDataset(Dataset):
-    def __init__(self, data_dir, split='train', config=None, use_fp16=True):
+    def __init__(self, data_dir, split='train', config=None, use_fp16=True, load_depth=True):
         super().__init__()
         self.data_dir = data_dir
         self.split = split
         self.config = config
         self.use_fp16 = use_fp16
+        self.load_depth = load_depth  # 是否加载深度数据
         self.samples = self._load_samples()
 
     def _load_samples(self):
@@ -51,6 +52,31 @@ class OccDataset(Dataset):
             return img
         except Exception as e:
             raise ValueError(f"DNG加载失败 (rawpy和OpenCV均失败): {e}\n请安装 rawpy: pip install rawpy")
+
+    def _load_depth_data(self, sample_id):
+        """加载深度数据 (8个相机的深度图)"""
+        num_cameras = self.config.num_cameras if self.config else 8
+        depths = []
+        for cam_id in range(num_cameras):
+            # 尝试多种路径格式
+            depth_path_v1 = os.path.join(self.data_dir, 'depth', sample_id, f'cam_{cam_id}.npy')
+            depth_path_v2 = os.path.join(self.data_dir, 'depth', f'{sample_id}_cam_{cam_id}.npy')
+
+            if os.path.exists(depth_path_v1):
+                depth = np.load(depth_path_v1).astype(np.float32)
+            elif os.path.exists(depth_path_v2):
+                depth = np.load(depth_path_v2).astype(np.float32)
+            else:
+                # 如果没有深度数据,返回 None
+                return None
+
+            # 确保深度图是 (H, W) 格式
+            if depth.ndim == 3:
+                depth = depth.squeeze()
+            depths.append(depth)
+
+        # 堆叠: (N, H, W)
+        return np.stack(depths, axis=0)
 
     def __len__(self):
         return max(len(self.samples), 100)
@@ -100,12 +126,28 @@ class OccDataset(Dataset):
             flow = np.zeros((3,) + voxel_size, dtype=np.float32)
 
         dtype = torch.float16 if self.use_fp16 else torch.float32
-        return {
+
+        result = {
             'images': torch.from_numpy(images).to(dtype),
             'semantic': torch.from_numpy(occupancy).long(),
             'flow': torch.from_numpy(flow).to(dtype),
             'flow_mask': torch.ones(voxel_size, dtype=torch.bool)
         }
+
+        # 加载深度数据 (如果启用)
+        if self.load_depth:
+            depths = self._load_depth_data(sample_id)
+            if depths is not None:
+                result['depth'] = torch.from_numpy(depths).to(dtype)
+                result['depth_valid'] = torch.ones(depths.shape, dtype=torch.bool)
+            else:
+                # 无深度数据时生成占位符
+                image_size = self.config.image_size if self.config else (960, 1280)
+                num_cameras = self.config.num_cameras if self.config else 8
+                result['depth'] = torch.zeros(num_cameras, *image_size, dtype=dtype)
+                result['depth_valid'] = torch.zeros(num_cameras, *image_size, dtype=torch.bool)
+
+        return result
 
     def _generate_synthetic_sample(self, idx):
         config = self.config
@@ -136,7 +178,17 @@ class OccDataset(Dataset):
         flow_mask = semantic > 0
         ego_motion = torch.eye(4, dtype=dtype)
         ego_pose = torch.eye(4, dtype=dtype)
-        return {'images': images, 'semantic': semantic, 'flow': flow, 'flow_mask': flow_mask, 'ego_motion': ego_motion, 'ego_pose': ego_pose}
+
+        result = {'images': images, 'semantic': semantic, 'flow': flow, 'flow_mask': flow_mask, 'ego_motion': ego_motion, 'ego_pose': ego_pose}
+
+        # 合成深度数据 (用于测试)
+        if self.load_depth:
+            # 生成合成深度图 (近处密,远处稀疏)
+            depth = torch.rand(num_cameras, *image_size, dtype=dtype) * 50.0 + 1.0  # 1-51米
+            result['depth'] = depth
+            result['depth_valid'] = torch.ones(num_cameras, *image_size, dtype=torch.bool)
+
+        return result
 
 def collate_fn(batch):
     result = {}
@@ -148,7 +200,8 @@ def collate_fn(batch):
     return result
 
 def build_dataloader(config, split='train'):
-    dataset = OccDataset(data_dir=getattr(config, 'data_dir', './data'), split=split, config=config, use_fp16=getattr(config, 'use_fp16_input', True))
+    load_depth = getattr(config, 'use_depth_supervision', True)  # 默认加载深度
+    dataset = OccDataset(data_dir=getattr(config, 'data_dir', './data'), split=split, config=config, use_fp16=getattr(config, 'use_fp16_input', True), load_depth=load_depth)
     shuffle = split == 'train'
     return DataLoader(dataset, batch_size=config.batch_size, shuffle=shuffle, num_workers=config.num_workers, collate_fn=collate_fn, pin_memory=True, drop_last=split == 'train')
 

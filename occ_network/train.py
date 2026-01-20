@@ -13,8 +13,11 @@ def train_one_epoch(model, loader, optimizer, scaler, loss_fn, epoch, config):
     model.train()
     total_loss = 0
     device = next(model.parameters()).device
+    print(f"  Creating prefetcher...", flush=True)
     prefetcher = FP16DataPrefetcher(loader, device)
+    print(f"  Getting first batch...", flush=True)
     batch = prefetcher.next()
+    print(f"  Got first batch, starting training loop...", flush=True)
     step = 0
     start_time = time.time()
     while batch is not None:
@@ -59,7 +62,11 @@ def train_one_epoch(model, loader, optimizer, scaler, loss_fn, epoch, config):
             dist_loss = losses.get('distance', 0)
             if isinstance(dist_loss, torch.Tensor):
                 dist_loss = dist_loss.item()
-            print(f"Epoch {epoch} Step {step} Loss: {loss.item():.4f} Focal: {losses.get('focal', 0):.4f} Dice: {losses.get('dice', 0):.4f} Dist: {dist_loss:.4f} GPU Mem: {mem:.2f}GB Data: {data_time:.3f}s Batch: {batch_time:.3f}s")
+            # 深度损失
+            depth_loss = losses.get('depth', 0)
+            if isinstance(depth_loss, torch.Tensor):
+                depth_loss = depth_loss.item()
+            print(f"Epoch {epoch} Step {step} Loss: {loss.item():.4f} Focal: {losses.get('focal', 0):.4f} Dice: {losses.get('dice', 0):.4f} Dist: {dist_loss:.4f} Depth: {depth_loss:.4f} GPU Mem: {mem:.2f}GB Data: {data_time:.3f}s Batch: {batch_time:.3f}s", flush=True)
             
         batch = prefetcher.next()
         step += 1
@@ -136,8 +143,10 @@ def main():
     print(f"Training on {device}")
     print(f"AMP: {config.use_amp}, Checkpoint: {config.use_checkpoint}")
     print(f"Coarse-to-Fine: {config.use_coarse_to_fine}, Sparse: {config.use_sparse}")
+    print(f"Train loader size: {len(train_loader)}, Val loader size: {len(val_loader)}", flush=True)
     best_loss = float('inf')
     for epoch in range(start_epoch, config.max_epochs):
+        print(f"Starting epoch {epoch}...", flush=True)
         if epoch < config.warmup_epochs:
             lr_scale = (epoch + 1) / config.warmup_epochs
             for pg in optimizer.param_groups:
@@ -146,7 +155,7 @@ def main():
         train_loss = train_one_epoch(model, train_loader, optimizer, scaler, loss_fn, epoch, config)
         if epoch >= config.warmup_epochs:
             scheduler.step()
-        print(f"Epoch {epoch} Train Loss: {train_loss:.4f}")
+        print(f"Epoch {epoch} Train Loss: {train_loss:.4f}", flush=True)
         if (epoch + 1) % config.eval_interval == 0:
             model.reset_temporal()
             val_loss = validate(model, val_loader, loss_fn, config)

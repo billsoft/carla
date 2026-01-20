@@ -139,9 +139,52 @@ class FlowLoss(nn.Module):
             return (diff * valid_mask).sum() / (valid_mask.sum() + 1e-6)
         return diff.mean()
 
+
+class DepthSupervisionLoss(nn.Module):
+    """
+    深度监督损失
+
+    使用 Log 空间 L1 损失,对近距离更敏感
+    """
+
+    def __init__(self, depth_range=(0.5, 80.0), eps=1e-6):
+        super().__init__()
+        self.min_depth = depth_range[0]
+        self.max_depth = depth_range[1]
+        self.eps = eps
+
+    def forward(self, depth_pred, depth_gt, valid_mask=None):
+        """
+        Args:
+            depth_pred: [B, N, H, W] 预测深度
+            depth_gt: [B, N, H, W] 真值深度
+            valid_mask: [B, N, H, W] 有效掩码
+
+        Returns:
+            depth_loss: 深度损失标量
+        """
+        # 裁剪深度到有效范围
+        depth_pred = depth_pred.clamp(self.min_depth, self.max_depth)
+        depth_gt = depth_gt.clamp(self.min_depth, self.max_depth)
+
+        # Log 空间 L1 损失 (对近距离更敏感)
+        log_pred = torch.log(depth_pred + self.eps)
+        log_gt = torch.log(depth_gt + self.eps)
+        loss = torch.abs(log_pred - log_gt)
+
+        if valid_mask is not None:
+            # 只计算有效深度的损失
+            valid_mask = valid_mask.float()
+            loss = (loss * valid_mask).sum() / (valid_mask.sum() + self.eps)
+        else:
+            loss = loss.mean()
+
+        return loss
+
 class CoarseToFineLoss(nn.Module):
     def __init__(self, num_classes, class_weights=None, coarse_weight=0.3, focal_gamma=2.0, focal_alpha=0.25, flow_weight=0.5,
-                 voxel_size=(400, 400, 32), pc_range=[-40, -40, -1, 40, 40, 5.4], use_distance_aware=True, distance_weight=0.2):
+                 voxel_size=(400, 400, 32), pc_range=[-40, -40, -1, 40, 40, 5.4], use_distance_aware=True, distance_weight=0.2,
+                 use_depth_supervision=True, depth_weight=0.5, depth_range=(0.5, 80.0)):
         super().__init__()
         self.coarse_weight = coarse_weight
         self.flow_weight = flow_weight
@@ -152,6 +195,12 @@ class CoarseToFineLoss(nn.Module):
         self.flow_loss = FlowLoss()
         if use_distance_aware:
             self.distance_loss = DistanceAwareLoss(voxel_size=voxel_size, pc_range=pc_range)
+
+        # 深度监督
+        self.use_depth_supervision = use_depth_supervision
+        self.depth_weight = depth_weight
+        if use_depth_supervision:
+            self.depth_loss = DepthSupervisionLoss(depth_range=depth_range)
 
     def forward(self, outputs, targets):
         losses = {}
@@ -173,6 +222,30 @@ class CoarseToFineLoss(nn.Module):
                 coarse_flow_gt = F.interpolate(targets['flow'], size=outputs['coarse_flow'].shape[2:], mode='trilinear', align_corners=False)
                 coarse_mask = F.interpolate(flow_mask.unsqueeze(1).float(), size=outputs['coarse_flow'].shape[2:], mode='nearest').squeeze(1).bool() if flow_mask is not None else None
                 losses['coarse_flow'] = self.flow_loss(outputs['coarse_flow'], coarse_flow_gt, coarse_mask) * self.flow_weight * self.coarse_weight
+
+        # 深度监督损失
+        if self.use_depth_supervision and 'depth_pred' in outputs and 'depth' in targets:
+            depth_pred = outputs['depth_pred']  # [B, N, H, W]
+            depth_gt = targets['depth']          # [B, N, H, W]
+            depth_valid = targets.get('depth_valid', None)
+
+            # 需要将深度 GT 下采样到特征图尺寸 (H/16, W/16)
+            B, N, H_gt, W_gt = depth_gt.shape
+            _, _, H_pred, W_pred = depth_pred.shape
+
+            if H_gt != H_pred or W_gt != W_pred:
+                # 下采样深度 GT
+                depth_gt = depth_gt.view(B * N, 1, H_gt, W_gt)
+                depth_gt = F.interpolate(depth_gt, size=(H_pred, W_pred), mode='bilinear', align_corners=False)
+                depth_gt = depth_gt.view(B, N, H_pred, W_pred)
+
+                if depth_valid is not None:
+                    depth_valid = depth_valid.view(B * N, 1, H_gt, W_gt).float()
+                    depth_valid = F.interpolate(depth_valid, size=(H_pred, W_pred), mode='nearest')
+                    depth_valid = depth_valid.view(B, N, H_pred, W_pred) > 0.5
+
+            losses['depth'] = self.depth_loss(depth_pred, depth_gt, depth_valid) * self.depth_weight
+
         losses['total'] = sum(losses.values())
         return losses
 
@@ -182,6 +255,11 @@ class OccLoss(nn.Module):
         # 获取距离感知损失配置
         use_distance_aware = getattr(config, 'use_distance_aware', True)
         distance_weight = getattr(config, 'distance_loss_weight', 0.2)
+        # 获取深度监督配置
+        use_depth_supervision = getattr(config, 'use_depth_supervision', True)
+        depth_weight = getattr(config, 'depth_loss_weight', 0.5)
+        depth_range = getattr(config, 'depth_range', (0.5, 80.0))
+
         self.loss_fn = CoarseToFineLoss(
             num_classes=config.num_classes,
             class_weights=config.class_weights,
@@ -192,7 +270,10 @@ class OccLoss(nn.Module):
             voxel_size=config.voxel_size,
             pc_range=config.pc_range,
             use_distance_aware=use_distance_aware,
-            distance_weight=distance_weight
+            distance_weight=distance_weight,
+            use_depth_supervision=use_depth_supervision,
+            depth_weight=depth_weight,
+            depth_range=depth_range,
         )
 
     def forward(self, outputs, targets):

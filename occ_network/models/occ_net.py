@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from .patch_embed import MultiCameraPatchEmbed
 from .encoder import MultiCameraEncoder
-from .decoder import BEVDecoder, CoarseHeightExpansion, LightweightUpsampler
+from .decoder import BEVDecoder, CoarseHeightExpansion, LightweightUpsampler, DepthPredictionHead
 from .temporal import LightweightTemporalFusion
 from .heads import MultiTaskHead, CoarseToFineHead
 from .position_encoding import CameraPositionEncoding
@@ -36,6 +36,19 @@ class OccNetV3(nn.Module):
         if self.use_sparse:
             self.sparse_refine = AdaptiveSparseProcessor(in_channels=config.num_classes, num_classes=config.num_classes, hidden_channels=32, sparsity_threshold=config.sparsity_threshold)
 
+        # 深度预测头 (用于深度监督)
+        self.use_depth_supervision = getattr(config, 'use_depth_supervision', True)
+        if self.use_depth_supervision:
+            # 特征图尺寸: H/16, W/16 (patch_size=16)
+            feat_h = config.image_size[0] // config.patch_size
+            feat_w = config.image_size[1] // config.patch_size
+            self.depth_head = DepthPredictionHead(
+                in_channels=config.embed_dim,
+                num_depth_bins=getattr(config, 'num_depth_bins', 64),
+                feature_size=(feat_h, feat_w),
+                depth_range=getattr(config, 'depth_range', (0.5, 80.0))
+            )
+
     def reset_temporal(self):
         self.temporal.reset()
 
@@ -44,6 +57,20 @@ class OccNetV3(nn.Module):
         camera_tokens, spatial_shape = self.patch_embed(images)
         encoded_tokens = self.encoder(camera_tokens, spatial_shape, self.camera_pe)
         feat_h, feat_w = spatial_shape
+
+        # 深度预测 (在特征融合前,对每个相机独立预测)
+        if self.use_depth_supervision:
+            # encoded_tokens: list of [B, L, D] for each camera
+            # 重塑为 [B, N, C, H, W] 进行深度预测
+            depth_features = []
+            for cam_idx, cam_tokens in enumerate(encoded_tokens):
+                # [B, L, D] -> [B, D, H, W]
+                cam_feat = cam_tokens.transpose(1, 2).reshape(B, -1, feat_h, feat_w)
+                depth_features.append(cam_feat)
+            # Stack: [B, N, D, H, W]
+            depth_features = torch.stack(depth_features, dim=1)
+            depth_logits, depth_pred = self.depth_head(depth_features)
+
         all_tokens = torch.cat(encoded_tokens, dim=-1)
         fused_tokens = self.fusion_proj(all_tokens)
         spatial_shapes = torch.tensor([[feat_h, feat_w]], device=images.device)
@@ -57,6 +84,12 @@ class OccNetV3(nn.Module):
             coarse_up = F.interpolate(coarse_pred, size=tuple(self.config.voxel_size), mode='trilinear', align_corners=False)
             sparse_refined = self.sparse_refine(outputs['semantic'], coarse_up)
             outputs['semantic'] = sparse_refined
+
+        # 添加深度输出
+        if self.use_depth_supervision:
+            outputs['depth_logits'] = depth_logits  # [B, N, D, H, W]
+            outputs['depth_pred'] = depth_pred      # [B, N, H, W]
+
         return outputs
 
     @torch.no_grad()

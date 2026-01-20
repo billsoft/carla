@@ -105,3 +105,87 @@ class LightweightUpsampler(nn.Module):
         if self.use_checkpoint and self.training:
             return checkpoint(self._forward_impl, x, use_reentrant=False)
         return self._forward_impl(x)
+
+
+class DepthPredictionHead(nn.Module):
+    """
+    深度预测头：为每个相机预测深度分布
+
+    用于深度监督训练，帮助网络学习2D→3D的几何映射。
+    训练时使用GT深度监督，推理时不需要深度传感器。
+    """
+    def __init__(self, in_channels, num_depth_bins=64, feature_size=(60, 80), depth_range=(0.5, 80.0)):
+        super().__init__()
+        self.num_depth_bins = num_depth_bins
+        self.feature_size = feature_size
+        self.depth_range = depth_range
+
+        # 深度预测网络
+        self.depth_net = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.GELU(),
+            nn.Conv2d(in_channels, num_depth_bins, 1),
+        )
+
+        # 预计算深度bin中心值 (对数均匀分布，近处更密集)
+        import math
+        min_d, max_d = depth_range
+        depth_bins = torch.exp(torch.linspace(math.log(min_d), math.log(max_d), num_depth_bins))
+        self.register_buffer('depth_bins', depth_bins)
+
+    def forward(self, features):
+        """
+        Args:
+            features: [B, N, C, H, W] 多相机特征 (N=8相机)
+
+        Returns:
+            depth_logits: [B, N, D, H, W] 深度分布logits
+            depth_pred: [B, N, H, W] 预测深度值 (米)
+        """
+        B, N, C, H, W = features.shape
+
+        # Reshape for 2D conv
+        features_flat = features.view(B * N, C, H, W)
+
+        # 预测深度分布
+        depth_logits = self.depth_net(features_flat)  # [B*N, D, H, W]
+        depth_logits = depth_logits.view(B, N, self.num_depth_bins, H, W)
+
+        # 计算期望深度 (软argmax)
+        depth_probs = F.softmax(depth_logits, dim=2)  # [B, N, D, H, W]
+        depth_bins = self.depth_bins.view(1, 1, -1, 1, 1)  # [1, 1, D, 1, 1]
+        depth_pred = (depth_probs * depth_bins).sum(dim=2)  # [B, N, H, W]
+
+        return depth_logits, depth_pred
+
+    def compute_depth_loss(self, depth_pred, depth_gt, valid_mask=None):
+        """
+        计算深度监督损失
+
+        Args:
+            depth_pred: [B, N, H, W] 预测深度
+            depth_gt: [B, N, H, W] GT深度 (米)
+            valid_mask: [B, N, H, W] 有效区域掩码 (可选)
+
+        Returns:
+            loss: 标量损失值
+        """
+        # 对数空间L1损失 (对近距离更敏感)
+        eps = 1e-3
+        log_pred = torch.log(depth_pred.clamp(min=eps))
+        log_gt = torch.log(depth_gt.clamp(min=eps))
+
+        loss = F.l1_loss(log_pred, log_gt, reduction='none')
+
+        if valid_mask is not None:
+            # 过滤无效区域 (如天空、超出范围的深度)
+            valid_mask = valid_mask & (depth_gt > self.depth_range[0]) & (depth_gt < self.depth_range[1])
+            if valid_mask.sum() > 0:
+                loss = (loss * valid_mask.float()).sum() / valid_mask.sum()
+            else:
+                loss = loss.mean() * 0  # 返回0但保持梯度图
+        else:
+            loss = loss.mean()
+
+        return loss

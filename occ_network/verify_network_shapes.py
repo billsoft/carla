@@ -5,6 +5,8 @@ OccNetV3 网络结构验证脚本
 新增功能:
 - 验证 Ray Direction Encoding (射线方向编码)
 - 验证 Distance-Aware Loss (距离感知损失)
+- 验证 Depth Supervision (深度监督)
+- 验证 5-Frame Transformer Temporal Fusion (5帧Transformer时序融合)
 """
 import torch
 import torch.nn as nn
@@ -16,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from configs.default import config
 from models.occ_net import build_model
-from losses.losses import DistanceAwareLoss, OccLoss
+from losses.losses import DistanceAwareLoss, OccLoss, DepthSupervisionLoss
 from models.position_encoding import RayDirectionEncoding
 from inference import inference_with_uncertainty
 from models.sparse_modules import get_backend, SPCONV_AVAILABLE, TORCHSPARSE_AVAILABLE
@@ -148,6 +150,21 @@ def main():
             }.get(key, '')
             print_shape(f"    {key}", val, desc)
 
+        # 完整前向传播测试 (包含深度预测)
+        print_section("10b. 完整前向传播 (含深度预测)")
+        full_outputs = model(images, ego_motion, ego_pose)
+        print("  完整输出内容:")
+        for key, val in full_outputs.items():
+            desc = {
+                'semantic': '语义分割 (18类)',
+                'coarse_semantic': '粗糙语义',
+                'flow': '3D流场 (速度向量)',
+                'coarse_flow': '粗糙流场',
+                'depth_logits': '深度分布logits (64 bins)',
+                'depth_pred': '预测深度图 (米)'
+            }.get(key, '')
+            print_shape(f"    {key}", val, desc)
+
     # 最终输出形状验证
     print_section("11. 最终输出验证")
     semantic = outputs['semantic']
@@ -261,9 +278,11 @@ def main():
         except Exception as e:
             print(f"    ❌ 初始化失败: {e}")
 
-    print("\n  【优化3: 时序帧数】")
+    print("\n  【优化3: 5帧 Transformer 时序融合】")
     print(f"    当前帧数: {config.num_frames} 帧")
-    print(f"    建议: 2-4帧 (每增加1帧约+100MB显存)")
+    print(f"    融合方式: Transformer Self-Attention")
+    print(f"    改进: 原2帧门控融合 → 5帧Transformer融合")
+    print(f"    优点: 更长时序上下文, 可学习的时序位置编码")
 
     print("\n  【优化4: MC Dropout (不确定性估计)】")
     print(f"    启用状态: {'✅ 启用' if config.use_mc_dropout else '❌ 禁用 (配置文件)'}")
@@ -290,11 +309,29 @@ def main():
     print(f"    当前后端: {backend}")
     print(f"    spconv可用: {'✅' if SPCONV_AVAILABLE else '❌'}")
     print(f"    torchsparse可用: {'✅' if TORCHSPARSE_AVAILABLE else '❌'}")
-    
+
     if backend == 'dense':
         print("    ⚠️ 警告: 正在使用 Dense 后端 (速度较慢，显存占用高)")
     else:
         print(f"    ✅ 正在使用加速后端: {backend}")
+
+    print("\n  【优化6: 深度监督 (Depth Supervision)】")
+    print(f"    启用状态: {'✅ 启用' if config.use_depth_supervision else '❌ 禁用'}")
+    print(f"    损失权重: {config.depth_loss_weight}")
+    print(f"    深度范围: {config.depth_range}")
+    print(f"    深度bin数: {config.num_depth_bins}")
+
+    if config.use_depth_supervision:
+        try:
+            depth_loss = DepthSupervisionLoss(depth_range=config.depth_range)
+            # 测试深度损失
+            test_pred = torch.rand(1, 8, 60, 80) * 50 + 1  # 1-51m
+            test_gt = torch.rand(1, 8, 60, 80) * 50 + 1
+            loss_val = depth_loss(test_pred, test_gt)
+            print(f"    测试损失值: {loss_val.item():.4f}")
+            print("    ✅ Depth Supervision Loss 初始化成功")
+        except Exception as e:
+            print(f"    ❌ 初始化失败: {e}")
 
     # 显存估算
     print_section("14. 显存占用估算")
@@ -333,22 +370,28 @@ def main():
 
     print_section("验证完成")
     print("\n  🎯 实施的优化:")
-    print("     ✅ 优化2: Ray Direction Encoding (射线方向编码)")
+    print("     ✅ 优化1: Ray Direction Encoding (射线方向编码)")
     print("        - 每个像素编码其3D射线方向")
     print("        - 帮助多视角特征融合")
-    print("     ✅ 优化3: Distance-Aware Loss (距离感知损失)")
+    print("     ✅ 优化2: Distance-Aware Loss (距离感知损失)")
     print("        - 近距离体素权重更高")
     print("        - 提升安全关键区域精度")
+    print("     ✅ 优化3: 5帧 Transformer 时序融合")
+    print("        - 从2帧门控融合升级到5帧Transformer")
+    print("        - 可学习时序位置编码")
     print("     ✅ 优化4: MC Dropout (不确定性估计)")
     print("        - 训练时使用 Dropout")
     print("        - 推理时多次采样估计不确定性")
     print("     ✅ 优化5: Sparse Convolution (稀疏卷积)")
     print("        - 3D卷积使用稀疏后端加速")
     print("        - 减少显存占用和计算量")
+    print("     ✅ 优化6: Depth Supervision (深度监督)")
+    print("        - 辅助网络学习2D→3D几何")
+    print("        - Log空间L1损失,近距离更敏感")
     print()
     print("  🎯 下一步建议:")
     print("     1. 运行训练: python train.py --dataset D:/code/carla/dataset_10k_bak --batch-size 1 --epochs 2 --amp")
-    print("     2. 监控 distance 损失是否正常下降")
+    print("     2. 监控 distance 和 depth 损失是否正常下降")
     print("     3. 检验近距离物体 IoU 是否提升")
     print()
 

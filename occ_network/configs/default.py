@@ -21,7 +21,7 @@ class Config:
     bev_size = (128, 128)
     bev_embed_dim = 192
     num_points = 4
-    num_frames = 2  # Already enabled for temporal fusion
+    num_frames = 5  # Enhanced 5-frame Transformer fusion
     temporal_embed_dim = 192
     use_uncertainty = False
     use_flow = True
@@ -40,6 +40,11 @@ class Config:
     distance_loss_weight = 0.2
     # Ray Direction Encoding (射线方向编码)
     use_ray_encoding = True
+    # Depth Supervision (深度监督)
+    use_depth_supervision = True
+    depth_loss_weight = 0.5
+    depth_range = (0.5, 80.0)
+    num_depth_bins = 64
     cameras = {
         'front_main': {'id': 0, 'fov': 50.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
         'front_wide': {'id': 1, 'fov': 120.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
