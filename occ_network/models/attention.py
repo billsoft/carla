@@ -38,13 +38,24 @@ class FlashWindowAttention(nn.Module):
             q_enc, k_enc = position_encoder.encode_qk_single_camera(q_flat, k_flat, camera_id)
             q = q_enc.reshape(B_, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             k = k_enc.reshape(B_, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        use_flash = hasattr(F, 'scaled_dot_product_attention') and mask is None
+        
+        # 计算相对位置偏置 (Relative Position Bias)
+        rpb = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size * self.window_size, self.window_size * self.window_size, -1
+        ).permute(2, 0, 1).contiguous()  # [nH, L, L]
+
+        use_flash = hasattr(F, 'scaled_dot_product_attention')
         if use_flash:
+            # 构建 Attention Mask (Bias + Mask)
+            attn_mask = rpb.unsqueeze(0)  # [1, nH, L, L]
+            if mask is not None:
+                # mask: [nW, L, L] -> [nW, 1, L, L]
+                attn_mask = attn_mask + mask.unsqueeze(1)
+            
             with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True):
-                x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
+                x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.attn_drop.p if self.training else 0.0)
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
-            rpb = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(self.window_size ** 2, self.window_size ** 2, -1).permute(2, 0, 1)
             attn = attn + rpb.unsqueeze(0)
             if mask is not None:
                 attn = attn + mask.unsqueeze(1).unsqueeze(0)

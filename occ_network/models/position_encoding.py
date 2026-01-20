@@ -3,25 +3,6 @@ import torch.nn as nn
 import math
 from typing import Tuple, Optional, Dict, List
 
-class PositionEncoding2D(nn.Module):
-    def __init__(self, dim: int, h: int, w: int, temperature: float = 10000):
-        super().__init__()
-        half_dim = dim // 2
-        y_embed = torch.arange(h, dtype=torch.float32).unsqueeze(1).repeat(1, w) / h
-        x_embed = torch.arange(w, dtype=torch.float32).unsqueeze(0).repeat(h, 1) / w
-        dim_t = temperature ** (2 * (torch.arange(half_dim, dtype=torch.float32) // 2) / half_dim)
-        pos_x = x_embed[:, :, None] / dim_t
-        pos_y = y_embed[:, :, None] / dim_t
-        pos_x = torch.stack([pos_x[:, :, 0::2].sin(), pos_x[:, :, 1::2].cos()], dim=3).flatten(2)
-        pos_y = torch.stack([pos_y[:, :, 0::2].sin(), pos_y[:, :, 1::2].cos()], dim=3).flatten(2)
-        self.register_buffer('pos', torch.cat([pos_y, pos_x], dim=2))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 4:
-            B, C, H, W = x.shape
-            return x + self.pos[:H, :W].permute(2, 0, 1).unsqueeze(0)
-        return x
-
 class CameraRoPE(nn.Module):
     def __init__(self, dim: int, temperature: float = 10000.0):
         super().__init__()
@@ -61,13 +42,16 @@ class MultiCameraPositionEncoding(nn.Module):
             yaw_angles.append(cfg['rotation'][2] * math.pi / 180.0)
             fov_list.append(cfg['fov'])
         self.register_buffer('yaw_angles', torch.tensor(yaw_angles, dtype=torch.float32))
-        feat_h, feat_w = image_size[0] // patch_size, image_size[1] // patch_size
-        self.pixel_pe = PositionEncoding2D(dim, feat_h, feat_w)
+        # 移除绝对位置编码 (PositionEncoding2D)
+        # feat_h, feat_w = image_size[0] // patch_size, image_size[1] // patch_size
+        # self.pixel_pe = PositionEncoding2D(dim, feat_h, feat_w)
         self.camera_rope = CameraRoPE(dim)
         self.fov_hyperbolic = HyperbolicFOVEncoding(dim, fov_list)
 
     def add_pixel_pe(self, x: torch.Tensor) -> torch.Tensor:
-        return self.pixel_pe(x)
+        # 相对位置编码方案: 不再修改输入特征 x
+        # return self.pixel_pe(x)
+        return x
 
     def encode_qk_single_camera(self, q: torch.Tensor, k: torch.Tensor, camera_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         B, N, d = q.shape
@@ -262,3 +246,5 @@ class CameraPositionEncoding(nn.Module):
         if self.use_ray_encoding:
             return self.ray_encoder(camera_id, batch_size, device)
         return None
+
+CameraPositionEncoding = MultiCameraPositionEncoding
