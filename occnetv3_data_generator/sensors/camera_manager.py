@@ -8,27 +8,33 @@ import queue
 import weakref
 from typing import Dict, Optional
 
-from config.camera_config import TESLA_CAMERAS, CAMERA_SENSOR_CONFIG
+from config.camera_config import TESLA_CAMERAS, CAMERA_SENSOR_CONFIG, DEPTH_SENSOR_CONFIG
 
 
 class CameraManager:
     """
-    管理8个RGB相机, 支持 Bayer RGGB 转换
+    管理8个RGB相机 + 8个深度相机, 支持 Bayer RGGB 转换
     """
 
-    def __init__(self, world: carla.World, vehicle: carla.Vehicle):
+    def __init__(self, world: carla.World, vehicle: carla.Vehicle, enable_depth: bool = True):
         """
         Args:
             world: CARLA世界对象
             vehicle: 车辆actor
+            enable_depth: 是否启用深度相机 (默认: True)
         """
         self.world = world
         self.vehicle = vehicle
         self.cameras = {}  # {cam_id: carla.Sensor}
+        self.depth_cameras = {}  # {cam_id: carla.Sensor} 深度相机
         self.camera_configs = TESLA_CAMERAS
         self.data_queues = {}  # {cam_id: queue.Queue}
+        self.depth_queues = {}  # {cam_id: queue.Queue} 深度数据队列
+        self.enable_depth = enable_depth
 
         self._setup_cameras()
+        if self.enable_depth:
+            self._setup_depth_cameras()
 
     def _setup_cameras(self):
         """创建并附加8个相机"""
@@ -90,23 +96,62 @@ class CameraManager:
             print(f"  ✓ {cam_id}: FOV={cam_config['fov']}° "
                   f"pos={pos} rot={rot}")
 
-        print(f"[CameraManager] 已创建 {len(self.cameras)} 个相机")
+        print(f"[CameraManager] 已创建 {len(self.cameras)} 个 RGB 相机")
+
+    def _setup_depth_cameras(self):
+        """创建并附加8个深度相机 (与 RGB 相机完全重合)"""
+        bp_library = self.world.get_blueprint_library()
+        depth_bp = bp_library.find('sensor.camera.depth')
+
+        # 设置属性
+        depth_bp.set_attribute('image_size_x', str(DEPTH_SENSOR_CONFIG['image_size_x']))
+        depth_bp.set_attribute('image_size_y', str(DEPTH_SENSOR_CONFIG['image_size_y']))
+        depth_bp.set_attribute('sensor_tick', str(DEPTH_SENSOR_CONFIG['sensor_tick']))
+
+        for cam_config in self.camera_configs:
+            cam_id = cam_config['id']
+
+            # 设置 FOV (与 RGB 相机相同)
+            depth_bp.set_attribute('fov', str(cam_config['fov']))
+
+            # 创建 Transform (与 RGB 相机完全相同的位置和朝向)
+            pos = cam_config['position']
+            rot = cam_config['rotation']
+            transform = carla.Transform(
+                carla.Location(x=pos[0], y=pos[1], z=pos[2]),
+                carla.Rotation(pitch=rot[0], yaw=rot[1], roll=rot[2])
+            )
+
+            # 生成深度相机
+            depth_camera = self.world.spawn_actor(depth_bp, transform, attach_to=self.vehicle)
+            self.depth_cameras[cam_id] = depth_camera
+
+            # 创建深度数据队列
+            self.depth_queues[cam_id] = queue.Queue(maxsize=2)
+
+        print(f"[CameraManager] 已创建 {len(self.depth_cameras)} 个深度相机 (与 RGB 重合)")
 
     def start_listening(self):
-        """开始监听所有相机"""
+        """开始监听所有相机 (RGB + 深度)"""
+        # RGB 相机
         for cam_id, camera in self.cameras.items():
-            # 使用弱引用避免循环引用
             weak_self = weakref.ref(self)
-            # 获取该相机的 raw_type 配置
             raw_type = 'uint8'
             for cfg in self.camera_configs:
                 if cfg['id'] == cam_id:
                     raw_type = cfg.get('raw_type', 'uint8')
                     break
-            
+
             camera.listen(lambda image, cid=cam_id, rt=raw_type: CameraManager._camera_callback(weak_self, cid, image, rt))
 
-        print(f"[CameraManager] 已启动所有相机监听")
+        # 深度相机
+        if self.enable_depth:
+            for cam_id, depth_camera in self.depth_cameras.items():
+                weak_self = weakref.ref(self)
+                depth_camera.listen(lambda image, cid=cam_id: CameraManager._depth_callback(weak_self, cid, image))
+            print(f"[CameraManager] 已启动所有相机监听 (RGB: {len(self.cameras)}, Depth: {len(self.depth_cameras)})")
+        else:
+            print(f"[CameraManager] 已启动 RGB 相机监听 ({len(self.cameras)} 个)")
 
     @staticmethod
     def _camera_callback(weak_self, cam_id: str, image: carla.Image, raw_type: str):
@@ -148,6 +193,60 @@ class CameraManager:
 
         except Exception as e:
             print(f"[CameraManager] {cam_id} 回调错误: {e}")
+
+    @staticmethod
+    def _depth_callback(weak_self, cam_id: str, image: carla.Image):
+        """
+        深度相机回调函数
+        """
+        self = weak_self()
+        if self is None:
+            return
+
+        try:
+            # 转换深度数据
+            depth_data = CameraManager.convert_depth(image)
+
+            # 放入队列
+            if self.depth_queues[cam_id].full():
+                try:
+                    self.depth_queues[cam_id].get_nowait()
+                except queue.Empty:
+                    pass
+
+            self.depth_queues[cam_id].put({
+                'data': depth_data,
+                'timestamp': image.timestamp,
+                'frame': image.frame,
+            })
+
+        except Exception as e:
+            print(f"[CameraManager] Depth {cam_id} 回调错误: {e}")
+
+    @staticmethod
+    def convert_depth(image: carla.Image) -> np.ndarray:
+        """
+        将 CARLA 深度图像转换为实际深度值 (米)
+        CARLA 深度格式: BGRA, 每像素 4 字节
+        深度 = (R + G*256 + B*256*256) / (256^3 - 1) * 1000.0
+        Returns:
+            depth: (H, W) float32, 单位: 米
+        """
+        # 解析 BGRA 数据
+        array = np.frombuffer(image.raw_data, dtype=np.uint8)
+        array = array.reshape((image.height, image.width, 4))
+
+        # CARLA 深度编码: 24-bit normalized depth in RGB channels
+        # depth_normalized = (R + G*256 + B*256*256) / (256^3 - 1)
+        # depth_meters = depth_normalized * 1000.0
+        R = array[:, :, 2].astype(np.float32)
+        G = array[:, :, 1].astype(np.float32)
+        B = array[:, :, 0].astype(np.float32)
+
+        depth_normalized = (R + G * 256.0 + B * 256.0 * 256.0) / (256.0 ** 3 - 1)
+        depth_meters = depth_normalized * 1000.0  # 转换为米
+
+        return depth_meters.astype(np.float32)
 
     @staticmethod
     def convert_to_bayer(image: carla.Image) -> np.ndarray:
@@ -235,15 +334,55 @@ class CameraManager:
 
         return synced_data
 
+    def get_synced_depth_frame(self, timeout: float = 2.0) -> Optional[Dict]:
+        """
+        获取同步的一帧深度数据 (8个相机)
+        Returns:
+            {
+                'front_main': {'data': array, 'timestamp': float, 'frame': int},
+                ...
+            }
+            如果超时或未启用深度返回 None
+        """
+        if not self.enable_depth:
+            return None
+
+        import time
+        start_time = time.time()
+        synced_data = {}
+
+        for cam_id in self.depth_queues.keys():
+            try:
+                remaining = timeout - (time.time() - start_time)
+                if remaining <= 0:
+                    return None
+
+                data = self.depth_queues[cam_id].get(timeout=remaining)
+                synced_data[cam_id] = data
+
+            except queue.Empty:
+                return None
+
+        return synced_data
+
     def clear_queues(self):
-        """清空所有相机的队列"""
+        """清空所有相机的队列 (RGB + 深度)"""
         for cam_id in self.data_queues:
             while not self.data_queues[cam_id].empty():
                 try:
                     self.data_queues[cam_id].get_nowait()
                 except queue.Empty:
                     break
-        print(f"[CameraManager] 已清空所有数据队列")
+
+        if self.enable_depth:
+            for cam_id in self.depth_queues:
+                while not self.depth_queues[cam_id].empty():
+                    try:
+                        self.depth_queues[cam_id].get_nowait()
+                    except queue.Empty:
+                        break
+
+        print(f"[CameraManager] 已清空所有数据队列 (RGB + Depth)")
 
     def get_intrinsics(self, cam_id: str) -> np.ndarray:
         """
@@ -311,11 +450,19 @@ class CameraManager:
         return T
 
     def destroy(self):
-        """销毁所有相机"""
+        """销毁所有相机 (RGB + 深度)"""
+        # 销毁 RGB 相机
         for camera in self.cameras.values():
             if camera.is_alive:
                 camera.destroy()
 
+        # 销毁深度相机
+        for depth_camera in self.depth_cameras.values():
+            if depth_camera.is_alive:
+                depth_camera.destroy()
+
         self.cameras.clear()
+        self.depth_cameras.clear()
         self.data_queues.clear()
-        print(f"[CameraManager] 已销毁所有相机")
+        self.depth_queues.clear()
+        print(f"[CameraManager] 已销毁所有相机 (RGB + Depth)")

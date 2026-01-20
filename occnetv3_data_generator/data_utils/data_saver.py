@@ -47,6 +47,10 @@ class OccNetDataSaver:
         │   └── scene_XXXX_frame_YYYY/
         │       ├── cam_0.dng  (12-bit Bayer RGGB)
         │       └── ...
+        ├── depth/
+        │   └── scene_XXXX_frame_YYYY/
+        │       ├── cam_0.npy  (H, W) float32, 单位: 米
+        │       └── ...
         ├── occupancy/
         │   └── scene_XXXX_frame_YYYY.npy  (400, 400, 32) uint8
         ├── flow/
@@ -86,6 +90,7 @@ class OccNetDataSaver:
         dirs = [
             'calibration',
             'images',
+            'depth',       # ⭐ 新增: 深度图目录
             'occupancy',
             'flow',
             'flow_mask',
@@ -96,7 +101,7 @@ class OccNetDataSaver:
         for d in dirs:
             (self.output_dir / d).mkdir(parents=True, exist_ok=True)
 
-        print(f"  ✓ 目录结构已创建")
+        print(f"  ✓ 目录结构已创建 (含 depth 目录)")
 
     def save_calibration(
         self,
@@ -240,6 +245,16 @@ class OccNetDataSaver:
         if ego_motion is not None:
             assert ego_motion.shape == (4, 4), f"ego_motion形状错误: {ego_motion.shape}"
             np.save(self.output_dir / 'ego_motion' / f'{sample_id}.npy', ego_motion.astype(np.float32))
+
+        # 5. 保存深度图 (可选) ⭐ 新增
+        if depth is not None:
+            depth_dir = self.output_dir / 'depth' / sample_id
+            depth_dir.mkdir(parents=True, exist_ok=True)
+
+            for cam_id, depth_data in depth.items():
+                cam_index = self._get_cam_index(cam_id)
+                # 保存为 float32 npy (单位: 米)
+                np.save(depth_dir / f'cam_{cam_index}.npy', depth_data.astype(np.float32))
 
         # 记录sample_id
         self.sample_ids.append(sample_id)

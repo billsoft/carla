@@ -130,5 +130,26 @@ OUTPUT_SPEC = {
     'format': 'CHW',        # (C, H, W)
 }
 
+# ========== 深度相机配置 ==========
+# 与每个 RGB 相机完全重合（相同位置、相同 FOV）
+# 用于监督训练
+
+DEPTH_SENSOR_CONFIG = {
+    'image_size_x': 1280,
+    'image_size_y': 960,
+    'sensor_tick': 0.0,  # 与仿真同步
+}
+
+# 深度输出规范
+DEPTH_OUTPUT_SPEC = {
+    'channels': 1,          # 单通道深度
+    'height': 960,
+    'width': 1280,
+    'dtype': 'float32',     # 32位浮点 (米)
+    'range': [0.0, 1000.0], # 深度范围 (米)
+    'format': 'HW',         # (H, W)
+}
+
 print(f"[CameraConfig] 相机数量: {len(TESLA_CAMERAS)}")
 print(f"[CameraConfig] 输出规格: ({OUTPUT_SPEC['channels']}, {OUTPUT_SPEC['height']}, {OUTPUT_SPEC['width']}) {OUTPUT_SPEC['dtype']}")
+print(f"[CameraConfig] 深度相机: 8 个 (与 RGB 重合)")

@@ -116,7 +116,8 @@ OccNetV3 数据加载器支持两种图像格式:
 - 尺寸: 1280×960 (W×H)
 - 加载时自动归一化到 [0, 1]
 - **依赖**: `pip install rawpy` (推荐) 或 OpenCV
-- **路径**: `dataset/cameras/cam_<camera_id>/<frame_id>.dng`
+- **路径 (方式1)**: `dataset/cameras/cam_<camera_id>/<frame_id>.dng`
+- **路径 (方式2)**: `dataset/images/<frame_id>/cam_<camera_id>.dng` (Data Saver默认)
 
 **2. NPY - float16 预处理格式**
 - 已归一化的单通道图像

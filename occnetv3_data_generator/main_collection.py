@@ -406,9 +406,10 @@ def main():
         # 4. 附加传感器
         print("\n[3/5] 附加传感器...")
         step_start = time.time()
-        camera_manager = CameraManager(world, vehicle)
+        camera_manager = CameraManager(world, vehicle, enable_depth=True)  # ⭐ 启用深度相机
         camera_manager.start_listening()
-        print(f"  ✓ 相机: {len(TESLA_CAMERAS)} 个")
+        print(f"  ✓ RGB 相机: {len(TESLA_CAMERAS)} 个")
+        print(f"  ✓ 深度相机: {len(TESLA_CAMERAS)} 个 (与 RGB 重合)")
 
         # 强制 256 线配置 (使用默认 SEMANTIC_LIDAR_CONFIG)
         semantic_lidar = SemanticLidarSensor(world, vehicle, config=None)
@@ -466,13 +467,16 @@ def main():
             world.tick()
             print(f"  [1/6] World Tick: {(time.time()-step_start)*1000:.1f}ms")
 
-            # Step 2: 采集相机数据
+            # Step 2: 采集相机数据 (RGB + 深度)
             step_start = time.time()
             camera_data = camera_manager.get_synced_frame(timeout=2.0)
             if camera_data is None:
-                print(f"  ❌ 相机数据同步失败,跳过")
+                print(f"  ❌ RGB 相机数据同步失败,跳过")
                 continue
-            print(f"  [2/6] 相机采集 (8个): {(time.time()-step_start)*1000:.1f}ms")
+            depth_data = camera_manager.get_synced_depth_frame(timeout=2.0)
+            if depth_data is None:
+                print(f"  ⚠️ 深度相机数据同步失败,本帧无深度")
+            print(f"  [2/6] 相机采集 (RGB+Depth): {(time.time()-step_start)*1000:.1f}ms")
 
             # Step 3: 采集LiDAR数据
             step_start = time.time()
@@ -528,6 +532,11 @@ def main():
 
             images = {cam['id']: camera_data[cam['id']] for cam in TESLA_CAMERAS}
 
+            # 提取深度数据 (如果可用)
+            depth_dict = None
+            if depth_data is not None:
+                depth_dict = {cam['id']: depth_data[cam['id']]['data'] for cam in TESLA_CAMERAS}
+
             sample_id = data_saver.generate_sample_id()
 
             # Step 6: 保存数据
@@ -540,9 +549,11 @@ def main():
                 flow_mask=flow_mask, # ⭐ 保存 Flow Mask
                 ego_pose=ego_pose,
                 ego_motion=ego_motion,
+                depth=depth_dict,  # ⭐ 保存深度图
             )
             save_time = (time.time() - step_start) * 1000
-            print(f"  [6/6] 数据保存 (8 DNG + 1 NPY): {save_time:.1f}ms")
+            depth_info = "+ 8 Depth" if depth_dict else ""
+            print(f"  [6/6] 数据保存 (8 DNG + 1 NPY {depth_info}): {save_time:.1f}ms")
 
             frame_time = (time.time() - frame_start) * 1000
             print(f"  ✅ 帧完成: 总耗时={frame_time:.0f}ms, 非空体素={non_empty_count:,}")

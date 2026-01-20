@@ -66,14 +66,18 @@ class OccDataset(Dataset):
         for cam_id in range(self.config.num_cameras if self.config else 8):
             # 支持 DNG 和 NPY 两种格式
             img_path_npy = os.path.join(self.data_dir, 'images', sample_id, f'cam_{cam_id}.npy')
-            img_path_dng = os.path.join(self.data_dir, 'cameras', f'cam_{cam_id}', f'{sample_id}.dng')
+            img_path_dng_v1 = os.path.join(self.data_dir, 'cameras', f'cam_{cam_id}', f'{sample_id}.dng')
+            img_path_dng_v2 = os.path.join(self.data_dir, 'images', sample_id, f'cam_{cam_id}.dng')
 
             if os.path.exists(img_path_npy):
                 # NPY 格式 (已归一化的 float16)
                 img = np.load(img_path_npy)
-            elif os.path.exists(img_path_dng):
-                # DNG 格式 (12-bit Bayer RAW)
-                img = self._load_dng_image(img_path_dng)
+            elif os.path.exists(img_path_dng_v1):
+                # DNG 格式 v1 (12-bit Bayer RAW)
+                img = self._load_dng_image(img_path_dng_v1)
+            elif os.path.exists(img_path_dng_v2):
+                # DNG 格式 v2 (data_saver.py 当前输出)
+                img = self._load_dng_image(img_path_dng_v2)
             else:
                 # 降级: 生成随机数据
                 img = np.random.randn(1, 960, 1280).astype(np.float32)
