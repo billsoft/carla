@@ -143,7 +143,7 @@ def main():
     print(f"Training on {device}")
     print(f"AMP: {config.use_amp}, Checkpoint: {config.use_checkpoint}")
     print(f"Coarse-to-Fine: {config.use_coarse_to_fine}, Sparse: {config.use_sparse}")
-    print(f"Positional Encoding: Relative Bias + Camera RoPE + Ray Encoding")
+    print(f"Positional Encoding: Relative Bias + FOV Hyperbolic + Ray Direction (6-DoF)")
     print(f"Train loader size: {len(train_loader)}, Val loader size: {len(val_loader)}", flush=True)
     best_loss = float('inf')
     for epoch in range(start_epoch, config.max_epochs):

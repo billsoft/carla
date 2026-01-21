@@ -17,12 +17,12 @@ class Mlp(nn.Module):
         return self.drop(self.fc2(self.drop(self.act(self.fc1(x)))))
 
 class WindowTransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, window_size, mlp_ratio=4., drop=0., attn_drop=0., shift=False, use_rope_fov=True):
+    def __init__(self, dim, num_heads, window_size, mlp_ratio=4., drop=0., attn_drop=0., shift=False, use_fov_encoding=True):
         super().__init__()
         self.window_size = window_size
         self.shift_size = window_size // 2 if shift else 0
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = FlashWindowAttention(dim, num_heads, window_size, attn_drop, drop, use_rope_fov)
+        self.attn = FlashWindowAttention(dim, num_heads, window_size, attn_drop, drop, use_fov_encoding)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = Mlp(dim, int(dim * mlp_ratio), drop)
 
@@ -59,20 +59,20 @@ class WindowTransformerBlock(nn.Module):
         return x + self.mlp(self.norm2(x))
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, dim, num_heads, window_size, mlp_ratio=4., drop=0., attn_drop=0., use_rope_fov=True):
+    def __init__(self, dim, num_heads, window_size, mlp_ratio=4., drop=0., attn_drop=0., use_fov_encoding=True):
         super().__init__()
-        self.block1 = WindowTransformerBlock(dim, num_heads, window_size, mlp_ratio, drop, attn_drop, shift=False, use_rope_fov=use_rope_fov)
-        self.block2 = WindowTransformerBlock(dim, num_heads, window_size, mlp_ratio, drop, attn_drop, shift=True, use_rope_fov=use_rope_fov)
+        self.block1 = WindowTransformerBlock(dim, num_heads, window_size, mlp_ratio, drop, attn_drop, shift=False, use_fov_encoding=use_fov_encoding)
+        self.block2 = WindowTransformerBlock(dim, num_heads, window_size, mlp_ratio, drop, attn_drop, shift=True, use_fov_encoding=use_fov_encoding)
 
     def forward(self, x, h, w, position_encoder=None, camera_id=None):
         x = self.block1(x, h, w, position_encoder, camera_id)
         return self.block2(x, h, w, position_encoder, camera_id)
 
 class SingleCameraEncoder(nn.Module):
-    def __init__(self, dim, num_heads, num_layers, window_size=8, mlp_ratio=4., drop=0., attn_drop=0., use_checkpoint=True, use_rope_fov=True):
+    def __init__(self, dim, num_heads, num_layers, window_size=8, mlp_ratio=4., drop=0., attn_drop=0., use_checkpoint=True, use_fov_encoding=True):
         super().__init__()
         self.use_checkpoint = use_checkpoint
-        self.layers = nn.ModuleList([TransformerEncoderLayer(dim, num_heads, window_size, mlp_ratio, drop, attn_drop, use_rope_fov) for _ in range(num_layers)])
+        self.layers = nn.ModuleList([TransformerEncoderLayer(dim, num_heads, window_size, mlp_ratio, drop, attn_drop, use_fov_encoding) for _ in range(num_layers)])
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, h, w, position_encoder=None, camera_id=None):
@@ -84,9 +84,20 @@ class SingleCameraEncoder(nn.Module):
         return self.norm(x)
 
 class MultiCameraEncoder(nn.Module):
-    def __init__(self, dim, num_heads, num_layers, window_size=8, mlp_ratio=4., drop=0., attn_drop=0., use_checkpoint=True, use_rope_fov=True):
+    """
+    多相机编码器
+
+    位置编码架构 (优化后):
+    1. RayDirectionEncoding: 6-DoF 射线方向编码 (通过相加注入 tokens)
+    2. HyperbolicFOVEncoding: FOV 双曲编码 (通过 Q,K 变换)
+
+    已移除:
+    - CameraRoPE: Yaw 冗余编码 (RayDirection 已包含 6-DoF)
+    - 详见: occ_network/位置编码优化方案.md
+    """
+    def __init__(self, dim, num_heads, num_layers, window_size=8, mlp_ratio=4., drop=0., attn_drop=0., use_checkpoint=True, use_fov_encoding=True):
         super().__init__()
-        self.encoder = SingleCameraEncoder(dim, num_heads, num_layers, window_size, mlp_ratio, drop, attn_drop, use_checkpoint, use_rope_fov)
+        self.encoder = SingleCameraEncoder(dim, num_heads, num_layers, window_size, mlp_ratio, drop, attn_drop, use_checkpoint, use_fov_encoding)
 
     def forward(self, camera_tokens, spatial_shape, position_encoder=None):
         H, W = spatial_shape

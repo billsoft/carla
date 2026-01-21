@@ -4,14 +4,22 @@ import torch.nn.functional as F
 import math
 
 class FlashWindowAttention(nn.Module):
-    def __init__(self, dim, num_heads, window_size, attn_drop=0., proj_drop=0., use_rope_fov=True):
+    """
+    Flash Window Attention with FOV Encoding
+
+    位置编码说明:
+    - use_fov_encoding: 启用 FOV 双曲编码 (HyperbolicFOVEncoding)
+    - CameraRoPE 已移除: Yaw 编码由 RayDirectionEncoding 提供 (6-DoF)
+    - 详见: occ_network/位置编码优化方案.md
+    """
+    def __init__(self, dim, num_heads, window_size, attn_drop=0., proj_drop=0., use_fov_encoding=True):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.window_size = window_size
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
-        self.use_rope_fov = use_rope_fov
+        self.use_fov_encoding = use_fov_encoding
         self.qkv = nn.Linear(dim, dim * 3)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -29,12 +37,22 @@ class FlashWindowAttention(nn.Module):
         nn.init.trunc_normal_(self.relative_position_bias_table, std=.02)
 
     def forward(self, x, mask=None, position_encoder=None, camera_id=None):
+        """
+        Args:
+            x: 输入特征 [B, N, C]
+            mask: 注意力掩码
+            position_encoder: 位置编码器 (仅使用 FOV 编码，CameraRoPE 已移除)
+            camera_id: 相机 ID
+        """
         B_, N, C = x.shape
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        if self.use_rope_fov and position_encoder is not None and camera_id is not None:
+
+        # 应用 FOV 双曲编码 (CameraRoPE 已移除，Yaw 由 RayDirectionEncoding 提供)
+        if self.use_fov_encoding and position_encoder is not None and camera_id is not None:
             q_flat = q.permute(0, 2, 1, 3).reshape(B_, N, C)
             k_flat = k.permute(0, 2, 1, 3).reshape(B_, N, C)
+            # encode_qk_single_camera 现在仅应用 FOV 编码 (无 RoPE)
             q_enc, k_enc = position_encoder.encode_qk_single_camera(q_flat, k_flat, camera_id)
             q = q_enc.reshape(B_, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             k = k_enc.reshape(B_, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)

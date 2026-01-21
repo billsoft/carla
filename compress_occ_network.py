@@ -162,7 +162,8 @@ def collect_code_files(root_dir, include_exts=None):
             continue
 
         # 压缩内容
-        compressed = remove_comments_and_empty_lines(content, file_path.suffix)
+        # compressed = remove_comments_and_empty_lines(content, file_path.suffix)
+        compressed = content # 保留完整内容，不进行压缩，避免代码截断误报
 
         # 计算相对路径
         rel_path = file_path.relative_to(root_path)

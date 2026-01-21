@@ -3,21 +3,26 @@ import torch.nn as nn
 import math
 from typing import Tuple, Optional, Dict, List
 
-class CameraRoPE(nn.Module):
-    def __init__(self, dim: int, temperature: float = 10000.0):
-        super().__init__()
-        assert dim % 2 == 0
-        self.register_buffer('inv_freq', 1.0 / (temperature ** (torch.arange(0, dim, 2).float() / dim)))
+# ============================================================================
+# CameraRoPE 已移除
+# ============================================================================
+# 原因: RayDirectionEncoding 已包含完整 6-DoF 旋转信息 (Pitch, Roll, Yaw)
+# CameraRoPE 仅编码 Yaw，是 RayDirection 的子集，属于冗余编码
+# 详见: occ_network/位置编码优化方案.md
+# ============================================================================
 
-    def forward(self, x: torch.Tensor, yaw_angles: torch.Tensor) -> torch.Tensor:
-        theta = yaw_angles.unsqueeze(-1) * self.inv_freq
-        theta = torch.cat([theta, theta], dim=-1)
-        cos_t, sin_t = torch.cos(theta), torch.sin(theta)
-        x_pairs = x.reshape(*x.shape[:-1], -1, 2)
-        x1, x2 = x_pairs[..., 0], x_pairs[..., 1]
-        return torch.stack([x1 * cos_t[..., ::2] - x2 * sin_t[..., ::2], x1 * sin_t[..., 1::2] + x2 * cos_t[..., 1::2]], dim=-1).reshape(*x.shape)
 
 class HyperbolicFOVEncoding(nn.Module):
+    """
+    双曲 FOV 编码
+
+    对不同视场角的相机特征进行双曲缩放:
+    - 广角相机 (FOV > 70°): 特征向量"膨胀"
+    - 长焦相机 (FOV < 70°): 特征向量"收缩"
+
+    这编码了内参差异，与 RayDirectionEncoding 的外参编码互补
+    """
+
     def __init__(self, dim: int, fov_list: list, ref_fov: float = 70.0, temperature: float = 10000.0):
         super().__init__()
         phis = torch.tensor([math.asinh(math.sqrt(f / ref_fov) - 1) for f in fov_list], dtype=torch.float32)
@@ -32,43 +37,64 @@ class HyperbolicFOVEncoding(nn.Module):
         x1, x2 = x_pairs[..., 0], x_pairs[..., 1]
         return torch.stack([x1 * cosh_p + x2 * sinh_p, x1 * sinh_p + x2 * cosh_p], dim=-1).view(B, N, d)
 
+
 class MultiCameraPositionEncoding(nn.Module):
+    """
+    多相机位置编码 (简化版)
+
+    仅使用 HyperbolicFOVEncoding 进行视场角差异编码
+    3D 方向编码交给 RayDirectionEncoding 处理
+
+    移除内容:
+    - CameraRoPE: Yaw 编码已由 RayDirectionEncoding 包含
+    - yaw_angles buffer: 不再需要
+    """
+
     def __init__(self, dim: int, num_cameras: int, image_size: Tuple[int, int], camera_configs: Dict, patch_size: int = 16):
         super().__init__()
         self.dim = dim
-        yaw_angles, fov_list = [], []
+
+        # 提取 FOV 列表 (仅保留 FOV 信息)
+        fov_list = []
         for cam_name in sorted(camera_configs.keys(), key=lambda x: camera_configs[x]['id']):
             cfg = camera_configs[cam_name]
-            yaw_angles.append(cfg['rotation'][2] * math.pi / 180.0)
             fov_list.append(cfg['fov'])
-        self.register_buffer('yaw_angles', torch.tensor(yaw_angles, dtype=torch.float32))
-        # 移除绝对位置编码 (PositionEncoding2D)
-        # feat_h, feat_w = image_size[0] // patch_size, image_size[1] // patch_size
-        # self.pixel_pe = PositionEncoding2D(dim, feat_h, feat_w)
-        self.camera_rope = CameraRoPE(dim)
+
+        # 仅保留 FOV 双曲编码 (内参差异)
         self.fov_hyperbolic = HyperbolicFOVEncoding(dim, fov_list)
 
     def add_pixel_pe(self, x: torch.Tensor) -> torch.Tensor:
-        # 相对位置编码方案: 不再修改输入特征 x
-        # return self.pixel_pe(x)
+        """相对位置编码方案: 不修改输入特征"""
         return x
 
     def encode_qk_single_camera(self, q: torch.Tensor, k: torch.Tensor, camera_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        对单个相机的 Q, K 应用 FOV 编码
+
+        移除: CameraRoPE 的 Yaw 旋转 (由 RayDirectionEncoding 提供)
+        """
         B, N, d = q.shape
         cam_ids = torch.full((B, N), camera_id, dtype=torch.long, device=q.device)
-        yaw = torch.full((B, N), self.yaw_angles[camera_id].item(), device=q.device)
+
+        # 仅应用 FOV 双曲编码
         q = self.fov_hyperbolic(q, cam_ids)
         k = self.fov_hyperbolic(k, cam_ids)
-        q = self.camera_rope(q, yaw)
-        k = self.camera_rope(k, yaw)
+
         return q, k
+
 
 class RayDirectionEncoding(nn.Module):
     """
-    射线方向编码
+    射线方向编码 (6-DoF 几何先验)
 
     将每个像素的 3D 射线方向编码为特征向量
     这帮助模型理解不同相机像素在 3D 空间中"指向"的方向
+
+    包含完整的几何信息:
+    - 内参: FOV, 光心位置
+    - 外参: Pitch, Roll, Yaw (通过旋转矩阵)
+
+    注意: 这是唯一编码 Yaw 的模块 (CameraRoPE 已移除以避免冗余)
     """
 
     def __init__(
@@ -136,7 +162,7 @@ class RayDirectionEncoding(nn.Module):
         # 归一化
         rays_cam = rays_cam / rays_cam.norm(dim=-1, keepdim=True)
 
-        # 转换到车辆坐标系
+        # 转换到车辆坐标系 (包含完整的 Pitch, Roll, Yaw 信息)
         R = self._rotation_matrix(rotation)  # [3, 3]
         rays_world = torch.einsum('ij,hwj->hwi', R, rays_cam)
 
@@ -146,6 +172,11 @@ class RayDirectionEncoding(nn.Module):
         """
         从欧拉角计算旋转矩阵
         rotation: [pitch, roll, yaw] in degrees
+
+        这是 6-DoF 几何信息的核心:
+        - Pitch: 俯仰 (减速带, 上下坡)
+        - Roll: 翻滚 (弯道倾斜)
+        - Yaw: 偏航 (相机朝向) <- 唯一的 Yaw 编码位置
         """
         pitch, roll, yaw = [math.radians(r) for r in rotation]
 
@@ -228,6 +259,17 @@ class RayDirectionEncoding(nn.Module):
 
 
 class CameraPositionEncoding(nn.Module):
+    """
+    相机位置编码主类
+
+    组合多种编码:
+    1. HyperbolicFOVEncoding: 视场角差异 (内参)
+    2. RayDirectionEncoding: 3D 射线方向 (内参 + 6-DoF 外参)
+
+    已移除:
+    - CameraRoPE: Yaw 冗余编码
+    """
+
     def __init__(self, dim, num_cameras, image_size, camera_configs, patch_size=16, use_ray_encoding=True):
         super().__init__()
         self.encoder = MultiCameraPositionEncoding(dim, num_cameras, image_size, camera_configs, patch_size)
@@ -239,12 +281,16 @@ class CameraPositionEncoding(nn.Module):
         return self.encoder.add_pixel_pe(x)
 
     def encode_qk_single_camera(self, q, k, camera_id):
+        """对 Q, K 应用 FOV 编码 (无 RoPE)"""
         return self.encoder.encode_qk_single_camera(q, k, camera_id)
 
     def get_ray_encoding(self, camera_id: int, batch_size: int, device: torch.device = None) -> Optional[torch.Tensor]:
-        """获取射线方向编码"""
+        """获取射线方向编码 (6-DoF 几何先验)"""
         if self.use_ray_encoding:
             return self.ray_encoder(camera_id, batch_size, device)
         return None
 
-CameraPositionEncoding = MultiCameraPositionEncoding
+
+# 兼容性别名 (保持向后兼容)
+# 注意: 旧代码可能直接使用 MultiCameraPositionEncoding
+# CameraPositionEncoding = MultiCameraPositionEncoding  # 已注释，使用完整版 CameraPositionEncoding

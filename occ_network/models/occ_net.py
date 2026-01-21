@@ -17,7 +17,7 @@ class OccNetV3(nn.Module):
         self.use_fp16_input = getattr(config, 'use_fp16_input', True)
         self.patch_embed = MultiCameraPatchEmbed(img_size=config.image_size, patch_size=config.patch_size, in_channels=config.in_channels, embed_dim=config.embed_dim, num_cameras=config.num_cameras)
         self.camera_pe = CameraPositionEncoding(dim=config.embed_dim, num_cameras=config.num_cameras, image_size=config.image_size, camera_configs=config.cameras, patch_size=config.patch_size)
-        self.encoder = MultiCameraEncoder(dim=config.embed_dim, num_heads=config.num_heads, num_layers=config.num_encoder_layers, window_size=config.window_size, mlp_ratio=config.mlp_ratio, drop=config.drop_rate, attn_drop=config.attn_drop_rate, use_checkpoint=config.use_checkpoint, use_rope_fov=True)
+        self.encoder = MultiCameraEncoder(dim=config.embed_dim, num_heads=config.num_heads, num_layers=config.num_encoder_layers, window_size=config.window_size, mlp_ratio=config.mlp_ratio, drop=config.drop_rate, attn_drop=config.attn_drop_rate, use_checkpoint=config.use_checkpoint, use_fov_encoding=True)
         self.fusion_proj = nn.Linear(config.embed_dim * config.num_cameras, config.embed_dim)
         self.decoder = BEVDecoder(dim=config.embed_dim, num_heads=config.num_heads, num_layers=config.num_decoder_layers, bev_h=config.bev_size[0], bev_w=config.bev_size[1], num_points=config.num_points, mlp_ratio=config.mlp_ratio, drop=config.drop_rate, attn_drop=config.attn_drop_rate, use_checkpoint=config.use_checkpoint)
         self.temporal = LightweightTemporalFusion(dim=config.embed_dim, num_frames=config.num_frames, bev_h=config.bev_size[0], bev_w=config.bev_size[1], pc_range=config.pc_range)
