@@ -46,14 +46,14 @@ class Config:
     depth_range = (0.5, 80.0)
     num_depth_bins = 64
     cameras = {
-        'front_main': {'id': 0, 'fov': 50.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
-        'front_wide': {'id': 1, 'fov': 120.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
-        'front_narrow': {'id': 2, 'fov': 35.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
-        'left_pillar': {'id': 3, 'fov': 80.0, 'position': [0.5, 0.9, 1.3], 'rotation': [0.0, 0.0, 55.0]},
-        'right_pillar': {'id': 4, 'fov': 80.0, 'position': [0.5, -0.9, 1.3], 'rotation': [0.0, 0.0, -55.0]},
-        'left_repeater': {'id': 5, 'fov': 80.0, 'position': [1.0, 1.0, 0.8], 'rotation': [0.0, 0.0, 135.0]},
-        'right_repeater': {'id': 6, 'fov': 80.0, 'position': [1.0, -1.0, 0.8], 'rotation': [0.0, 0.0, -135.0]},
-        'rear': {'id': 7, 'fov': 80.0, 'position': [-1.5, 0.0, 1.2], 'rotation': [0.0, 0.0, 180.0]},
+        'front_main': {'id': 0, 'fov': 50.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0], 'projection': 'pinhole'},
+        'front_wide': {'id': 1, 'fov': 120.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0], 'projection': 'equidistant'},
+        'front_narrow': {'id': 2, 'fov': 35.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0], 'projection': 'pinhole'},
+        'left_pillar': {'id': 3, 'fov': 80.0, 'position': [0.5, 0.9, 1.3], 'rotation': [0.0, 0.0, 55.0], 'projection': 'pinhole'},
+        'right_pillar': {'id': 4, 'fov': 80.0, 'position': [0.5, -0.9, 1.3], 'rotation': [0.0, 0.0, -55.0], 'projection': 'pinhole'},
+        'left_repeater': {'id': 5, 'fov': 80.0, 'position': [1.0, 1.0, 0.8], 'rotation': [0.0, 0.0, 135.0], 'projection': 'pinhole'},
+        'right_repeater': {'id': 6, 'fov': 80.0, 'position': [1.0, -1.0, 0.8], 'rotation': [0.0, 0.0, -135.0], 'projection': 'pinhole'},
+        'rear': {'id': 7, 'fov': 80.0, 'position': [-1.5, 0.0, 1.2], 'rotation': [0.0, 0.0, 180.0], 'projection': 'pinhole'},
     }
     batch_size = 1
     num_workers = 0
