@@ -37,7 +37,6 @@ class RayDirectionEncoding(nn.Module):
         image_size: Tuple[int, int],
         camera_configs: Dict,
         patch_size: int = 16,
-        temperature: float = 10000.0
     ):
         super().__init__()
         self.dim = dim
@@ -55,9 +54,8 @@ class RayDirectionEncoding(nn.Module):
             )
             self.register_buffer(f'rays_{cam_id}', rays)
 
-        # 正弦编码频率
-        inv_freq = 1.0 / (temperature ** (torch.arange(0, dim, 6).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
+        # 线性映射层：将 3D 射线向量映射到特征维度 dim
+        self.proj = nn.Linear(3, dim)
 
     def _compute_ray_directions(
         self,
@@ -151,37 +149,13 @@ class RayDirectionEncoding(nn.Module):
 
         return Rz @ Ry @ Rx
 
-    def _sinusoidal_encode(self, rays: torch.Tensor) -> torch.Tensor:
-        """
-        正弦编码射线方向
-        """
-        shape = rays.shape[:-1]
-        rays_flat = rays.view(-1, 3)  # [*, 3]
-
-        encodings = []
-        for i in range(3):  # x, y, z
-            coord = rays_flat[:, i:i+1]  # [*, 1]
-            freq = coord * self.inv_freq  # [*, dim//6]
-            enc = torch.cat([freq.sin(), freq.cos()], dim=-1)  # [*, dim//3]
-            encodings.append(enc)
-
-        encoded = torch.cat(encodings, dim=-1)  # [*, dim]
-
-        # 调整到目标维度
-        if encoded.shape[-1] > self.dim:
-            encoded = encoded[..., :self.dim]
-        elif encoded.shape[-1] < self.dim:
-            padding = torch.zeros(*encoded.shape[:-1], self.dim - encoded.shape[-1],
-                                  device=encoded.device, dtype=encoded.dtype)
-            encoded = torch.cat([encoded, padding], dim=-1)
-
-        return encoded.view(*shape, self.dim)
-
     def forward(self, camera_id: int, batch_size: int, device: torch.device = None) -> torch.Tensor:
         rays = getattr(self, f'rays_{camera_id}')  # [H_p, W_p, 3]
         H_p, W_p, _ = rays.shape
 
-        encoded = self._sinusoidal_encode(rays)  # [H_p, W_p, dim]
+        # 直接将 3D 射线向量投影到特征维度
+        encoded = self.proj(rays)  # [H_p, W_p, dim]
+        
         encoded = encoded.view(H_p * W_p, self.dim)  # [N, dim]
         encoded = encoded.unsqueeze(0).expand(batch_size, -1, -1)  # [B, N, dim]
 

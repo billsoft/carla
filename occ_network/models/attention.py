@@ -28,18 +28,6 @@ class FlashWindowAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-        # Swin 风格相对位置偏置表
-        self.relative_position_bias_table = nn.Parameter(torch.zeros((2 * window_size - 1) ** 2, num_heads))
-        coords = torch.arange(window_size)
-        coords = torch.stack(torch.meshgrid([coords, coords], indexing='ij'))
-        coords_flatten = coords.flatten(1)
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
-        relative_coords[:, :, 0] += window_size - 1
-        relative_coords[:, :, 1] += window_size - 1
-        relative_coords[:, :, 0] *= 2 * window_size - 1
-        self.register_buffer("relative_position_index", relative_coords.sum(-1))
-        nn.init.trunc_normal_(self.relative_position_bias_table, std=.02)
 
     def forward(self, x, mask=None):
         """
@@ -51,24 +39,18 @@ class FlashWindowAttention(nn.Module):
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
-        # 计算相对位置偏置 (Relative Position Bias)
-        rpb = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size * self.window_size, self.window_size * self.window_size, -1
-        ).permute(2, 0, 1).contiguous()  # [nH, L, L]
-
         use_flash = hasattr(F, 'scaled_dot_product_attention')
         if use_flash:
-            # 构建 Attention Mask (Bias + Mask)
-            attn_mask = rpb.unsqueeze(0)  # [1, nH, L, L]
+            # 构建 Attention Mask (仅 Mask)
+            attn_mask = None
             if mask is not None:
                 # mask: [nW, L, L] -> [nW, 1, L, L]
-                attn_mask = attn_mask + mask.unsqueeze(1)
+                attn_mask = mask.unsqueeze(1)
             
             with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True):
                 x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.attn_drop.p if self.training else 0.0)
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
-            attn = attn + rpb.unsqueeze(0)
             if mask is not None:
                 attn = attn + mask.unsqueeze(1).unsqueeze(0)
             attn = F.softmax(attn, dim=-1)

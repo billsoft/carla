@@ -139,3 +139,14 @@ python inference.py --uncertainty --mc-samples 10
 ```
 
 这将通过多次前向传播计算预测的方差和熵。
+
+
+# Memory Cell (推荐，默认)
+python train_tbptt.py --dataset /path/to/data --mode memory_cell --amp
+
+# Gradient Accumulation
+python train_tbptt.py --dataset /path/to/data --mode grad_accum --window 3 --amp
+
+# Classic TBPTT (高显存)
+python train_tbptt.py --dataset /path/to/data --mode classic --window 3 --amp
+

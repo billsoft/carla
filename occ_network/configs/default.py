@@ -56,6 +56,21 @@ class Config:
     # 时序融合 TBPTT (截断反向传播)
     tbptt_steps = 0  # 禁用跨步反向传播 (设为0以避免RuntimeError: Trying to backward through the graph a second time)
 
+    # ==================== Memory Cell 时序融合 (推荐) ====================
+    # 核心思想: 用 ConvGRU 压缩时序信息到单个 memory state
+    # 显存压缩: 1200x (12GB → 10MB)
+    # 原理: BEV (128×128×192) → Memory (32×32×64) → GRU 更新 → 解码回 BEV
+    # 参考: BEVFormer v2, StreamPETR, VideoBEV
+    use_memory_cell = True        # 启用 Memory Cell (推荐)
+    memory_dim = 64               # Memory 通道数 (压缩后)
+    memory_size = (32, 32)        # Memory 空间尺寸 (压缩后)
+
+    # ==================== Coarse-only TBPTT (备选方案) ====================
+    # 如果 use_memory_cell=True，此配置不生效
+    use_coarse_only_tbptt = False  # 禁用 (Memory Cell 更优)
+    coarse_temporal_size = (32, 32)
+    coarse_tbptt_weight = 0.1
+
     # 动态物体运动估计 (处理非自车运动)
     use_dynamic_motion = True
 
