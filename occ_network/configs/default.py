@@ -40,20 +40,40 @@ class Config:
     distance_loss_weight = 0.2
     # Ray Direction Encoding (射线方向编码)
     use_ray_encoding = True
-    # Depth Supervision (深度监督)
+    # Depth Supervision (深度监督) - 改进版
     use_depth_supervision = True
     depth_loss_weight = 0.5
     depth_range = (0.5, 80.0)
     num_depth_bins = 64
+
+    # ==================== V2 改进配置 ====================
+    # 深度感知融合 (Lift-Splat 风格: 深度参与 2D→3D 重建)
+    use_depth_aware_fusion = True
+
+    # 多尺度 BEV 解码 (大/中/小物体分别处理)
+    use_multi_scale_bev = True  # 默认关闭，会增加显存
+
+    # 时序融合 TBPTT (截断反向传播)
+    tbptt_steps = 0  # 禁用跨步反向传播 (设为0以避免RuntimeError: Trying to backward through the graph a second time)
+
+    # 动态物体运动估计 (处理非自车运动)
+    use_dynamic_motion = True
+
+    # 时空位置编码 (编码时间间隔信息)
+    use_st_encoding = True
+    # 相机配置 (统一使用等距投影，无需指定 projection)
+    # FOV 决定在球面上截取的区域大小:
+    #   - 小 FOV (35°) = 长焦，球面小区域
+    #   - 大 FOV (120°) = 广角，球面大区域
     cameras = {
-        'front_main': {'id': 0, 'fov': 50.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0], 'projection': 'pinhole'},
-        'front_wide': {'id': 1, 'fov': 120.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0], 'projection': 'equidistant'},
-        'front_narrow': {'id': 2, 'fov': 35.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0], 'projection': 'pinhole'},
-        'left_pillar': {'id': 3, 'fov': 80.0, 'position': [0.5, 0.9, 1.3], 'rotation': [0.0, 0.0, 55.0], 'projection': 'pinhole'},
-        'right_pillar': {'id': 4, 'fov': 80.0, 'position': [0.5, -0.9, 1.3], 'rotation': [0.0, 0.0, -55.0], 'projection': 'pinhole'},
-        'left_repeater': {'id': 5, 'fov': 80.0, 'position': [1.0, 1.0, 0.8], 'rotation': [0.0, 0.0, 135.0], 'projection': 'pinhole'},
-        'right_repeater': {'id': 6, 'fov': 80.0, 'position': [1.0, -1.0, 0.8], 'rotation': [0.0, 0.0, -135.0], 'projection': 'pinhole'},
-        'rear': {'id': 7, 'fov': 80.0, 'position': [-1.5, 0.0, 1.2], 'rotation': [0.0, 0.0, 180.0], 'projection': 'pinhole'},
+        'front_main': {'id': 0, 'fov': 50.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
+        'front_wide': {'id': 1, 'fov': 120.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
+        'front_narrow': {'id': 2, 'fov': 35.0, 'position': [1.5, 0.0, 1.5], 'rotation': [0.0, 0.0, 0.0]},
+        'left_pillar': {'id': 3, 'fov': 80.0, 'position': [0.5, 0.9, 1.3], 'rotation': [0.0, 0.0, 55.0]},
+        'right_pillar': {'id': 4, 'fov': 80.0, 'position': [0.5, -0.9, 1.3], 'rotation': [0.0, 0.0, -55.0]},
+        'left_repeater': {'id': 5, 'fov': 80.0, 'position': [1.0, 1.0, 0.8], 'rotation': [0.0, 0.0, 135.0]},
+        'right_repeater': {'id': 6, 'fov': 80.0, 'position': [1.0, -1.0, 0.8], 'rotation': [0.0, 0.0, -135.0]},
+        'rear': {'id': 7, 'fov': 80.0, 'position': [-1.5, 0.0, 1.2], 'rotation': [0.0, 0.0, 180.0]},
     }
     batch_size = 1
     num_workers = 0

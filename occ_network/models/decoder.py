@@ -107,6 +107,117 @@ class LightweightUpsampler(nn.Module):
         return self._forward_impl(x)
 
 
+class MultiScaleBEVDecoder(nn.Module):
+    """
+    多尺度 BEV 解码器
+
+    改进点:
+    1. 粗糙尺度: 捕获全局上下文 (大物体如建筑、道路)
+    2. 中等尺度: 捕获中等物体 (车辆、树木)
+    3. 精细尺度: 捕获小物体 (行人、锥桶、交通标志)
+    4. 尺度融合: 自适应融合不同尺度的特征
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_layers: int,
+        bev_h: int,
+        bev_w: int,
+        num_points: int = 4,
+        mlp_ratio: float = 4.0,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        use_checkpoint: bool = True,
+        scales: tuple = (0.25, 0.5, 1.0),  # 相对于目标 BEV 尺寸的比例
+    ):
+        super().__init__()
+        self.bev_h = bev_h
+        self.bev_w = bev_w
+        self.use_checkpoint = use_checkpoint
+        self.scales = scales
+        self.num_scales = len(scales)
+
+        # 多尺度 BEV Query
+        self.scale_queries = nn.ModuleList()
+        self.scale_decoders = nn.ModuleList()
+
+        for scale in scales:
+            h = int(bev_h * scale)
+            w = int(bev_w * scale)
+            # BEV Query
+            self.scale_queries.append(BEVQueries(h, w, dim))
+            # Decoder
+            self.scale_decoders.append(
+                nn.ModuleList([
+                    DecoderLayer(dim, num_heads, num_points, mlp_ratio, drop, attn_drop)
+                    for _ in range(num_layers)
+                ])
+            )
+
+        # 尺度融合
+        self.scale_fusion = nn.Sequential(
+            nn.Conv2d(dim * self.num_scales, dim * 2, 3, padding=1, bias=False),
+            nn.BatchNorm2d(dim * 2),
+            nn.GELU(),
+            nn.Conv2d(dim * 2, dim, 1),
+        )
+
+        # 最终归一化
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, memory, spatial_shapes):
+        """
+        Args:
+            memory: [B, L, C] 编码器输出
+            spatial_shapes: [1, 2] 特征图尺寸
+
+        Returns:
+            bev_features: [B, C, bev_h, bev_w] BEV 特征
+        """
+        B = memory.shape[0]
+        device = memory.device
+        level_start_index = torch.tensor([0], device=device)
+
+        scale_features = []
+
+        for scale_idx, (scale, queries_module, decoder_layers) in enumerate(
+            zip(self.scales, self.scale_queries, self.scale_decoders)
+        ):
+            h = int(self.bev_h * scale)
+            w = int(self.bev_w * scale)
+
+            # 获取 BEV Query
+            queries, query_pos, ref_points = queries_module(B, device)
+
+            # Decoder
+            for layer in decoder_layers:
+                if self.use_checkpoint and self.training:
+                    queries = checkpoint(
+                        layer, queries, query_pos, memory, ref_points,
+                        spatial_shapes, level_start_index, use_reentrant=False
+                    )
+                else:
+                    queries = layer(queries, query_pos, memory, ref_points, spatial_shapes, level_start_index)
+
+            # 归一化并重塑
+            queries = self.norm(queries)  # [B, h*w, C]
+            bev = queries.transpose(1, 2).view(B, -1, h, w)  # [B, C, h, w]
+
+            # 上采样到目标尺寸
+            if h != self.bev_h or w != self.bev_w:
+                bev = F.interpolate(bev, size=(self.bev_h, self.bev_w), mode='bilinear', align_corners=False)
+
+            scale_features.append(bev)
+
+        # 尺度融合
+        fused = torch.cat(scale_features, dim=1)  # [B, C*num_scales, bev_h, bev_w]
+        output = self.scale_fusion(fused)  # [B, C, bev_h, bev_w]
+
+        return output
+
+
 class DepthPredictionHead(nn.Module):
     """
     深度预测头：为每个相机预测深度分布

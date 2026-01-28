@@ -15,13 +15,20 @@ from typing import Tuple, Optional, Dict, List
 
 class RayDirectionEncoding(nn.Module):
     """
-    射线方向编码 (支持多种投影模型)
-    
+    射线方向编码 (统一等距投影模型)
+
     将每个像素映射为 3D 空间中的单位射线方向向量。
-    支持:
-    - Pinhole: 标准相机 (FOV < 100°)
-    - Equidistant: 鱼眼相机 (FOV > 100°)
-    - Stereographic: 超广角
+
+    核心思想:
+    - 所有相机统一使用等距投影 (equidistant): θ = r / f
+    - 不同 FOV 的相机 = 在同一个球面上截取不同大小的区域
+    - 小 FOV (如 35°) = 球面上的小区域 (长焦)
+    - 大 FOV (如 120°) = 球面上的大区域 (广角)
+
+    优势:
+    - 概念统一，无需区分 pinhole/fisheye
+    - 代码简洁，无需配置 projection 参数
+    - 小角度时误差可由网络学习补偿
     """
 
     def __init__(
@@ -37,20 +44,15 @@ class RayDirectionEncoding(nn.Module):
         self.image_size = image_size
         self.patch_size = patch_size
 
-        # 预计算每个相机的射线方向
+        # 预计算每个相机的射线方向 (统一使用等距投影)
         for cam_name, cfg in camera_configs.items():
             cam_id = cfg['id']
-            # 默认使用 pinhole，除非配置指定
-            projection = cfg.get('projection', 'pinhole')
-            
             rays = self._compute_ray_directions(
                 cfg['fov'],
                 cfg['rotation'],
                 image_size,
-                patch_size,
-                projection
+                patch_size
             )
-            # rays: [H_patches, W_patches, 3]
             self.register_buffer(f'rays_{cam_id}', rays)
 
         # 正弦编码频率
@@ -63,77 +65,62 @@ class RayDirectionEncoding(nn.Module):
         rotation: List[float],
         image_size: Tuple[int, int],
         patch_size: int,
-        projection: str
+        projection: str = 'equidistant'  # 保留参数但不再使用
     ) -> torch.Tensor:
         """
-        计算 patch 中心点的射线方向 (支持多种投影)
+        计算 patch 中心点的射线方向 (统一使用等距投影)
+
+        设计决策:
+        - 统一使用 equidistant (等距投影): θ = r / f
+        - 所有相机都视为"球面上截取不同区域"
+        - FOV 决定截取的球面范围大小
+        - 小角度时 equidistant ≈ pinhole，误差可由网络学习补偿
+
+        数学原理:
+        - 等距投影: r = f * θ  =>  θ = r / f
+        - f = (W/2) / (FOV_rad/2) = W / FOV_rad
+        - 像素距离 r 线性映射到入射角 θ
         """
         H, W = image_size
         H_p, W_p = H // patch_size, W // patch_size
-        
+
         # Patch 中心坐标 (图像坐标系)
-        # u: 右 (x), v: 下 (y)
         u = torch.linspace(patch_size/2, W - patch_size/2, W_p)
         v = torch.linspace(patch_size/2, H - patch_size/2, H_p)
         vv, uu = torch.meshgrid(v, u, indexing='ij')  # [H_p, W_p]
-        
+
         cx, cy = W / 2, H / 2
-        
+
         # 1. 计算像素到光心的图像平面距离 r
-        # dx, dy 是图像平面上的坐标 (像素单位)
         dx = uu - cx
         dy = vv - cy
         r = torch.sqrt(dx**2 + dy**2)
-        
-        # 图像平面上的方位角 phi (atan2(y, x))
-        # 注意: 图像坐标系 y 是向下的
+
+        # 图像平面上的方位角 phi
         phi_img = torch.atan2(dy, dx)
-        
-        # 2. 根据投影模型计算入射角 theta (射线与光轴的夹角)
+
+        # 2. 统一使用等距投影计算入射角 theta
+        # θ = r / f，其中 f = W / FOV_rad
         fov_rad = math.radians(fov)
-        
-        if projection == 'pinhole':
-            # r = f * tan(theta)  =>  theta = atan(r / f)
-            # f = W / (2 * tan(FOV/2))
-            f = W / (2 * math.tan(fov_rad / 2))
-            theta = torch.atan(r / f)
-            
-        elif projection == 'equidistant':
-            # r = f * theta  =>  theta = r / f
-            # 这里的 f 是比例系数，通常取 f = W / FOV_rad (假设 FOV 对应图像宽度)
-            # 或者更严格地，如果是对角线FOV... 这里简化假设水平FOV对应宽度
-            f = W / fov_rad
-            theta = r / f
-            
-        elif projection == 'stereographic':
-            # r = 2 * f * tan(theta / 2)
-            # f = W / (4 * tan(FOV/4))
-            f = W / (4 * math.tan(fov_rad / 4))
-            theta = 2 * torch.atan(r / (2 * f))
-            
-        else:
-            raise ValueError(f"Unknown projection type: {projection}")
-            
-        # 3. 转换为相机坐标系下的 3D 向量 (x, y, z)
-        # 假设: Z轴向前 (光轴), X轴向右, Y轴向下
-        # ray_z = cos(theta)
-        # ray_x = sin(theta) * cos(phi_img)
-        # ray_y = sin(theta) * sin(phi_img)
-        
+        f = W / fov_rad
+        theta = r / f
+
+        # 3. 球面坐标 → 笛卡尔射线方向
+        # 相机坐标系: Z轴向前(光轴), X轴向右, Y轴向下
         ray_z = torch.cos(theta)
         sin_theta = torch.sin(theta)
         ray_x = sin_theta * torch.cos(phi_img)
         ray_y = sin_theta * torch.sin(phi_img)
-        
-        rays_cam = torch.stack([ray_x, ray_y, ray_z], dim=-1) # [H_p, W_p, 3]
-        
-        # 归一化 (理论上已经是单位向量，但为了数值稳定性)
-        rays_cam = rays_cam / rays_cam.norm(dim=-1, keepdim=True)
-        
+
+        rays_cam = torch.stack([ray_x, ray_y, ray_z], dim=-1)  # [H_p, W_p, 3]
+
+        # 归一化
+        rays_cam = rays_cam / rays_cam.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+
         # 4. 转换到世界/车辆坐标系
-        R = self._rotation_matrix(rotation)  # [3, 3]
+        R = self._rotation_matrix(rotation)
         rays_world = torch.einsum('ij,hwj->hwi', R, rays_cam)
-        
+
         return rays_world
 
     def _rotation_matrix(self, rotation: List[float]) -> torch.Tensor:
@@ -207,27 +194,31 @@ class RayDirectionEncoding(nn.Module):
 class CameraPositionEncoding(nn.Module):
     """
     相机位置编码主类 (简化版)
-    
-    仅保留 RayDirectionEncoding，移除冗余的 HyperbolicFOVEncoding。
+
+    位置编码架构:
+    - RayDirectionEncoding: 射线方向编码 (支持 pinhole/equidistant/stereographic)
+
+    已移除:
+    - HyperbolicFOVEncoding: FOV 信息已在射线方向中编码
+    - encode_qk_single_camera: 不再需要对 Q/K 做额外变换
+
+    详见: occ_network/球面位置编码.md
     """
 
-    def __init__(self, dim, num_cameras, image_size, camera_configs, patch_size=16, use_ray_encoding=True):
+    def __init__(self, dim, num_cameras, image_size, camera_configs, patch_size=16):
         super().__init__()
-        self.use_ray_encoding = use_ray_encoding
-        if use_ray_encoding:
-            self.ray_encoder = RayDirectionEncoding(dim, image_size, camera_configs, patch_size)
-            
-    def forward(self, x):
-        # 不再添加任何 pixel-wise PE (如原来的 add_pixel_pe)
-        # 位置信息完全由 cross-attention 中的 ray embedding 提供
-        return x
-
-    def encode_qk_single_camera(self, q, k, camera_id):
-        # 移除 FOV 双曲编码
-        # 这里直接返回原值，保留接口兼容性
-        return q, k
+        self.ray_encoder = RayDirectionEncoding(dim, image_size, camera_configs, patch_size)
 
     def get_ray_encoding(self, camera_id: int, batch_size: int, device: torch.device = None) -> Optional[torch.Tensor]:
-        if self.use_ray_encoding:
-            return self.ray_encoder(camera_id, batch_size, device)
-        return None
+        """
+        获取指定相机的射线方向编码
+
+        Args:
+            camera_id: 相机 ID (0-7)
+            batch_size: batch 大小
+            device: 目标设备
+
+        Returns:
+            ray_encoding: [B, N, dim] 射线方向编码
+        """
+        return self.ray_encoder(camera_id, batch_size, device)

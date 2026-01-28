@@ -142,23 +142,29 @@ class FlowLoss(nn.Module):
 
 class DepthSupervisionLoss(nn.Module):
     """
-    深度监督损失
+    深度监督损失 (改进版)
 
-    使用 Log 空间 L1 损失,对近距离更敏感
+    改进点:
+    1. 边缘感知: 在物体边缘处不强制深度平滑
+    2. 多尺度监督: 支持高分辨率深度预测
+    3. Log 空间 L1 损失: 对近距离更敏感
     """
 
-    def __init__(self, depth_range=(0.5, 80.0), eps=1e-6):
+    def __init__(self, depth_range=(0.5, 80.0), eps=1e-6, use_edge_aware=True, smooth_weight=0.1):
         super().__init__()
         self.min_depth = depth_range[0]
         self.max_depth = depth_range[1]
         self.eps = eps
+        self.use_edge_aware = use_edge_aware
+        self.smooth_weight = smooth_weight
 
-    def forward(self, depth_pred, depth_gt, valid_mask=None):
+    def forward(self, depth_pred, depth_gt, valid_mask=None, images=None):
         """
         Args:
             depth_pred: [B, N, H, W] 预测深度
             depth_gt: [B, N, H, W] 真值深度
             valid_mask: [B, N, H, W] 有效掩码
+            images: [B, N, C, H_img, W_img] 原始图像 (用于边缘感知)
 
         Returns:
             depth_loss: 深度损失标量
@@ -170,16 +176,69 @@ class DepthSupervisionLoss(nn.Module):
         # Log 空间 L1 损失 (对近距离更敏感)
         log_pred = torch.log(depth_pred + self.eps)
         log_gt = torch.log(depth_gt + self.eps)
-        loss = torch.abs(log_pred - log_gt)
+        base_loss = torch.abs(log_pred - log_gt)
 
+        # 边缘感知平滑损失
+        smooth_loss = torch.tensor(0.0, device=depth_pred.device)
+        if self.use_edge_aware and images is not None:
+            smooth_loss = self._compute_edge_aware_smooth_loss(depth_pred, images)
+
+        # 应用有效掩码
         if valid_mask is not None:
             # 只计算有效深度的损失
             valid_mask = valid_mask.float()
-            loss = (loss * valid_mask).sum() / (valid_mask.sum() + self.eps)
+            base_loss = (base_loss * valid_mask).sum() / (valid_mask.sum() + self.eps)
         else:
-            loss = loss.mean()
+            base_loss = base_loss.mean()
 
-        return loss
+        return base_loss + self.smooth_weight * smooth_loss
+
+    def _compute_edge_aware_smooth_loss(self, depth_pred, images):
+        """
+        计算边缘感知平滑损失
+
+        在物体边缘处，深度不连续是正常的，不应该惩罚
+        """
+        B, N, H_pred, W_pred = depth_pred.shape
+        device = depth_pred.device
+
+        # 处理图像维度
+        if images.dim() == 5:
+            _, _, C, H_img, W_img = images.shape
+        else:
+            # 假设已经是 [B*N, C, H, W]
+            return torch.tensor(0.0, device=device)
+
+        # 下采样图像到深度预测尺寸
+        if H_img != H_pred or W_img != W_pred:
+            images_down = F.interpolate(
+                images.view(B * N, C, H_img, W_img),
+                size=(H_pred, W_pred),
+                mode='bilinear',
+                align_corners=False
+            ).view(B, N, C, H_pred, W_pred)
+        else:
+            images_down = images
+
+        # 计算图像梯度 (边缘)
+        img_gray = images_down.mean(dim=2)  # [B, N, H, W]
+
+        grad_x = torch.abs(img_gray[:, :, :, 1:] - img_gray[:, :, :, :-1])
+        grad_y = torch.abs(img_gray[:, :, 1:, :] - img_gray[:, :, :-1, :])
+
+        # 边缘权重: 边缘处权重小 (不惩罚深度不连续)
+        edge_weight_x = torch.exp(-grad_x * 10)
+        edge_weight_y = torch.exp(-grad_y * 10)
+
+        # 深度梯度
+        depth_grad_x = torch.abs(depth_pred[:, :, :, 1:] - depth_pred[:, :, :, :-1])
+        depth_grad_y = torch.abs(depth_pred[:, :, 1:, :] - depth_pred[:, :, :-1, :])
+
+        # 边缘感知平滑损失
+        smooth_loss = (edge_weight_x * depth_grad_x).mean() + \
+                     (edge_weight_y * depth_grad_y).mean()
+
+        return smooth_loss
 
 class CoarseToFineLoss(nn.Module):
     def __init__(self, num_classes, class_weights=None, coarse_weight=0.3, focal_gamma=2.0, focal_alpha=0.25, flow_weight=0.5,
@@ -223,28 +282,39 @@ class CoarseToFineLoss(nn.Module):
                 coarse_mask = F.interpolate(flow_mask.unsqueeze(1).float(), size=outputs['coarse_flow'].shape[2:], mode='nearest').squeeze(1).bool() if flow_mask is not None else None
                 losses['coarse_flow'] = self.flow_loss(outputs['coarse_flow'], coarse_flow_gt, coarse_mask) * self.flow_weight * self.coarse_weight
 
-        # 深度监督损失
+        # 深度监督损失 (改进版: 避免下采样精度损失)
         if self.use_depth_supervision and 'depth_pred' in outputs and 'depth' in targets:
             depth_pred = outputs['depth_pred']  # [B, N, H, W]
             depth_gt = targets['depth']          # [B, N, H, W]
             depth_valid = targets.get('depth_valid', None)
+            images = targets.get('images', None)  # 用于边缘感知损失
 
-            # 需要将深度 GT 下采样到特征图尺寸 (H/16, W/16)
             B, N, H_gt, W_gt = depth_gt.shape
             _, _, H_pred, W_pred = depth_pred.shape
 
             if H_gt != H_pred or W_gt != W_pred:
-                # 下采样深度 GT
-                depth_gt = depth_gt.view(B * N, 1, H_gt, W_gt)
-                depth_gt = F.interpolate(depth_gt, size=(H_pred, W_pred), mode='bilinear', align_corners=False)
-                depth_gt = depth_gt.view(B, N, H_pred, W_pred)
+                # 改进: 使用最近邻下采样保留边缘深度
+                # 或者使用 min-pooling (取局部最小深度，保守估计)
+                depth_gt_reshaped = depth_gt.view(B * N, 1, H_gt, W_gt)
+
+                # 方法1: 最近邻下采样 (保留边缘)
+                depth_gt_down = F.interpolate(depth_gt_reshaped, size=(H_pred, W_pred), mode='nearest')
+
+                # 方法2: min-pooling (可选，更保守)
+                # kernel_h = H_gt // H_pred
+                # kernel_w = W_gt // W_pred
+                # depth_gt_down = -F.max_pool2d(-depth_gt_reshaped, kernel_size=(kernel_h, kernel_w))
+
+                depth_gt = depth_gt_down.view(B, N, H_pred, W_pred)
 
                 if depth_valid is not None:
                     depth_valid = depth_valid.view(B * N, 1, H_gt, W_gt).float()
+                    # 有效掩码也使用最近邻下采样
                     depth_valid = F.interpolate(depth_valid, size=(H_pred, W_pred), mode='nearest')
                     depth_valid = depth_valid.view(B, N, H_pred, W_pred) > 0.5
 
-            losses['depth'] = self.depth_loss(depth_pred, depth_gt, depth_valid) * self.depth_weight
+            # 调用改进的深度损失 (支持边缘感知)
+            losses['depth'] = self.depth_loss(depth_pred, depth_gt, depth_valid, images) * self.depth_weight
 
         losses['total'] = sum(losses.values())
         return losses

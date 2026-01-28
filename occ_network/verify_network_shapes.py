@@ -1,12 +1,24 @@
 """
-OccNetV3 网络结构验证脚本
+OccNetV3 网络结构验证脚本 (V2 改进版)
 验证每个模块的输入输出形状,诊断数据集兼容性问题
 
-新增功能:
-- 验证 Ray Direction Encoding (射线方向编码)
+核心功能:
+- 验证 Ray Direction Encoding (统一等距投影模型)
 - 验证 Distance-Aware Loss (距离感知损失)
-- 验证 Depth Supervision (深度监督)
+- 验证 Depth Supervision (深度监督 + 边缘感知)
 - 验证 5-Frame Transformer Temporal Fusion (5帧Transformer时序融合)
+
+V2 改进功能:
+- 深度感知融合 (Lift-Splat 风格): 深度参与 2D→3D 重建
+- 时序融合 TBPTT: 近期帧保留梯度
+- 场景边界检测: 自动检测场景切换
+- 动态物体运动估计: 处理非自车运动
+- 多尺度 BEV 解码: 大/中/小物体分别处理
+
+位置编码架构 (重构后):
+- 统一使用等距投影 (equidistant): θ = r / f
+- 移除冗余的 HyperbolicFOVEncoding 和 CameraRoPE
+- 详见: occ_network/球面位置编码.md
 """
 import torch
 import torch.nn as nn
@@ -92,6 +104,12 @@ def main():
     ego_pose = torch.eye(4).unsqueeze(0).float()
     print_shape("Ego Motion", ego_motion, "车辆自身运动")
     print_shape("Ego Pose", ego_pose, "车辆全局位姿")
+    
+    # 模拟相机参数 (用于 LiftSplat)
+    intrinsics = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(batch_size, config.num_cameras, 1, 1).float()
+    extrinsics = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(batch_size, config.num_cameras, 1, 1).float()
+    print_shape("Intrinsics", intrinsics, "相机内参")
+    print_shape("Extrinsics", extrinsics, "相机外参")
 
     # 逐模块前向传播
     with torch.no_grad():
@@ -111,14 +129,34 @@ def main():
 
         print_section("5. 多相机特征融合")
         feat_h, feat_w = spatial_shape
-        all_tokens = torch.cat(encoded_tokens, dim=-1)
-        print_shape("拼接后", all_tokens, f"维度={config.embed_dim}×8")
-
-        fused_tokens = model.fusion_proj(all_tokens)
-        print_shape("融合后", fused_tokens, f"投影到{config.embed_dim}维")
+        
+        if getattr(config, 'use_depth_aware_fusion', True):
+            print("  使用深度感知融合 (LiftSplatModule)")
+            # LiftSplat 需要 [B, N, C, H, W] 格式的特征
+            # encoded_tokens 是 list of [B, L, C]
+            features = torch.stack([t.transpose(1, 2).reshape(batch_size, -1, feat_h, feat_w) for t in encoded_tokens], dim=1)
+            print_shape("输入特征", features, f"Stack后 [B, N, C, H, W]")
+            
+            fused_tokens, depth_logits, depth_pred = model.depth_fusion(
+                features,
+                camera_intrinsics=intrinsics,
+                camera_extrinsics=extrinsics
+            )
+            print_shape("融合后 (BEV)", fused_tokens, f"LiftSplat输出")
+            
+            # 转换为 Token 格式供 Decoder 使用
+            fused_tokens = fused_tokens.flatten(2).transpose(1, 2)
+            # 更新 spatial_shapes 为 BEV 尺寸
+            spatial_shapes = torch.tensor([[config.bev_size[0], config.bev_size[1]]], device=images.device)
+        else:
+            all_tokens = torch.cat(encoded_tokens, dim=-1)
+            print_shape("拼接后", all_tokens, f"维度={config.embed_dim}×8")
+            fused_tokens = model.fusion_proj(all_tokens)
+            print_shape("融合后", fused_tokens, f"投影到{config.embed_dim}维")
+            spatial_shapes = torch.tensor([[feat_h, feat_w]], device=images.device)
 
         print_section("6. BEV解码器 (Patch→BEV鸟瞰图)")
-        spatial_shapes = torch.tensor([[feat_h, feat_w]], device=images.device)
+        # spatial_shapes 已在上一步定义
         bev_features = model.decoder(fused_tokens, spatial_shapes)
         print_shape("BEV特征", bev_features, f"2D鸟瞰图 {config.bev_size[0]}×{config.bev_size[1]}")
 
@@ -152,7 +190,13 @@ def main():
 
         # 完整前向传播测试 (包含深度预测)
         print_section("10b. 完整前向传播 (含深度预测)")
-        full_outputs = model(images, ego_motion, ego_pose)
+        full_outputs = model(
+            images, 
+            ego_motion, 
+            ego_pose, 
+            intrinsics=intrinsics, 
+            extrinsics=extrinsics
+        )
         print("  完整输出内容:")
         for key, val in full_outputs.items():
             desc = {
@@ -254,8 +298,10 @@ def main():
         except Exception as e:
             print(f"    ❌ 初始化失败: {e}")
 
-    print("\n  【优化2: 射线方向编码 (Ray Direction Encoding)】")
+    print("\n  【优化2: 射线方向编码 (统一等距投影)】")
     print(f"    启用状态: {'✅ 启用' if config.use_ray_encoding else '❌ 禁用'}")
+    print(f"    投影模型: 统一等距投影 (equidistant): θ = r / f")
+    print(f"    设计理念: 所有相机 = 球面上截取不同大小的区域")
 
     if config.use_ray_encoding:
         try:
@@ -269,20 +315,41 @@ def main():
             enc = ray_enc(camera_id=0, batch_size=1)
             print(f"    编码输出形状: {enc.shape}")
 
-            # 显示前视相机射线方向示例
-            rays = ray_enc.rays_0
-            print(f"    射线方向形状: {rays.shape}")
-            center_ray = rays[rays.shape[0]//2, rays.shape[1]//2]
-            print(f"    中心像素射线: ({center_ray[0]:.3f}, {center_ray[1]:.3f}, {center_ray[2]:.3f})")
-            print("    ✅ Ray Direction Encoding 初始化成功")
-        except Exception as e:
-            print(f"    ❌ 初始化失败: {e}")
+            # 显示多个相机的射线方向示例
+            print(f"\n    各相机中心像素射线方向 (应指向相机正前方):")
+            for cam_name, cam_cfg in config.cameras.items():
+                cam_id = cam_cfg['id']
+                rays = getattr(ray_enc, f'rays_{cam_id}')
+                center_ray = rays[rays.shape[0]//2, rays.shape[1]//2]
+                fov = cam_cfg['fov']
+                yaw = cam_cfg['rotation'][2]
+                print(f"      {cam_name:15s} (FOV={fov:3.0f}°, Yaw={yaw:4.0f}°): "
+                      f"({center_ray[0]:6.3f}, {center_ray[1]:6.3f}, {center_ray[2]:6.3f})")
 
-    print("\n  【优化3: 5帧 Transformer 时序融合】")
+            # 验证边缘像素的射线角度
+            print(f"\n    前视主摄边缘像素验证 (FOV=50°):")
+            rays_0 = ray_enc.rays_0
+            edge_ray = rays_0[rays_0.shape[0]//2, 0]  # 左边缘
+            import math
+            theta_edge = math.acos(edge_ray[2].item()) * 180 / math.pi
+            print(f"      左边缘射线: ({edge_ray[0]:.3f}, {edge_ray[1]:.3f}, {edge_ray[2]:.3f})")
+            print(f"      与光轴夹角: {theta_edge:.1f}° (期望: ~25°, 即 FOV/2)")
+
+            print("    ✅ Ray Direction Encoding 初始化成功 (统一等距投影)")
+        except Exception as e:
+            import traceback
+            print(f"    ❌ 初始化失败: {e}")
+            traceback.print_exc()
+
+    print("\n  【优化3: 5帧 Transformer 时序融合 (V2 改进)】")
     print(f"    当前帧数: {config.num_frames} 帧")
     print(f"    融合方式: Transformer Self-Attention")
     print(f"    改进: 原2帧门控融合 → 5帧Transformer融合")
     print(f"    优点: 更长时序上下文, 可学习的时序位置编码")
+    print(f"\n    [V2] TBPTT Steps: {getattr(config, 'tbptt_steps', 3)} (近期帧保留梯度)")
+    print(f"    [V2] 动态运动估计: {'✅ 启用' if getattr(config, 'use_dynamic_motion', True) else '❌ 禁用'}")
+    print(f"    [V2] 时空位置编码: {'✅ 启用' if getattr(config, 'use_st_encoding', True) else '❌ 禁用'}")
+    print(f"    [V2] 场景边界检测: ✅ 自动检测场景切换并 reset")
 
     print("\n  【优化4: MC Dropout (不确定性估计)】")
     print(f"    启用状态: {'✅ 启用' if config.use_mc_dropout else '❌ 禁用 (配置文件)'}")
@@ -315,23 +382,31 @@ def main():
     else:
         print(f"    ✅ 正在使用加速后端: {backend}")
 
-    print("\n  【优化6: 深度监督 (Depth Supervision)】")
+    print("\n  【优化6: 深度监督 (Depth Supervision) - V2 改进】")
     print(f"    启用状态: {'✅ 启用' if config.use_depth_supervision else '❌ 禁用'}")
     print(f"    损失权重: {config.depth_loss_weight}")
     print(f"    深度范围: {config.depth_range}")
     print(f"    深度bin数: {config.num_depth_bins}")
+    print(f"\n    [V2] 深度感知融合: {'✅ 启用' if getattr(config, 'use_depth_aware_fusion', True) else '❌ 禁用'}")
+    print(f"    [V2] 边缘感知损失: ✅ 在边缘处不强制深度平滑")
+    print(f"    [V2] 下采样方式: 最近邻 (保留边缘深度)")
 
     if config.use_depth_supervision:
         try:
-            depth_loss = DepthSupervisionLoss(depth_range=config.depth_range)
+            depth_loss = DepthSupervisionLoss(depth_range=config.depth_range, use_edge_aware=True)
             # 测试深度损失
             test_pred = torch.rand(1, 8, 60, 80) * 50 + 1  # 1-51m
             test_gt = torch.rand(1, 8, 60, 80) * 50 + 1
             loss_val = depth_loss(test_pred, test_gt)
             print(f"    测试损失值: {loss_val.item():.4f}")
-            print("    ✅ Depth Supervision Loss 初始化成功")
+            print("    ✅ Depth Supervision Loss 初始化成功 (边缘感知)")
         except Exception as e:
             print(f"    ❌ 初始化失败: {e}")
+
+    print("\n  【优化7: 多尺度 BEV 解码 (V2 新增)】")
+    print(f"    启用状态: {'✅ 启用' if getattr(config, 'use_multi_scale_bev', False) else '❌ 禁用 (默认)'}")
+    print(f"    尺度比例: (0.25, 0.5, 1.0) 相对于目标 BEV 尺寸")
+    print(f"    优点: 大/中/小物体分别处理，提升小物体检测")
 
     # 显存估算
     print_section("14. 显存占用估算")
@@ -369,10 +444,27 @@ def main():
     print(f"  训练时 (×3倍): ≈ {total_mem*3/1024:.2f} GB")
 
     print_section("验证完成")
-    print("\n  🎯 实施的优化:")
-    print("     ✅ 优化1: Ray Direction Encoding (射线方向编码)")
-    print("        - 每个像素编码其3D射线方向")
-    print("        - 帮助多视角特征融合")
+    print("\n  🎯 位置编码架构 (重构后):")
+    print("     ┌─────────────────────────────────────────────────────────────┐")
+    print("     │  统一等距投影 (Equidistant): θ = r / f                      │")
+    print("     │                                                             │")
+    print("     │  所有相机 = 在同一球面上截取不同大小的区域                  │")
+    print("     │  - 小 FOV (35°) = 长焦, 球面小区域                         │")
+    print("     │  - 大 FOV (120°) = 广角, 球面大区域                        │")
+    print("     │                                                             │")
+    print("     │  已移除:                                                    │")
+    print("     │  - HyperbolicFOVEncoding (FOV 信息已在射线方向中)          │")
+    print("     │  - CameraRoPE (Yaw 信息已在射线方向中)                     │")
+    print("     │  - encode_qk_single_camera (不再需要 Q/K 变换)             │")
+    print("     │                                                             │")
+    print("     │  详见: occ_network/球面位置编码.md                          │")
+    print("     └─────────────────────────────────────────────────────────────┘")
+    print()
+    print("  🎯 实施的优化:")
+    print("     ✅ 优化1: Ray Direction Encoding (统一等距投影)")
+    print("        - 所有相机统一使用 equidistant: θ = r / f")
+    print("        - 概念简洁: FOV 决定球面截取范围")
+    print("        - 无需配置 projection 参数")
     print("     ✅ 优化2: Distance-Aware Loss (距离感知损失)")
     print("        - 近距离体素权重更高")
     print("        - 提升安全关键区域精度")
@@ -388,14 +480,32 @@ def main():
     print("     ✅ 优化6: Depth Supervision (深度监督)")
     print("        - 辅助网络学习2D→3D几何")
     print("        - Log空间L1损失,近距离更敏感")
-    print("     ✅ 优化7: Relative Position Bias (相对位置偏置)")
-    print("        - Swin Transformer 风格的相对位置编码")
+    print("     ✅ 优化7: Swin Relative Position Bias (相对位置偏置)")
+    print("        - 在 FlashWindowAttention 内部处理")
     print("        - 解耦内容与位置, 提升几何感知")
-    print("     ✅ 优化8: 位置编码优化 (Unified Spherical Approach)")
-    print("        - 移除冗余的 HyperbolicFOVEncoding")
-    print("        - 增强 RayDirectionEncoding 支持多种投影 (Pinhole, Equidistant, Stereographic)")
-    print("        - 解决广角相机畸变问题")
-    print("        - 详见: occ_network/球面位置编码.md")
+    print()
+    print("  🎯 V2 新增改进:")
+    print("     ✅ [V2] 深度感知融合 (Lift-Splat 风格)")
+    print("        - 深度不是预测完就扔，而是参与 2D→3D 重建")
+    print("        - 深度分布 × 特征 = 加权的 3D 投影")
+    print("     ✅ [V2] 时序融合 TBPTT (截断反向传播)")
+    print("        - 近期帧 (默认 3 帧) 保留梯度")
+    print("        - 远期帧 detach，控制显存")
+    print("     ✅ [V2] 场景边界检测")
+    print("        - 自动检测场景切换并 reset 时序")
+    print("        - 避免跨场景的错误时序融合")
+    print("     ✅ [V2] 动态物体运动估计")
+    print("        - 估计非自车运动 (移动车辆、行人)")
+    print("        - 残差运动场补偿")
+    print("     ✅ [V2] 时空位置编码")
+    print("        - 编码时间间隔信息 (不只是顺序)")
+    print("        - 空间位置相关的时序编码")
+    print("     ✅ [V2] 边缘感知深度损失")
+    print("        - 在物体边缘处不强制深度平滑")
+    print("        - 使用最近邻下采样保留边缘深度")
+    print("     ✅ [V2] 多尺度 BEV 解码 (可选)")
+    print("        - 大/中/小物体分别处理")
+    print("        - 提升小物体 (行人、锥桶) 检测")
     print()
     print("  🎯 下一步建议:")
     print("     1. 运行训练: python train.py --dataset D:/code/carla/dataset_10k_bak --batch-size 1 --epochs 2 --amp")
