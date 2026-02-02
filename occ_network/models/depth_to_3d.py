@@ -305,82 +305,84 @@ class LiftSplatModule(nn.Module):
         bev_res_x = (bev_x_max - bev_x_min) / self.bev_w
         bev_res_y = (bev_y_max - bev_y_min) / self.bev_h
 
+        # 优化: 保留外层 batch 循环，内层向量化相机维度 N
+        # 这样可以利用 GPU 并行处理所有相机，同时显存增加可控
+        
+        # 预先扩展 pixel_grid 到 [N, H, W, 3]
+        # self.pixel_grid: [H, W, 3]
+        pixel_grid_n = self.pixel_grid.to(device).unsqueeze(0).expand(N, -1, -1, -1) # [N, H, W, 3]
+        
+        # 预先扩展 depth_bins 到 [N, D, 1, 1, 1]
+        depth_bins_n = self.depth_bins.to(device).view(1, D, 1, 1, 1).expand(N, -1, -1, -1, -1)
+
         for b in range(B):
-            for n in range(N):
-                # 当前相机参数
-                K = intrinsics[b, n]      # [3,3]
-                cam_to_world = extrinsics[b, n]  # [4,4]
+            # 1. 准备当前 batch 的数据 (向量化 N)
+            # features: [B, N, C, H, W] -> [N, C, H, W] -> [N, H, W, C]
+            feat_b = features[b].permute(0, 2, 3, 1).contiguous() 
+            probs_b = depth_probs[b]  # [N, D, H, W]
+            K_b = intrinsics[b]       # [N, 3, 3]
+            ext_b = extrinsics[b]     # [N, 4, 4]
+
+            # 2. Lift: 生成 3D 点 (N 个相机并行)
+            # 反投影到相机坐标系
+            # K_inv: [N, 3, 3]
+            K_inv = torch.inverse(K_b)
+            
+            # ray_dirs: [N, H, W, 3] = pixel_grid_n @ K_inv.T
+            # einsum 'nhwk,nlk->nhwl'
+            ray_dirs = torch.einsum('nhwk,nlk->nhwl', pixel_grid_n, K_inv)
+            
+            # points_cam: [N, D, H, W, 3]
+            points_cam = ray_dirs.unsqueeze(1) * depth_bins_n
+
+            # 转到世界坐标系
+            # points_world = R * points_cam + T
+            rot = ext_b[:, :3, :3]  # [N, 3, 3]
+            trans = ext_b[:, :3, 3] # [N, 3]
+            
+            # points_world: [N, D, H, W, 3]
+            points_world = torch.einsum('ndhwk,nlk->ndhwl', points_cam, rot) + trans.view(N, 1, 1, 1, 3)
+
+            # 3. Splat: 计算 BEV 坐标
+            bev_x = ((points_world[..., 0] - bev_x_min) / bev_res_x).long()
+            bev_y = ((points_world[..., 1] - bev_y_min) / bev_res_y).long()
+
+            # 有效掩码 [N, D, H, W]
+            valid = (bev_x >= 0) & (bev_x < self.bev_w) & \
+                    (bev_y >= 0) & (bev_y < self.bev_h) & \
+                    (points_world[..., 2] > self.pc_range[2]) # z > min_z
+
+            # 4. 向量化累加 (Flatten N*D*H*W)
+            # 为了避免显存爆炸，我们也可以选择在这里 flatten
+            # 总点数: N * D * H * W = 8 * 64 * 60 * 80 ≈ 2.4M (可接受)
+            
+            valid_mask = valid.view(-1) # [N*D*H*W]
+            if not valid_mask.any():
+                continue
                 
-                # 特征和深度概率
-                feat_cam = features[b, n]           # [C, H, W]
-                prob_cam = depth_probs[b, n]         # [D, H, W]
-
-                # Lift: 生成3D点 (几何计算)
-                # 1. 反投影到相机坐标系
-                # points_cam = depth * K^-1 * pixel
-                K_inv = torch.inverse(K) # [3, 3]
-                
-                # [H, W, 3] @ [3, 3]^T -> [H, W, 3]
-                ray_dirs = torch.einsum('hwk,lk->hwl', self.pixel_grid.to(device), K_inv)
-                
-                # 扩展到 D 维度并乘以深度
-                # [1, H, W, 3] * [D, 1, 1, 1] -> [D, H, W, 3]
-                points_cam = ray_dirs.unsqueeze(0) * self.depth_bins.to(device).view(D, 1, 1, 1)
-
-                # 2. 转到世界坐标系
-                # points_world = R * points_cam + T
-                rot = cam_to_world[:3, :3] # [3, 3]
-                trans = cam_to_world[:3, 3] # [3]
-                
-                # [D, H, W, 3] @ [3, 3]^T -> [D, H, W, 3]
-                points_world = torch.einsum('dhwk,lk->dhwl', points_cam, rot) + trans.view(1, 1, 1, 3)
-
-                # Splat: 投影到 BEV
-                # 计算BEV坐标 (x,y)
-                # x 对应 pc_range[0]~[3], 映射到 0~bev_w
-                # y 对应 pc_range[1]~[4], 映射到 0~bev_h
-                bev_x = ((points_world[..., 0] - bev_x_min) / bev_res_x).long()
-                bev_y = ((points_world[..., 1] - bev_y_min) / bev_res_y).long()
-
-                # 有效掩码
-                valid = (bev_x >= 0) & (bev_x < self.bev_w) & \
-                        (bev_y >= 0) & (bev_y < self.bev_h) & \
-                        (points_world[..., 2] > self.pc_range[2]) # z > min_z
-
-                # 循环 D 进行累加 (节省显存)
-                for d in range(D):
-                    mask_d = valid[d] # [H, W]
-                    if not mask_d.any():
-                        continue
-                        
-                    # 获取有效点的坐标和权重
-                    xs = bev_x[d][mask_d]
-                    ys = bev_y[d][mask_d]
-                    weight = prob_cam[d][mask_d] # [num_valid]
-                    
-                    # 获取有效点的特征 [C, num_valid]
-                    # feat_cam 是 [C, H, W], mask_d 是 [H, W]
-                    # feat_cam[:, mask_d] -> [C, num_valid]
-                    valid_feat = feat_cam[:, mask_d] 
-                    
-                    # 加权: feat * prob
-                    weighted_feat = valid_feat * weight.unsqueeze(0) # [C, num_valid]
-                    
-                    # 累加到 BEV
-                    # 注意: 这里可能有多个点落入同一个 BEV grid，需要 sum
-                    # 使用 index_put_ 或者 scatter_add (如果手动实现)
-                    # 这里我们简单循环或者使用 pytorch 的 index_add (只支持 1D index)
-                    # 为了简单且不用额外库，我们平铺 index
-                    flat_indices = ys * self.bev_w + xs # [num_valid]
-                    
-                    # [C, num_valid] -> [C, bev_h * bev_w]
-                    # bev_features[b] 是 [C, bev_h, bev_w] -> view [C, -1]
-                    bev_flat = bev_features[b].view(C, -1)
-                    count_flat = bev_counts[b].view(1, -1)
-                    
-                    # index_add_: dim, index, source
-                    bev_flat.index_add_(1, flat_indices, weighted_feat)
-                    count_flat.index_add_(1, flat_indices, weight.unsqueeze(0))
+            # 展平坐标和权重
+            bev_x_flat = bev_x.view(-1)[valid_mask]
+            bev_y_flat = bev_y.view(-1)[valid_mask]
+            weights_flat = probs_b.view(-1)[valid_mask] # [num_valid]
+            
+            # 展平特征 [N, H, W, C] -> [N, 1, H, W, C] -> expand D -> [N, D, H, W, C]
+            # 注意: 特征对所有 D 是共享的
+            feat_flat = feat_b.unsqueeze(1).expand(-1, D, -1, -1, -1).reshape(-1, C)[valid_mask] # [num_valid, C]
+            
+            # 加权特征
+            weighted_feat = feat_flat * weights_flat.unsqueeze(1) # [num_valid, C]
+            
+            # 计算平铺索引
+            flat_indices = bev_y_flat * self.bev_w + bev_x_flat # [num_valid]
+            
+            # 累加到 BEV
+            # bev_features[b]: [C, bev_h, bev_w] -> view [C, -1]
+            bev_flat = bev_features[b].view(C, -1)
+            count_flat = bev_counts[b].view(1, -1)
+            
+            # index_add_: dim, index, source (source 需要转置为 [C, num_valid])
+            bev_flat.index_add_(1, flat_indices, weighted_feat.t())
+            count_flat.index_add_(1, flat_indices, weights_flat.unsqueeze(0))
 
         # 归一化
         bev_features = bev_features / (bev_counts + 1e-6)
