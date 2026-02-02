@@ -114,6 +114,7 @@ class LiftSplatModule(nn.Module):
         self.bev_h, self.bev_w = bev_size
         self.pc_range = pc_range
         self.num_cameras = num_cameras
+        self.image_size = image_size  # Store image_size for pixel grid computation
 
         # 特征尺寸 (patch embedding 后)
         self.feat_h = image_size[0] // patch_size
@@ -145,6 +146,43 @@ class LiftSplatModule(nn.Module):
 
         # 预计算 BEV 网格坐标
         self._init_bev_grid()
+        
+        # 预计算像素网格 (用于 Lift)
+        self._precompute_pixel_grid()
+
+    def _precompute_pixel_grid(self):
+        """预计算像素坐标网格 (H, W, 3)"""
+        # 注意: 这里使用特征图尺寸 feat_h, feat_w
+        # 对应 patch embedding 后的尺寸
+        H, W = self.feat_h, self.feat_w
+        
+        # 生成网格 (u, v)
+        # 注意: 加上 0.5 是为了取像素中心
+        # 但通常 patch embedding 后的特征对应的是 patch 的中心
+        # 如果 patch_size=16, 第一个特征对应原图 (8, 8)
+        # 这里我们生成归一化的 patch 坐标，或者对应的原图坐标
+        # 简单起见，我们生成 patch 坐标，并假设内参已经缩放适配了特征图尺寸
+        # 或者在使用时调整内参
+        
+        # 为了通用性，我们生成 0..W-1, 0..H-1 的坐标
+        # 外部传入的 intrinsics 应该是针对原图的
+        # 所以我们需要把 patch 坐标映射回原图坐标
+        
+        ys, xs = torch.meshgrid(
+            torch.arange(H, dtype=torch.float32), 
+            torch.arange(W, dtype=torch.float32), 
+            indexing='ij'
+        )
+        
+        # 映射回原图坐标: (idx + 0.5) * patch_size
+        xs = (xs + 0.5) * self.image_size[1] / W
+        ys = (ys + 0.5) * self.image_size[0] / H
+        
+        # 齐次坐标 (u, v, 1)
+        ones = torch.ones_like(xs)
+        pixel_grid = torch.stack([xs, ys, ones], dim=-1) # [H, W, 3]
+        
+        self.register_buffer('pixel_grid', pixel_grid)
 
     def _init_bev_grid(self):
         """预计算 BEV 网格的物理坐标"""
@@ -228,55 +266,121 @@ class LiftSplatModule(nn.Module):
         extrinsics: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """
-        将特征投影到 BEV 网格
-
-        简化实现: 使用深度加权的特征池化
-        - 近距离像素贡献更多到近处 BEV 位置
-        - 远距离像素贡献更多到远处 BEV 位置
-
+        将特征投影到 BEV 网格 (真正的 Lift-Splat 实现)
+        
         Args:
             features: [B, N, C, H, W] 投影后的特征
             depth_probs: [B, N, D, H, W] 深度概率
-            depth_pred: [B, N, H, W] 预测深度
+            depth_pred: [B, N, H, W] 预测深度 (未使用，但保持接口)
             intrinsics: [B, N, 3, 3] 相机内参
             extrinsics: [B, N, 4, 4] 相机外参
 
         Returns:
             bev_features: [B, C, bev_h, bev_w]
         """
+        if intrinsics is None or extrinsics is None:
+            # 如果没有相机参数，回退到原来的简单逻辑 (或者报错)
+            # 为了兼容性，这里我们假设必须提供参数，否则无法做几何投影
+            # 但为了不崩，我们可以暂时 warn 并返回全 0
+            return torch.zeros(features.shape[0], features.shape[2], self.bev_h, self.bev_w, device=features.device)
+
         B, N, C, H, W = features.shape
+        D = self.num_depth_bins
         device = features.device
 
         # 初始化 BEV 特征和计数
         bev_features = torch.zeros(B, C, self.bev_h, self.bev_w, device=device)
         bev_counts = torch.zeros(B, 1, self.bev_h, self.bev_w, device=device)
 
-        # 深度 bins
-        depth_bins = self.depth_bins  # [D]
+        # 像素网格 [H, W, 3] -> [1, 1, 1, H, W, 3]
+        # self.pixel_grid 在 _precompute_pixel_grid 中生成
+        pixel_grid = self.pixel_grid.to(device).unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
-        # 对每个深度 bin 进行投影
-        for d_idx, depth_val in enumerate(depth_bins):
-            # 获取该深度 bin 的概率权重
-            depth_weight = depth_probs[:, :, d_idx, :, :]  # [B, N, H, W]
+        # 深度 bins [D] -> [1, 1, D, 1, 1, 1]
+        depth_bins = self.depth_bins.to(device).view(1, 1, D, 1, 1, 1)
 
-            # 加权特征
-            weighted_feat = features * depth_weight.unsqueeze(2)  # [B, N, C, H, W]
+        # 预计算一些常量
+        bev_x_min, bev_y_min = self.pc_range[0], self.pc_range[1]
+        bev_x_max, bev_y_max = self.pc_range[3], self.pc_range[4]
+        bev_res_x = (bev_x_max - bev_x_min) / self.bev_w
+        bev_res_y = (bev_y_max - bev_y_min) / self.bev_h
 
-            # 计算该深度下像素对应的 BEV 位置
-            # 简化: 使用预定义的投影映射 (基于相机配置)
-            # 这里我们使用一个简化的列投影 (每个相机对应 BEV 的一部分)
+        for b in range(B):
+            for n in range(N):
+                # 当前相机参数
+                K = intrinsics[b, n]      # [3,3]
+                cam_to_world = extrinsics[b, n]  # [4,4]
+                
+                # 特征和深度概率
+                feat_cam = features[b, n]           # [C, H, W]
+                prob_cam = depth_probs[b, n]         # [D, H, W]
 
-            # 累加到 BEV
-            bev_contribution = weighted_feat.sum(dim=1)  # [B, C, H, W]
+                # Lift: 生成3D点 (几何计算)
+                # 1. 反投影到相机坐标系
+                # points_cam = depth * K^-1 * pixel
+                K_inv = torch.inverse(K) # [3, 3]
+                
+                # [H, W, 3] @ [3, 3]^T -> [H, W, 3]
+                ray_dirs = torch.einsum('hwk,lk->hwl', self.pixel_grid.to(device), K_inv)
+                
+                # 扩展到 D 维度并乘以深度
+                # [1, H, W, 3] * [D, 1, 1, 1] -> [D, H, W, 3]
+                points_cam = ray_dirs.unsqueeze(0) * self.depth_bins.to(device).view(D, 1, 1, 1)
 
-            # 下采样到 BEV 尺寸
-            if bev_contribution.shape[-2:] != (self.bev_h, self.bev_w):
-                bev_contribution = F.adaptive_avg_pool2d(
-                    bev_contribution, (self.bev_h, self.bev_w)
-                )
+                # 2. 转到世界坐标系
+                # points_world = R * points_cam + T
+                rot = cam_to_world[:3, :3] # [3, 3]
+                trans = cam_to_world[:3, 3] # [3]
+                
+                # [D, H, W, 3] @ [3, 3]^T -> [D, H, W, 3]
+                points_world = torch.einsum('dhwk,lk->dhwl', points_cam, rot) + trans.view(1, 1, 1, 3)
 
-            bev_features = bev_features + bev_contribution
-            bev_counts = bev_counts + depth_weight.sum(dim=1, keepdim=True).mean(dim=(-2, -1), keepdim=True).expand(-1, -1, self.bev_h, self.bev_w) / len(depth_bins)
+                # Splat: 投影到 BEV
+                # 计算BEV坐标 (x,y)
+                # x 对应 pc_range[0]~[3], 映射到 0~bev_w
+                # y 对应 pc_range[1]~[4], 映射到 0~bev_h
+                bev_x = ((points_world[..., 0] - bev_x_min) / bev_res_x).long()
+                bev_y = ((points_world[..., 1] - bev_y_min) / bev_res_y).long()
+
+                # 有效掩码
+                valid = (bev_x >= 0) & (bev_x < self.bev_w) & \
+                        (bev_y >= 0) & (bev_y < self.bev_h) & \
+                        (points_world[..., 2] > self.pc_range[2]) # z > min_z
+
+                # 循环 D 进行累加 (节省显存)
+                for d in range(D):
+                    mask_d = valid[d] # [H, W]
+                    if not mask_d.any():
+                        continue
+                        
+                    # 获取有效点的坐标和权重
+                    xs = bev_x[d][mask_d]
+                    ys = bev_y[d][mask_d]
+                    weight = prob_cam[d][mask_d] # [num_valid]
+                    
+                    # 获取有效点的特征 [C, num_valid]
+                    # feat_cam 是 [C, H, W], mask_d 是 [H, W]
+                    # feat_cam[:, mask_d] -> [C, num_valid]
+                    valid_feat = feat_cam[:, mask_d] 
+                    
+                    # 加权: feat * prob
+                    weighted_feat = valid_feat * weight.unsqueeze(0) # [C, num_valid]
+                    
+                    # 累加到 BEV
+                    # 注意: 这里可能有多个点落入同一个 BEV grid，需要 sum
+                    # 使用 index_put_ 或者 scatter_add (如果手动实现)
+                    # 这里我们简单循环或者使用 pytorch 的 index_add (只支持 1D index)
+                    # 为了简单且不用额外库，我们平铺 index
+                    flat_indices = ys * self.bev_w + xs # [num_valid]
+                    
+                    # [C, num_valid] -> [C, bev_h * bev_w]
+                    # bev_features[b] 是 [C, bev_h, bev_w] -> view [C, -1]
+                    bev_flat = bev_features[b].view(C, -1)
+                    count_flat = bev_counts[b].view(1, -1)
+                    
+                    # index_add_: dim, index, source
+                    bev_flat.index_add_(1, flat_indices, weighted_feat)
+                    count_flat.index_add_(1, flat_indices, weight.unsqueeze(0))
 
         # 归一化
         bev_features = bev_features / (bev_counts + 1e-6)

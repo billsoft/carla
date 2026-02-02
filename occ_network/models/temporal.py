@@ -621,28 +621,56 @@ class TemporalMemoryCell(nn.Module):
         self.pc_range = pc_range
 
         # ===== 1. Encoder: BEV → Memory Space =====
-        # 128×128×192 → 32×32×64
-        self.encoder = nn.Sequential(
-            nn.Conv2d(bev_dim, 128, 3, stride=2, padding=1, bias=False),  # 64×64
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-            nn.Conv2d(128, memory_dim, 3, stride=2, padding=1, bias=False),  # 32×32
-            nn.BatchNorm2d(memory_dim),
-            nn.GELU(),
-        )
+        # 动态构建 Encoder 根据尺寸比例
+        self.downsample_factor = bev_size[0] // memory_size[0]
+        encoder_layers = []
+        current_dim = bev_dim
+        current_h = bev_size[0]
+        
+        # 简单策略：每一层 stride=2 直到达到目标尺寸
+        while current_h > memory_size[0]:
+            out_dim = 128 if current_h > memory_size[0] * 2 else memory_dim
+            encoder_layers.extend([
+                nn.Conv2d(current_dim, out_dim, 3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(out_dim),
+                nn.GELU(),
+            ])
+            current_dim = out_dim
+            current_h //= 2
+            
+        # 如果尺寸已经匹配但通道不匹配，加一层 1x1 conv
+        if current_dim != memory_dim:
+            encoder_layers.extend([
+                nn.Conv2d(current_dim, memory_dim, 3, padding=1, bias=False),
+                nn.BatchNorm2d(memory_dim),
+                nn.GELU()
+            ])
+            
+        self.encoder = nn.Sequential(*encoder_layers)
 
         # ===== 2. ConvGRU: 时序记忆更新 =====
         self.gru = ConvGRUCell(memory_dim, memory_dim, kernel_size=3)
 
         # ===== 3. Decoder: Memory Space → BEV =====
-        # 32×32×64 → 128×128×192
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(memory_dim, 128, 4, stride=2, padding=1, bias=False),  # 64×64
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-            nn.ConvTranspose2d(128, bev_dim, 4, stride=2, padding=1, bias=False),  # 128×128
-            nn.BatchNorm2d(bev_dim),
-        )
+        # 动态构建 Decoder
+        decoder_layers = []
+        current_dim = memory_dim
+        current_h = memory_size[0]
+        
+        while current_h < bev_size[0]:
+            out_dim = 128 if current_h * 2 < bev_size[0] else bev_dim
+            # 最后一层不用 GELU 如果它是输出层? 原代码最后有 BN 但没有 ReLU/GELU
+            decoder_layers.extend([
+                nn.ConvTranspose2d(current_dim, out_dim, 4, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(out_dim),
+            ])
+            if current_h * 2 < bev_size[0]: # 不是最后一层
+                decoder_layers.append(nn.GELU())
+                
+            current_dim = out_dim
+            current_h *= 2
+            
+        self.decoder = nn.Sequential(*decoder_layers)
 
         # ===== 4. Fusion: 合并当前帧和记忆 =====
         self.fusion = nn.Sequential(

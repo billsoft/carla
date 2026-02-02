@@ -37,11 +37,13 @@ class RayDirectionEncoding(nn.Module):
         image_size: Tuple[int, int],
         camera_configs: Dict,
         patch_size: int = 16,
+        num_freqs: int = 10,  # 新增：频率数量
     ):
         super().__init__()
         self.dim = dim
         self.image_size = image_size
         self.patch_size = patch_size
+        self.num_freqs = num_freqs
 
         # 预计算每个相机的射线方向 (统一使用等距投影)
         for cam_name, cfg in camera_configs.items():
@@ -54,8 +56,46 @@ class RayDirectionEncoding(nn.Module):
             )
             self.register_buffer(f'rays_{cam_id}', rays)
 
-        # 线性映射层：将 3D 射线向量映射到特征维度 dim
-        self.proj = nn.Linear(3, dim)
+        # 改进：使用 NeRF 风格的正弦位置编码 (Fourier Features)
+        # 输入维度: 3 (x, y, z)
+        # 编码后维度: 3 * 2 * num_freqs
+        self.input_dim = 3 + 3 * 2 * num_freqs
+        
+        # 线性映射层：将编码后的高维向量映射到特征维度 dim
+        self.proj = nn.Sequential(
+            nn.Linear(self.input_dim, dim),
+            nn.LayerNorm(dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim, dim)
+        )
+
+    def _sinusoidal_encoding(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        NeRF 风格的位置编码 (Fourier Features)
+        x: [..., 3] (normalized rays)
+        return: [..., 3 + 3 * 2 * num_freqs]
+        """
+        # 频率: 2^0, 2^1, ..., 2^(L-1)
+        freq_bands = 2.0 ** torch.linspace(0, self.num_freqs - 1, self.num_freqs, device=x.device)
+        
+        # [..., 3, 1] * [num_freqs] -> [..., 3, num_freqs]
+        x_expanded = x.unsqueeze(-1) * freq_bands
+        
+        # sin/cos 变换
+        sin_x = torch.sin(x_expanded * torch.pi)
+        cos_x = torch.cos(x_expanded * torch.pi)
+        
+        # 按照 NeRF 标准顺序重组: 
+        # Coordinate -> Frequency -> (Sin, Cos)
+        # 最终顺序: [x_f0_sin, x_f0_cos, x_f1_sin, x_f1_cos, ..., y_..., z_...]
+        
+        # [..., 3, num_freqs, 2]
+        embeddings = torch.stack([sin_x, cos_x], dim=-1)
+        
+        # Flatten last 3 dims: [..., 3 * num_freqs * 2]
+        embeddings = embeddings.flatten(start_dim=-3)
+        
+        return torch.cat([x, embeddings], dim=-1)
 
     def _compute_ray_directions(
         self,
@@ -153,8 +193,11 @@ class RayDirectionEncoding(nn.Module):
         rays = getattr(self, f'rays_{camera_id}')  # [H_p, W_p, 3]
         H_p, W_p, _ = rays.shape
 
-        # 直接将 3D 射线向量投影到特征维度
-        encoded = self.proj(rays)  # [H_p, W_p, dim]
+        # 1. 应用正弦位置编码
+        encoded_rays = self._sinusoidal_encoding(rays) # [H_p, W_p, input_dim]
+
+        # 2. 投影到特征维度
+        encoded = self.proj(encoded_rays)  # [H_p, W_p, dim]
         
         encoded = encoded.view(H_p * W_p, self.dim)  # [N, dim]
         encoded = encoded.unsqueeze(0).expand(batch_size, -1, -1)  # [B, N, dim]
