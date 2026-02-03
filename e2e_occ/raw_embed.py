@@ -48,16 +48,17 @@ class MultiCameraPatchEmbed(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.patch_embed = RAWPatchEmbed(embed_dim=config.embed_dim)
-        self.camera_embed = nn.Embedding(config.num_cameras, config.embed_dim)
+        # Removed redundant Camera Embedding (covered by Ray Encoding)
+        # self.camera_embed = nn.Embedding(config.num_cameras, config.embed_dim)
         self.norm = nn.LayerNorm(config.embed_dim)
     
     def forward(self, images):
         B, N, C, H, W = images.shape
         feats = self.patch_embed(images)
         _, _, D, Hf, Wf = feats.shape
-        camera_ids = torch.arange(N, device=images.device)
-        cam_embed = self.camera_embed(camera_ids).view(1, N, D, 1, 1)
-        feats = feats + cam_embed
+        # camera_ids = torch.arange(N, device=images.device)
+        # cam_embed = self.camera_embed(camera_ids).view(1, N, D, 1, 1)
+        # feats = feats + cam_embed
         feats = feats.permute(0, 1, 3, 4, 2)
         feats = self.norm(feats)
         feats = feats.permute(0, 1, 4, 2, 3)

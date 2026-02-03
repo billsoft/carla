@@ -57,7 +57,8 @@ class ImageEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.pos_embed = SineCosinePositionEncoding2D(config.embed_dim)
+        # Removed redundant 2D Position Encoding (covered by Ray Encoding)
+        # self.pos_embed = SineCosinePositionEncoding2D(config.embed_dim)
         
         if config.use_ray_encoding:
             self.ray_embed = RayDirectionEncoding(config.embed_dim, config.feat_size, config.num_cameras)
@@ -71,9 +72,9 @@ class ImageEncoder(nn.Module):
         # Disable checkpoint for Encoder as per plan
         self.use_checkpoint = False
     
-    def _process_single_camera(self, x, pos, rays=None):
+    def _process_single_camera(self, x, rays=None):
         x = x.squeeze(1)
-        x = x + pos.unsqueeze(0)
+        # x = x + pos.unsqueeze(0)
         
         if rays is not None:
             x = x + rays.squeeze(1)
@@ -85,9 +86,9 @@ class ImageEncoder(nn.Module):
     def forward(self, x, intrinsics=None, extrinsics=None):
         B, N, C, H, W = x.shape
         
-        pos = self.pos_embed(H, W, x.device) 
-        if pos.dim() == 2:
-            pos = pos.view(H, W, C)
+        # pos = self.pos_embed(H, W, x.device) 
+        # if pos.dim() == 2:
+        #     pos = pos.view(H, W, C)
             
         ray_feat = None
         if self.config.use_ray_encoding and intrinsics is not None:
@@ -102,9 +103,9 @@ class ImageEncoder(nn.Module):
             ray_cam = ray_feat[:, i:i+1] if ray_feat is not None else None
             
             if self.use_checkpoint and self.training:
-                out_cam = checkpoint(self._process_single_camera, x_cam, pos, ray_cam, use_reentrant=False)
+                out_cam = checkpoint(self._process_single_camera, x_cam, ray_cam, use_reentrant=False)
             else:
-                out_cam = self._process_single_camera(x_cam, pos, ray_cam)
+                out_cam = self._process_single_camera(x_cam, ray_cam)
                 
             outs.append(out_cam)
             
