@@ -11,29 +11,35 @@ class OccupancyDecoder(nn.Module):
         self.config = config
         self.coarse_query = nn.Parameter(torch.randn(1, config.num_coarse_queries, config.embed_dim) * 0.02)
         self.pos_3d = SineCosinePositionEncoding3D(config.embed_dim)
+        
         self.coarse_layers = nn.ModuleList([
             DeformableDecoderLayer(
                 config.embed_dim, config.num_heads, config.num_cameras,
-                config.num_sample_points, dropout=config.dropout
+                config.num_sample_points, dropout=config.dropout,
+                use_self_attn=config.use_self_attention # Use config switch
             ) for _ in range(config.decoder_layers)
         ])
+        
         self.coarse_to_fine = nn.Sequential(
             nn.Linear(config.embed_dim, config.embed_dim * 2),
             nn.GELU(),
             nn.Linear(config.embed_dim * 2, config.embed_dim),
         )
+        
         self.fine_layers = nn.ModuleList([
             DeformableDecoderLayer(
                 config.embed_dim, config.num_heads, config.num_cameras,
                 config.num_sample_points, dropout=config.dropout,
-                use_self_attn=False # Disable self-attn for fine queries to save memory
+                use_self_attn=False # Disable self-attn for fine queries to save memory (Too heavy for 160k)
             ) for _ in range(config.decoder_layers)
         ])
+        
         self.register_buffer('coarse_ref', self._create_reference_points(config.coarse_size))
         self.register_buffer('fine_ref', self._create_reference_points(config.fine_size))
         
-        # Enable gradient checkpointing for fine layers by default
-        self.use_checkpoint = True 
+        # Checkpoint Strategy
+        self.checkpoint_coarse = False
+        self.checkpoint_fine = True
     
     def _create_reference_points(self, size):
         x = torch.linspace(0, 1, size[0])
@@ -54,8 +60,10 @@ class OccupancyDecoder(nn.Module):
         ref = self.coarse_ref.unsqueeze(0).expand(B, -1, -1)
         
         for layer in self.coarse_layers:
-            # Checkpoint optional for coarse (lightweight)
-            query = layer(query, ref, image_feats, intrinsics, extrinsics)
+            if self.checkpoint_coarse and self.training:
+                query = checkpoint(layer, query, ref, image_feats, intrinsics, extrinsics, use_reentrant=False)
+            else:
+                query = layer(query, ref, image_feats, intrinsics, extrinsics)
             
         coarse_feats = query.view(B, cx, cy, cz, -1).permute(0, 4, 1, 2, 3)
         
@@ -71,10 +79,7 @@ class OccupancyDecoder(nn.Module):
         
         # Fine Layers with Checkpointing
         for layer in self.fine_layers:
-            if self.use_checkpoint and self.training:
-                # Checkpoint requires input to have requires_grad=True
-                # image_feats usually has grad. ref/intrinsics/extrinsics do not.
-                # query has grad.
+            if self.checkpoint_fine and self.training:
                 query = checkpoint(layer, query, ref, image_feats, intrinsics, extrinsics, use_reentrant=False)
             else:
                 query = layer(query, ref, image_feats, intrinsics, extrinsics)

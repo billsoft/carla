@@ -58,37 +58,33 @@ class LearnedCameraEmbedding(nn.Module):
 
 class RayDirectionEncoding(nn.Module):
     """
-    射线方向编码 (统一等距投影模型)
+    射线方向编码 (Restored)
     """
 
     def __init__(
         self,
         dim: int,
         image_size: Tuple[int, int],
-        num_cameras: int = 8, # Simplified interface
-        patch_size: int = 16,
+        num_cameras: int = 8,
         num_freqs: int = 10,
     ):
         super().__init__()
         self.dim = dim
         self.image_size = image_size
-        self.patch_size = patch_size
         self.num_freqs = num_freqs
         self.num_cameras = num_cameras
 
-        # 改进：使用 NeRF 风格的正弦位置编码 (Fourier Features)
-        # 输入维度: 3 (x, y, z)
-        # 编码后维度: 3 * 2 * num_freqs
+        # Input: 3 (x, y, z)
+        # Encoded: 3 + 3 * 2 * num_freqs
         self.input_dim = 3 + 3 * 2 * num_freqs
         
-        # 线性映射层：将编码后的高维向量映射到特征维度 dim
         self.proj = nn.Sequential(
             nn.Linear(self.input_dim, dim),
             nn.LayerNorm(dim),
             nn.ReLU(inplace=True),
             nn.Linear(dim, dim)
         )
-        
+    
     def _sinusoidal_encoding(self, x: torch.Tensor) -> torch.Tensor:
         freq_bands = 2.0 ** torch.linspace(0, self.num_freqs - 1, self.num_freqs, device=x.device)
         x_expanded = x.unsqueeze(-1) * freq_bands
@@ -100,55 +96,37 @@ class RayDirectionEncoding(nn.Module):
 
     def get_rays_from_params(self, intrinsics, extrinsics, H, W):
         """
-        从相机参数计算射线方向
         intrinsics: [B, N, 3, 3]
         extrinsics: [B, N, 4, 4]
         """
         B, N, _, _ = intrinsics.shape
         device = intrinsics.device
         
-        # Grid creation
         y, x = torch.meshgrid(
             torch.linspace(0, H-1, H, device=device),
             torch.linspace(0, W-1, W, device=device),
             indexing='ij'
         )
-        # [H, W, 3] homogeneous
-        pixel_coords = torch.stack([x, y, torch.ones_like(x)], dim=-1).unsqueeze(0).unsqueeze(0) # [1, 1, H, W, 3]
+        pixel_coords = torch.stack([x, y, torch.ones_like(x)], dim=-1).unsqueeze(0).unsqueeze(0)
         pixel_coords = pixel_coords.expand(B, N, -1, -1, -1)
         
-        # Unproject to Camera
-        # inv(K) @ pixel
-        # [B, N, 3, 3] -> [B, N, 1, 1, 3, 3]
         inv_K = torch.inverse(intrinsics).unsqueeze(2).unsqueeze(2)
-        # [B, N, H, W, 3, 1]
         cam_coords = torch.matmul(inv_K, pixel_coords.unsqueeze(-1)).squeeze(-1)
         
-        # Normalize to unit sphere (ray direction in camera frame)
         cam_dirs = cam_coords / cam_coords.norm(dim=-1, keepdim=True).clamp(min=1e-6)
         
-        # Camera to World
-        # R @ cam_dirs
-        # extrinsics: [R|T]
-        R = extrinsics[..., :3, :3].unsqueeze(2).unsqueeze(2) # [B, N, 1, 1, 3, 3]
+        R = extrinsics[..., :3, :3].unsqueeze(2).unsqueeze(2)
         world_dirs = torch.matmul(R, cam_dirs.unsqueeze(-1)).squeeze(-1)
         
         return world_dirs
 
     def forward(self, x, intrinsics=None, extrinsics=None):
-        """
-        x: [B, N, C, H, W]
-        intrinsics: [B, N, 3, 3]
-        extrinsics: [B, N, 4, 4]
-        """
         B, N, C, H, W = x.shape
         
         if intrinsics is None:
-            # Fallback to zeros or learnable if no params
             return torch.zeros(B, N, H, W, self.dim, device=x.device)
             
-        rays = self.get_rays_from_params(intrinsics, extrinsics, H, W) # [B, N, H, W, 3]
-        
+        rays = self.get_rays_from_params(intrinsics, extrinsics, H, W)
         encoded_rays = self._sinusoidal_encoding(rays)
         encoded = self.proj(encoded_rays) # [B, N, H, W, dim]
         
