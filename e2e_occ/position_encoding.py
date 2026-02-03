@@ -98,25 +98,55 @@ class RayDirectionEncoding(nn.Module):
         """
         intrinsics: [B, N, 3, 3]
         extrinsics: [B, N, 4, 4]
+        
+        Updated to use equidistant projection model: theta = r / f
+        to match d:/code/carla/occ_network/models/position_encoding.py
         """
         B, N, _, _ = intrinsics.shape
         device = intrinsics.device
         
+        # 1. Pixel Coordinates
         y, x = torch.meshgrid(
             torch.linspace(0, H-1, H, device=device),
             torch.linspace(0, W-1, W, device=device),
             indexing='ij'
         )
-        pixel_coords = torch.stack([x, y, torch.ones_like(x)], dim=-1).unsqueeze(0).unsqueeze(0)
-        pixel_coords = pixel_coords.expand(B, N, -1, -1, -1)
+        # Shift to center
+        cx = W / 2.0
+        cy = H / 2.0
+        dx = x - cx
+        dy = y - cy
         
-        inv_K = torch.inverse(intrinsics).unsqueeze(2).unsqueeze(2)
-        cam_coords = torch.matmul(inv_K, pixel_coords.unsqueeze(-1)).squeeze(-1)
+        # 2. Radius in image plane
+        r = torch.sqrt(dx**2 + dy**2)
+        phi = torch.atan2(dy, dx)
         
-        cam_dirs = cam_coords / cam_coords.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        # 3. Equidistant Projection: theta = r / f
+        # We need focal length f. Intrinsics[0,0] is fx.
+        # Assuming fx approx fy approx f
+        # [B, N, 1, 1]
+        f = intrinsics[..., 0, 0].unsqueeze(-1).unsqueeze(-1) 
         
-        R = extrinsics[..., :3, :3].unsqueeze(2).unsqueeze(2)
-        world_dirs = torch.matmul(R, cam_dirs.unsqueeze(-1)).squeeze(-1)
+        theta = r.unsqueeze(0).unsqueeze(0) / f
+        
+        # 4. Spherical to Cartesian (Camera Frame)
+        # Z is forward, X right, Y down
+        # sin(theta) is the radial component
+        sin_theta = torch.sin(theta)
+        cam_z = torch.cos(theta)
+        cam_x = sin_theta * torch.cos(phi.unsqueeze(0).unsqueeze(0))
+        cam_y = sin_theta * torch.sin(phi.unsqueeze(0).unsqueeze(0))
+        
+        cam_dirs = torch.stack([cam_x, cam_y, cam_z], dim=-1) # [B, N, H, W, 3]
+        
+        # 5. Camera to World
+        # cam_dirs is [B, N, H, W, 3]
+        # R is [B, N, 3, 3]
+        R = extrinsics[..., :3, :3]
+        
+        # Rotate: (R @ dir^T)^T = dir @ R^T
+        # [B, N, H, W, 3] @ [B, N, 3, 3]^T
+        world_dirs = torch.einsum('bnij,bnhwj->bnhwi', R, cam_dirs)
         
         return world_dirs
 

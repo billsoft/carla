@@ -14,6 +14,11 @@ class OccupancyDataset(Dataset):
         self.image_size = config.image_size if config else (960, 1280)
         self.voxel_size = config.voxel_size if config else (400, 400, 32)
         
+        # Temporal settings
+        self.sequence_length = 1
+        if config and hasattr(config, 'use_temporal') and config.use_temporal:
+            self.sequence_length = getattr(config, 'temporal_frames', 1)
+        
         self.samples = self._load_samples()
         self.intrinsics_data, self.extrinsics_data = self._load_calibration()
         
@@ -88,9 +93,11 @@ class OccupancyDataset(Dataset):
             return torch.zeros(1, *self.image_size)
 
     def __len__(self):
+        if self.sequence_length > 1:
+            return max(0, len(self.samples) - self.sequence_length + 1)
         return len(self.samples)
     
-    def __getitem__(self, idx):
+    def _load_single_frame(self, idx):
         sample_id = self.samples[idx]
         
         # 1. Load Images
@@ -122,6 +129,22 @@ class OccupancyDataset(Dataset):
             'voxels': voxels,
             'intrinsics': intrinsics,
             'extrinsics': extrinsics
+        }
+
+    def __getitem__(self, idx):
+        if self.sequence_length == 1:
+            return self._load_single_frame(idx)
+        
+        frames = []
+        for t in range(self.sequence_length):
+            frames.append(self._load_single_frame(idx + t))
+        
+        # Stack frames
+        return {
+            'images': torch.stack([f['images'] for f in frames]),      # [T, N, C, H, W]
+            'voxels': torch.stack([f['voxels'] for f in frames]),      # [T, X, Y, Z]
+            'intrinsics': frames[0]['intrinsics'],                     # [N, 3, 3] (Assume constant)
+            'extrinsics': torch.stack([f['extrinsics'] for f in frames]), # [T, N, 4, 4]
         }
 
     def _get_default_camera_params(self):

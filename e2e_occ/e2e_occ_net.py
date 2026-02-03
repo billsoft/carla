@@ -27,12 +27,15 @@ class E2EOccNet(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
     
-    def forward(self, images, intrinsics=None, extrinsics=None):
+    def forward(self, images, intrinsics=None, extrinsics=None, memory=None):
         feats = self.patch_embed(images)
         feats = self.encoder(feats, intrinsics, extrinsics)
-        voxel_feats = self.decoder(feats, intrinsics, extrinsics)
+        voxel_feats, new_memory = self.decoder(feats, intrinsics, extrinsics, memory)
         logits = self.head(voxel_feats)
-        return {'semantic': logits}
+        return {
+            'semantic': logits,
+            'memory': new_memory
+        }
     
     def get_num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

@@ -26,6 +26,11 @@ class E2EOccConfig:
     use_ray_encoding: bool = True
     use_self_attention: bool = True         # Coarse only
     
+    # Temporal Fusion Settings
+    use_temporal: bool = True               # Enable temporal fusion
+    temporal_frames: int = 2                # Number of frames in sequence
+    memory_dim: int = 256                   # Should match embed_dim
+    
     # feat_size is property
     voxel_range: Tuple[float, ...] = (-40.0, -40.0, -1.0, 40.0, 40.0, 5.4)
     voxel_resolution: float = 0.2
