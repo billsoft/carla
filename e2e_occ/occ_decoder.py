@@ -37,6 +37,23 @@ class OccupancyDecoder(nn.Module):
         self.register_buffer('coarse_ref', self._create_reference_points(config.coarse_size))
         self.register_buffer('fine_ref', self._create_reference_points(config.fine_size))
         
+        # Temporal Fusion Module
+        if config.use_temporal:
+            from temporal_fusion import TemporalFusionModule
+            self.temporal_fusion = TemporalFusionModule(
+                dim=config.embed_dim,
+                num_heads=config.num_heads,
+                dropout=config.dropout,
+                use_checkpoint=True
+            )
+
+        # Fine Stage Spatial Consistency (Option B: Spatial Conv)
+        self.fine_spatial_conv = nn.Sequential(
+            nn.Conv3d(config.embed_dim, config.embed_dim, kernel_size=3, padding=1, groups=config.embed_dim),
+            nn.BatchNorm3d(config.embed_dim),
+            nn.GELU(),
+        )
+
         # Checkpoint Strategy
         self.checkpoint_coarse = False
         self.checkpoint_fine = True
@@ -99,5 +116,15 @@ class OccupancyDecoder(nn.Module):
             else:
                 query = layer(query, ref, image_feats, intrinsics, extrinsics)
                 
-        output = query.view(B, fx, fy, fz, -1).permute(0, 4, 1, 2, 3)
+        # Fine Stage Spatial Consistency
+        # query is [B, Q, C] -> [B, fx, fy, fz, C]
+        query_reshaped = query.view(B, fx, fy, fz, -1)
+        # Permute to [B, C, fx, fy, fz] for Conv3d
+        query_vol = query_reshaped.permute(0, 4, 1, 2, 3).contiguous()
+        # Apply Conv3d and Residual
+        query_vol_out = self.fine_spatial_conv(query_vol)
+        query_vol = query_vol + query_vol_out
+        # Permute back to [B, fx, fy, fz, C] for output
+        output = query_vol.permute(0, 2, 3, 4, 1)
+        
         return output, new_memory

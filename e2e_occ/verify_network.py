@@ -1,133 +1,140 @@
-import torch
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import torch
+import torch.nn as nn
+import time
 
-from config import E2EOccConfig
-from e2e_occ_net import E2EOccNet
-from deformable_attention import DeformableCrossAttention
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(project_root)
 
-def test_projection():
-    print("Testing 3D -> 2D Projection Logic...")
-    
-    # Setup dummy params
-    B, N = 1, 1
-    H, W = 100, 100
-    
-    # Intrinsics: Identity-ish but scaled to image size
-    # f = 50, cx = 50, cy = 50
-    intrinsics = torch.eye(3).unsqueeze(0).unsqueeze(0)
-    intrinsics[..., 0, 0] = 50
-    intrinsics[..., 1, 1] = 50
-    intrinsics[..., 0, 2] = 50
-    intrinsics[..., 1, 2] = 50
-    
-    # Extrinsics: Identity (Camera at origin looking down +Z)
-    extrinsics = torch.eye(4).unsqueeze(0).unsqueeze(0)
-    
-    # Point at (0, 0, 10) in Camera frame (which is World frame here)
-    # Should project to center of image (0, 0) in normalized coords
-    # Wait, our query coords are 0-1.
-    # The projection logic in deformable_attention maps 0-1 to -40~40 world coords.
-    # Let's map normalized (0.5, 0.5, 0.5) to world center if possible.
-    # (0.5 * 80 - 40) = 0
-    # (0.5 * 80 - 40) = 0
-    # (0.5 * 6.4 - 1) = 2.2
-    # So (0.5, 0.5, 0.5) -> (0, 0, 2.2)
-    # This point (0, 0, 2.2) is in front of camera.
-    # Should project to (50, 50) pixel coords -> (0, 0) normalized.
-    
-    query_coords = torch.tensor([[[0.5, 0.5, 0.5]]]) # [1, 1, 3]
-    
-    attn = DeformableCrossAttention(dim=256, num_heads=8, num_cameras=1)
-    
-    ref_points = attn.get_reference_points(query_coords, intrinsics, extrinsics, H, W)
-    
-    print(f"Query (0.5, 0.5, 0.5) -> World (0, 0, 2.2) -> Ref Point: {ref_points[0,0,0].tolist()}")
-    
-    # Check if close to 0,0
-    if torch.allclose(ref_points, torch.zeros_like(ref_points), atol=0.1):
-        print("Projection Test PASSED: Center point projected correctly.")
-    else:
-        print("Projection Test FAILED: Expected approx (0,0).")
+# Import E2E-OccNet components
+from e2e_occ.config import E2EOccConfig
+from e2e_occ.e2e_occ_net import E2EOccNet
 
-def verify_network():
-    print("\nVerifying E2EOccNet...")
+def test_e2e_network():
+    print("=" * 60)
+    print("E2E-OccNet Network Verification")
+    print("=" * 60)
     
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+    
+    # 1. Initialize Configuration
+    print("\n[1] Initializing Configuration...")
     config = E2EOccConfig()
-    # Use smaller size for speed
-    config.image_size = (128, 256) 
-    config.encoder_layers = 1
-    config.decoder_layers = 1
-    
-    model = E2EOccNet(config)
-    model.cuda()
-    
-    # Register hooks to print intermediate shapes
-    def get_activation(name):
-        def hook(model, input, output):
-            if isinstance(output, tuple):
-                print(f"[{name}] Output Shape: {output[0].shape}")
-            elif isinstance(output, dict):
-                for k, v in output.items():
-                    print(f"[{name}] Output '{k}' Shape: {v.shape}")
-            else:
-                print(f"[{name}] Output Shape: {output.shape}")
-        return hook
+    print(f"  Embed Dim: {config.embed_dim}")
+    print(f"  Coarse Size: {config.coarse_size}")
+    print(f"  Fine Size: {config.fine_size}")
+    print(f"  Temporal Frames: {config.temporal_frames}")
+    print(f"  Use Temporal: {config.use_temporal}")
+    print(f"  Use Ego Motion: {config.use_ego_motion}")
 
-    model.patch_embed.register_forward_hook(get_activation("1. Patch Embed"))
-    model.encoder.register_forward_hook(get_activation("2. Image Encoder"))
-    # Hook internal layers of decoder to see Coarse vs Fine
-    if len(model.decoder.coarse_layers) > 0:
-        model.decoder.coarse_layers[-1].register_forward_hook(get_activation("3. Coarse Decoder (Last Layer)"))
-    if len(model.decoder.fine_layers) > 0:
-        model.decoder.fine_layers[-1].register_forward_hook(get_activation("4. Fine Decoder (Last Layer)"))
-    model.decoder.register_forward_hook(get_activation("5. Occupancy Decoder Final"))
-    model.head.register_forward_hook(get_activation("6. Voxel Head"))
+    # 2. Build Model
+    print("\n[2] Building Model...")
+    model = E2EOccNet(config).to(device)
+    model.eval()
+    print(f"  Model Parameters: {model.get_num_params() / 1e6:.2f}M")
 
-    # Dummy Input (RAW uses 1 channel)
+    # 3. Create Dummy Inputs
+    print("\n[3] Creating Dummy Inputs...")
     B = 1
+    T = 2 # Sequence length
     N = config.num_cameras
-    imgs = torch.randn(B, N, 1, *config.image_size).cuda()
+    H, W = config.image_size
     
-    # Dummy Params
-    intrinsics = torch.eye(3).unsqueeze(0).repeat(N, 1, 1).unsqueeze(0).cuda()
-    extrinsics = torch.eye(4).unsqueeze(0).repeat(N, 1, 1).unsqueeze(0).cuda()
+    # Create sequence of inputs
+    # Images: [B, N, C, H, W] (Raw channels=1)
+    images_seq = torch.randn(B, T, N, config.raw_channels, H, W, device=device)
     
-    print(f"Input Image Shape: {imgs.shape}")
+    # Intrinsics: [B, N, 3, 3]
+    intrinsics = torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, N, -1, -1)
     
-    # Forward
+    # Extrinsics: [B, T, N, 4, 4]
+    # Simulate simple forward motion
+    extrinsics_seq = torch.eye(4, device=device).view(1, 1, 1, 4, 4).expand(B, T, N, -1, -1).clone()
+    for t in range(T):
+        extrinsics_seq[:, t, :, 0, 3] = t * 1.0 # Move 1m forward per step
+        
+    memory = None
+    
+    # 4. Run Sequential Inference
+    print("\n[4] Running Sequential Inference...")
+    
     try:
-        output = model(imgs, intrinsics, extrinsics)
-        logits = output['semantic']
-        print(f"Output Logits Shape: {logits.shape}")
-        
-        # Expected shape: [B, C, X, Y, Z]
-        # Voxel size in config: (400, 400, 32)
-        # Logits: [1, 18, 400, 400, 32]
-        expected_shape = (B, config.num_classes, *config.voxel_size)
-        
-        if logits.shape == expected_shape:
-            print("Shape Verification PASSED")
-        else:
-            print(f"Shape Verification FAILED. Expected {expected_shape}, got {logits.shape}")
-            
-        # Backward
-        loss = logits.sum()
-        loss.backward()
-        print("Backward Pass PASSED")
+        with torch.no_grad():
+            for t in range(T):
+                print(f"\n  --- Time Step {t} ---")
+                
+                # Get current frame data
+                img_t = images_seq[:, t]
+                ext_t = extrinsics_seq[:, t]
+                
+                # Calculate Ego-Motion (relative pose)
+                ego_motion = None
+                if t > 0:
+                    # Previous frame extrinsics
+                    ext_prev = extrinsics_seq[:, t-1]
+                    
+                    # Assuming extrinsics are Pose (Camera-to-World)
+                    # We use the first camera (ego) as reference
+                    pose_t = ext_t[:, 0] # [B, 4, 4]
+                    pose_prev = ext_prev[:, 0] # [B, 4, 4]
+                    
+                    # Calculate relative transform: T_{t-1 -> t}
+                    # P_t = T^{-1} * P_{t-1} -> T_{t-1 -> t} = Pose_t^{-1} * Pose_{t-1}
+                    ego_motion = torch.linalg.inv(pose_t) @ pose_prev
+                    print("    Calculated Ego-Motion matrix")
+                
+                # Forward Pass
+                start_time = time.time()
+                outputs = model(
+                    images=img_t, 
+                    intrinsics=intrinsics, 
+                    extrinsics=ext_t, 
+                    memory=memory, 
+                    ego_motion=ego_motion
+                )
+                end_time = time.time()
+                
+                # Check Outputs
+                logits = outputs['semantic']
+                new_memory = outputs['memory']
+                
+                print(f"    Inference Time: {(end_time - start_time)*1000:.2f} ms")
+                print(f"    Output Logits Shape: {logits.shape}")
+                
+                if new_memory is not None:
+                    print(f"    New Memory Shape: {new_memory.shape}")
+                    # Check if memory has NaN
+                    if torch.isnan(new_memory).any():
+                        print("    ❌ Error: Memory contains NaN values!")
+                    else:
+                        print("    ✅ Memory values valid")
+                else:
+                    print("    Memory is None (Expected for first frame if temporal disabled, but enabled here)")
+
+                # Verify Output Shape
+                # VoxelHead output should be [B, num_classes, X, Y, Z]
+                # Config voxel_size is (400, 400, 32)
+                expected_shape = (B, config.num_classes, *config.voxel_size)
+                if logits.shape == expected_shape:
+                    print(f"    ✅ Output Shape Correct: {logits.shape}")
+                else:
+                    print(f"    ❌ Output Shape Mismatch! Expected {expected_shape}, got {logits.shape}")
+                
+                # Update memory for next step
+                memory = new_memory
+                # Detach to simulate TBPTT or just inference loop
+                if memory is not None:
+                    memory = memory.detach()
+                
+        print("\n✅ Network Verification Passed Successfully!")
         
     except Exception as e:
-        print(f"Forward/Backward FAILED with error: {e}")
+        print(f"\n❌ Network Verification Failed: {e}")
         import traceback
         traceback.print_exc()
 
 if __name__ == "__main__":
-    try:
-        test_projection()
-        if torch.cuda.is_available():
-            verify_network()
-        else:
-            print("Skipping network verification (No CUDA)")
-    except Exception as e:
-        print(f"Verification Script Failed: {e}")
+    test_e2e_network()

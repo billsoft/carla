@@ -105,8 +105,9 @@ class VoxelHead(nn.Module):
         )
         
     def forward(self, x):
-        # x: [B, 256, 80, 80, 16]
-        # print(f"DEBUG: VoxelHead Input {x.shape}")
+        # x: [B, fx, fy, fz, C] (from OccDecoder)
+        # Permute to [B, C, fx, fy, fz] for Conv3d/Interpolate
+        x = x.permute(0, 4, 1, 2, 3).contiguous()
         
         # 1. Down-channel
         x = self.conv1(x) # -> 128
