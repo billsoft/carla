@@ -2,25 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class RGGBUnpack(nn.Module):
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, x):
-        B, N, C, H, W = x.shape
-        x = x.view(B * N, C, H, W)
-        r = x[:, :, 0::2, 0::2]
-        g1 = x[:, :, 0::2, 1::2]
-        g2 = x[:, :, 1::2, 0::2]
-        b = x[:, :, 1::2, 1::2]
-        out = torch.cat([r, g1, g2, b], dim=1)
-        _, C4, H2, W2 = out.shape
-        return out.view(B, N, C4, H2, W2)
-
 class RAWPatchEmbed(nn.Module):
     def __init__(self, embed_dim=256):
         super().__init__()
-        self.rggb_unpack = RGGBUnpack()
+        # Replace manual RGGB unpacking with learnable convolution
+        # Input: 1 channel (RAW), Output: 4 channels (RGGB-like features)
+        # Kernel: 2x2, Stride: 2 -> Halves H/W, quadruples channels
+        self.rggb_conv = nn.Conv2d(1, 4, kernel_size=2, stride=2, bias=False)
+        
         self.stem = nn.Sequential(
             nn.Conv2d(4, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
@@ -37,10 +26,15 @@ class RAWPatchEmbed(nn.Module):
     
     def forward(self, x):
         B, N, C, H, W = x.shape
-        x = self.rggb_unpack(x)
-        _, _, C4, H2, W2 = x.shape
-        x = x.view(B * N, C4, H2, W2)
+        # Flatten batch and camera dimensions for convolution
+        x = x.view(B * N, C, H, W)
+        
+        # Apply learnable RGGB downsampling
+        x = self.rggb_conv(x)
+        
+        # Apply Stem
         x = self.stem(x)
+        
         _, D, Hf, Wf = x.shape
         return x.view(B, N, D, Hf, Wf)
 
