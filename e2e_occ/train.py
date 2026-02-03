@@ -15,6 +15,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch, use_
     start = time.time()
     optimizer.zero_grad()
     
+    # TBPTT Settings
+    TBPTT_CHUNK_SIZE = 2  # Truncate gradients every 2 steps
+    
     for i, batch in enumerate(loader):
         images = batch['images'].to(device)
         voxels = batch['voxels'].to(device)
@@ -33,31 +36,67 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch, use_
             seq_loss = 0.0
             seq_ce = 0.0
             
-            # Loop over time steps
-            for t in range(T):
-                img_t = images[:, t]      # [B, N, C, H, W]
-                vox_t = voxels[:, t]      # [B, X, Y, Z]
-                ext_t = extrinsics[:, t]  # [B, N, 4, 4]
+            # TBPTT Loop: Process sequence in chunks
+            for t_start in range(0, T, TBPTT_CHUNK_SIZE):
+                t_end = min(t_start + TBPTT_CHUNK_SIZE, T)
+                chunk_steps = t_end - t_start
                 
-                with autocast(enabled=use_amp):
-                    outputs = model(img_t, intrinsics, ext_t, memory=memory)
-                    loss_dict = criterion(outputs['semantic'], vox_t)
+                # Detach memory to truncate gradient history
+                if memory is not None:
+                    memory = memory.detach()
+                
+                chunk_loss = 0.0
+                total_weight = 0.0
+                
+                # Process steps within chunk
+                for t in range(t_start, t_end):
+                    img_t = images[:, t]      # [B, N, C, H, W]
+                    vox_t = voxels[:, t]      # [B, X, Y, Z]
+                    ext_t = extrinsics[:, t]  # [B, N, 4, 4]
                     
-                    # Accumulate loss
-                    step_loss = loss_dict['total']
-                    seq_loss += step_loss
-                    seq_ce += loss_dict['ce']
-                    
-                    # Update memory for next step
-                    memory = outputs['memory']
+                    # Calculate Ego-Motion: T_{t-1 -> t}
+                    ego_motion = None
+                    if t > 0:
+                        ext_prev = extrinsics[:, t-1] 
+                        pose_t = ext_t[:, 0] 
+                        pose_prev = ext_prev[:, 0] 
+                        ego_motion = torch.linalg.inv(pose_t) @ pose_prev
+                        
+                    with autocast(enabled=use_amp):
+                        outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
+                        loss_dict = criterion(outputs['semantic'], vox_t)
+                        
+                        # Time-weighted Loss: Give more weight to later frames in sequence
+                        # Weight grows linearly from 1.0 to 2.0 over the sequence
+                        time_weight = 1.0 + (t / max(1, T - 1))
+                        
+                        step_loss = loss_dict['total']
+                        
+                        # Accumulate weighted loss
+                        chunk_loss += step_loss * time_weight
+                        total_weight += time_weight
+                        
+                        # Metrics logging (raw loss)
+                        seq_loss += step_loss.item()
+                        seq_ce += loss_dict['ce'].item()
+                        
+                        # Update memory for next step
+                        memory = outputs['memory']
+                
+                # Backward for this chunk
+                # Normalize by total weight instead of simple average
+                loss_to_backprop = chunk_loss / (total_weight * grad_accum_steps)
+                scaler.scale(loss_to_backprop).backward()
             
-            # Average loss over sequence
-            loss = seq_loss / T
-            loss_val = loss.item()
-            ce_loss_val = (seq_ce / T).item()
+            # Average metrics over full sequence
+            loss_val = seq_loss / T
+            ce_loss_val = seq_ce / T
             
-            # Scale loss for gradient accumulation
-            loss = loss / grad_accum_steps
+            # For gradient accumulation step logic below
+            # We already backwarded, so 'loss' variable for step() check is just for logging/scaler logic?
+            # Actually, the outer loop structure expects 'loss' to be defined for scaler.scale(loss).backward()
+            # BUT we already did backward inside the TBPTT loop!
+            # We need to restructure the outer loop to NOT backward again if is_sequence.
             
         else:
             # Standard single-frame training
@@ -67,9 +106,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch, use_
                 loss = losses['total'] / grad_accum_steps
                 loss_val = losses['total'].item()
                 ce_loss_val = losses['ce'].item()
-        
-        # Scale and Backward
-        scaler.scale(loss).backward()
+            
+            # Scale and Backward (Only for single frame case)
+            scaler.scale(loss).backward()
         
         # Gradient Accumulation Step
         if (i + 1) % grad_accum_steps == 0:
@@ -112,7 +151,14 @@ def validate(model, loader, criterion, device):
                     vox_t = voxels[:, t]
                     ext_t = extrinsics[:, t]
                     
-                    outputs = model(img_t, intrinsics, ext_t, memory=memory)
+                    ego_motion = None
+                    if t > 0:
+                        ext_prev = extrinsics[:, t-1]
+                        pose_t = ext_t[:, 0]
+                        pose_prev = ext_prev[:, 0]
+                        ego_motion = torch.linalg.inv(pose_t) @ pose_prev
+                    
+                    outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
                     loss_dict = criterion(outputs['semantic'], vox_t)
                     seq_loss += loss_dict['total'].item()
                     memory = outputs['memory']

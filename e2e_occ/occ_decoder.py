@@ -49,7 +49,7 @@ class OccupancyDecoder(nn.Module):
         ref = torch.stack([grid_x, grid_y, grid_z], dim=-1)
         return ref.view(-1, 3)
     
-    def forward(self, image_feats, intrinsics=None, extrinsics=None, memory=None):
+    def forward(self, image_feats, intrinsics=None, extrinsics=None, memory=None, ego_motion=None):
         B = image_feats.shape[0]
         device = image_feats.device
         cx, cy, cz = self.config.coarse_size
@@ -72,7 +72,13 @@ class OccupancyDecoder(nn.Module):
         if self.config.use_temporal and hasattr(self, 'temporal_fusion'):
              # [B, C, X, Y, Z] -> [B, X*Y*Z, C]
              coarse_flat = coarse_feats.permute(0, 2, 3, 4, 1).flatten(1, 3)
-             fused_flat, new_memory = self.temporal_fusion(coarse_flat, memory)
+             # Pass ego_motion and spatial shape for alignment
+             fused_flat, new_memory = self.temporal_fusion(
+                 coarse_flat, 
+                 memory, 
+                 ego_motion=ego_motion, 
+                 spatial_shape=(cx, cy, cz)
+             )
              # Reshape back [B, Q, C] -> [B, X, Y, Z, C] -> [B, C, X, Y, Z]
              coarse_feats = fused_flat.view(B, cx, cy, cz, self.config.embed_dim).permute(0, 4, 1, 2, 3)
         

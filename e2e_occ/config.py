@@ -28,7 +28,8 @@ class E2EOccConfig:
     
     # Temporal Fusion Settings
     use_temporal: bool = True               # Enable temporal fusion
-    temporal_frames: int = 2                # Number of frames in sequence
+    use_ego_motion: bool = True             # Enable ego-motion alignment
+    temporal_frames: int = 2                # 4 -> 2 frames (Reduce memory usage)
     memory_dim: int = 256                   # Should match embed_dim
     
     # feat_size is property
