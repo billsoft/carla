@@ -10,7 +10,7 @@ class E2EOccConfig:
     # Balanced Capacity (Target 18-20GB)
     embed_dim: int = 256                    # 384 -> 256
     num_heads: int = 8
-    encoder_layers: int = 4                 # 6 -> 4
+    encoder_layers: int = 2                 # 4 -> 2 (Reduced for efficiency)
     decoder_layers: int = 2                 # 3 -> 2
     
     # Optimized Resolution
