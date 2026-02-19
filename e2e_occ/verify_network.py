@@ -16,6 +16,7 @@ def test_e2e_network():
     print("=" * 60)
     print("E2E-OccNet Network Verification")
     print("=" * 60)
+    print(f"PyTorch Version: {torch.__version__}")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
