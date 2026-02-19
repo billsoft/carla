@@ -9,6 +9,9 @@ from e2e_occ_net import build_model
 from loss import OccupancyLoss
 from dataset import get_dataloader
 
+# conda activate deepsys
+# python d:\code\carla\e2e_occ\train.py --batch_size 1 --epochs 100 --amp --data_root d:\code\carla\dataset_10k_bak
+
 # 禁用输出缓冲，确保每条日志立即显示（Windows下默认行缓冲会导致输出积压）
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
