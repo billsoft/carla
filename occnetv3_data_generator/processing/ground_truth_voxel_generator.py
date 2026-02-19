@@ -7,10 +7,10 @@ import carla
 import numpy as np
 import math
 import logging
-from dense_occupancy_collection.config.occupancy_config import (
+from config.occupancy_config import (
     CARLA_TO_OCCUPANCY_MAPPING, OCCUPANCY_LABELS
 )
-from dense_occupancy_collection.config.actor_occupancy_mapping import (
+from config.actor_occupancy_mapping import (
     get_occupancy_label_from_actor
 )
 # DepthVisibilityFilter 已移除 - 使用 Label 0 (Free) 替代 mask 机制
@@ -323,8 +323,8 @@ class GroundTruthVoxelGenerator:
         #         仅查询 Cache 中缺失的点 (车辆移动产生的新边缘)
         #         Cache 持续保留，支持任意旋转和移动，无需清空
         
-        self.ground_cache.clear() # 强制清空，确保无历史累积误差
-        print(f"[地面填充] 已清空旧 Cache (Ego-Aligned Grid 旋转后坐标映射改变)")
+        # Cache 使用世界坐标网格索引作为 Key，无需每帧清空
+        # 车辆移动/旋转后只有新进入范围的边缘点才会触发 Map API 查询
 
         # --- A. 地面与道路 (Inverse Mapping Grid -> World) ---
         # 修复: 使用世界网格索引作为 Cache Key

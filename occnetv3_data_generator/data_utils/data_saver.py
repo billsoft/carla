@@ -5,6 +5,7 @@
 import os
 import json
 import numpy as np
+import concurrent.futures
 # cv2 is optional
 try:
     import cv2
@@ -78,6 +79,10 @@ class OccNetDataSaver:
         self.frame_counter = 0
 
         self.sample_ids = []  # 记录所有sample_id
+
+        # 后台IO线程池（DNG/npy异步写入，避免阻塞采集主线程）
+        self._io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._pending_futures = []
 
         # 创建目录结构
         self._create_directories()
@@ -204,23 +209,23 @@ class OccNetDataSaver:
         for cam_id, img_info in images.items():
             # 提取相机索引 (如 'front_main' → 0)
             cam_index = self._get_cam_index(cam_id)
-            
+
             # 检查数据类型
             if isinstance(img_info, dict) and 'raw_type' in img_info:
-                # 处理 Bayer 数据
+                # 处理 Bayer 数据 - 异步提交到IO线程池，不阻塞主线程
                 raw_type = img_info['raw_type']
-                data = img_info['data']
-                
+                data = img_info['data'].copy()  # 拷贝避免主线程修改
+                output_path = img_dir / f'cam_{cam_index}.dng'
+
                 if raw_type == 'bayer_rggb':
-                    self._save_bayer_dng(data, img_dir / f'cam_{cam_index}.dng')
+                    fut = self._io_executor.submit(self._save_bayer_dng, data, output_path)
+                    self._pending_futures.append(fut)
                 else:
-                    # Fallback for other types
-                    np.save(img_dir / f'cam_{cam_index}.npy', data)
+                    fut = self._io_executor.submit(np.save, img_dir / f'cam_{cam_index}.npy', data)
+                    self._pending_futures.append(fut)
             else:
                 # 兼容旧格式 (直接传入 array)
                 img = img_info
-                # assert img.shape == (1, 960, 1280), f"图像形状错误: {img.shape}"
-                # assert img.dtype == np.float16, f"图像类型错误: {img.dtype}"
                 np.save(img_dir / f'cam_{cam_index}.npy', img)
 
         # 2. 保存occupancy
@@ -405,6 +410,17 @@ class OccNetDataSaver:
             train_ratio: 训练集比例
             val_ratio: 验证集比例
         """
+        # 等待所有后台IO完成
+        if self._pending_futures:
+            print(f"[OccNetDataSaver] 等待 {len(self._pending_futures)} 个后台IO任务完成...")
+            for fut in self._pending_futures:
+                try:
+                    fut.result()
+                except Exception as e:
+                    print(f"  [警告] 后台IO任务失败: {e}")
+            self._pending_futures.clear()
+        self._io_executor.shutdown(wait=False)
+
         total = len(self.sample_ids)
         if total == 0:
             print(f"[OccNetDataSaver] 警告: 没有数据")

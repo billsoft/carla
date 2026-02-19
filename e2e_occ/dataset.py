@@ -22,11 +22,17 @@ class OccupancyDataset(Dataset):
 
         self.samples = self._load_samples()
 
-        # 逐帧相机参数目录（每帧包含绝对世界坐标系下的外参，用于 ego_motion 计算）
+        # 路径探测：按优先级尝试多种数据来源
+        # 优先级 1：camera_params/{sample_id}.npz（dense_occupancy_collection 格式，含绝对 extrinsics）
         self._camera_params_dir = os.path.join(data_root, 'camera_params')
         self._has_per_frame_params = os.path.isdir(self._camera_params_dir)
 
-        # 静态标定备用（仅在逐帧 npz 不存在时使用）
+        # 优先级 2：ego_pose/{sample_id}.npy（occnetv3_data_generator 格式，Vehicle→World 绝对位姿）
+        self._ego_pose_dir = os.path.join(data_root, 'ego_pose')
+        self._has_ego_pose = os.path.isdir(self._ego_pose_dir)
+
+        # 静态标定（calibration/intrinsics.json + extrinsics.json）
+        # 用于：①相机内参（恒定）②当逐帧绝对外参不可用时的退化备用
         self._cached_intrinsics, self._cached_extrinsics = self._load_static_calibration()
 
     # ------------------------------------------------------------------
@@ -111,13 +117,60 @@ class OccupancyDataset(Dataset):
         extrinsics = torch.from_numpy(data['extrinsics'].astype(np.float32))  # [N, 4, 4]
         return intrinsics, extrinsics
 
+    # ------------------------------------------------------------------
+    # ego_pose 路径（occnetv3_data_generator 格式）
+    # ------------------------------------------------------------------
+
+    def _load_ego_pose_params(self, sample_id):
+        """从 ego_pose/{sample_id}.npy 和静态 calibration 计算逐帧绝对外参。
+
+        occnetv3_data_generator 格式：
+            ego_pose/{sample_id}.npy  → (4,4) Vehicle→World（每帧不同）
+            calibration/extrinsics.json → Camera→Vehicle（相机安装位姿，恒定）
+
+        组合公式：
+            T_cam_world = ego_pose @ T_cam_vehicle   (Camera→World，每帧不同)
+
+        相邻帧的 T_cam_world 差值即为真实 ego_motion，时序对齐才能正确工作。
+        """
+        ego_pose_path = os.path.join(self._ego_pose_dir, f'{sample_id}.npy')
+        if not os.path.exists(ego_pose_path):
+            return None, None
+
+        ego_pose = np.load(ego_pose_path).astype(np.float32)  # (4,4) Vehicle→World
+
+        # 内参直接用静态标定（内参恒定）
+        K = self._cached_intrinsics  # [N, 3, 3]
+
+        # 外参：ego_pose @ T_cam_vehicle → Camera→World（每帧不同）
+        E_list = []
+        for i in range(self.num_cameras):
+            T_rel = self._cached_extrinsics[i].numpy()  # (4,4) Camera→Vehicle（恒定）
+            T_abs = ego_pose @ T_rel                    # (4,4) Camera→World（逐帧变化）
+            E_list.append(torch.from_numpy(T_abs))
+        E = torch.stack(E_list)  # [N, 4, 4]
+
+        return K, E
+
     def _get_frame_params(self, sample_id):
-        """获取帧级相机参数，优先使用逐帧 npz（含绝对位姿），否则退回静态标定。"""
+        """获取帧级相机参数（含当前帧车辆绝对位姿的外参）。
+
+        优先级：
+          1. camera_params/{sample_id}.npz（dense_occupancy_collection 格式）
+          2. ego_pose/{sample_id}.npy + calibration/（occnetv3_data_generator 格式）
+          3. 静态 calibration 退化（时序对齐失效，但不崩溃）
+        """
+        # 优先级 1
         if self._has_per_frame_params:
             K, E = self._load_per_frame_params(sample_id)
             if K is not None:
                 return K, E
-        # 静态标定备用（ego_motion 将退化为 Identity，时序对齐失效，但不会崩溃）
+        # 优先级 2
+        if self._has_ego_pose:
+            K, E = self._load_ego_pose_params(sample_id)
+            if K is not None:
+                return K, E
+        # 优先级 3（退化：时序对齐失效，记录警告）
         return self._cached_intrinsics, self._cached_extrinsics
 
     # ------------------------------------------------------------------

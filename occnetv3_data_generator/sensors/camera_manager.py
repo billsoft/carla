@@ -233,8 +233,10 @@ class CameraManager:
             depth: (H, W) float32, 单位: 米
         """
         # 解析 BGRA 数据
-        array = np.frombuffer(image.raw_data, dtype=np.uint8)
-        array = array.reshape((image.height, image.width, 4))
+        # CARLA UE5 raw_data 可能含4字节header，截取精确像素字节数
+        raw = np.frombuffer(image.raw_data, dtype=np.uint8)
+        expected = image.height * image.width * 4
+        array = raw[-expected:].reshape((image.height, image.width, 4))
 
         # CARLA 深度编码: 24-bit normalized depth in RGB channels
         # depth_normalized = (R + G*256 + B*256*256) / (256^3 - 1)
@@ -254,8 +256,10 @@ class CameraManager:
         将CARLA RGB图像转换为单通道 Bayer RGGB (uint16)
         """
         # 解析BGRA数据
-        bgra = np.frombuffer(image.raw_data, dtype=np.uint8)
-        bgra = bgra.reshape((image.height, image.width, 4))
+        # CARLA UE5 raw_data 可能含4字节header，截取精确像素字节数
+        raw = np.frombuffer(image.raw_data, dtype=np.uint8)
+        expected = image.height * image.width * 4
+        bgra = raw[-expected:].reshape((image.height, image.width, 4))
         
         # 创建 Bayer 容器
         bayer = np.zeros((image.height, image.width), dtype=np.uint8)
@@ -284,8 +288,10 @@ class CameraManager:
             gray_image: (1, H, W) float16, 归一化到 [0, 1]
         """
         # 解析BGRA数据
-        array = np.frombuffer(image.raw_data, dtype=np.uint8)
-        array = array.reshape((image.height, image.width, 4))  # (H, W, 4) BGRA
+        # CARLA UE5 raw_data 可能含4字节header，截取精确像素字节数
+        raw = np.frombuffer(image.raw_data, dtype=np.uint8)
+        expected = image.height * image.width * 4
+        array = raw[-expected:].reshape((image.height, image.width, 4))  # (H, W, 4) BGRA
 
         # 提取RGB通道 (忽略Alpha)
         bgr = array[:, :, :3]  # (H, W, 3)
@@ -308,61 +314,61 @@ class CameraManager:
 
     def get_synced_frame(self, timeout: float = 2.0) -> Optional[Dict]:
         """
-        获取同步的一帧数据 (8个相机)
+        获取同步的一帧数据 (8个相机) - 并行等待所有相机，避免顺序等待超时级联失败
         Returns:
-            {
-                'cam_front_main': {'data': array, 'timestamp': float, 'frame': int, 'raw_type': str},
-                ...
-            }
+            {cam_id: {'data': array, 'timestamp': float, 'frame': int, 'raw_type': str}}
             如果超时返回None
         """
         import time
-        start_time = time.time()
+        import concurrent.futures as cf
+
+        cam_ids = list(self.data_queues.keys())
+
+        def _fetch(cam_id):
+            return cam_id, self.data_queues[cam_id].get(timeout=timeout)
+
         synced_data = {}
+        with cf.ThreadPoolExecutor(max_workers=len(cam_ids)) as ex:
+            futures = {ex.submit(_fetch, cid): cid for cid in cam_ids}
+            deadline = time.time() + timeout
+            for fut in cf.as_completed(futures, timeout=timeout):
+                try:
+                    cam_id, data = fut.result()
+                    synced_data[cam_id] = data
+                except Exception:
+                    return None  # 任一相机失败立即返回
 
-        for cam_id in self.data_queues.keys():
-            try:
-                remaining = timeout - (time.time() - start_time)
-                if remaining <= 0:
-                    return None
-
-                data = self.data_queues[cam_id].get(timeout=remaining)
-                synced_data[cam_id] = data
-
-            except queue.Empty:
-                return None
-
+        if len(synced_data) != len(cam_ids):
+            return None
         return synced_data
 
     def get_synced_depth_frame(self, timeout: float = 2.0) -> Optional[Dict]:
         """
-        获取同步的一帧深度数据 (8个相机)
-        Returns:
-            {
-                'front_main': {'data': array, 'timestamp': float, 'frame': int},
-                ...
-            }
-            如果超时或未启用深度返回 None
+        获取同步的一帧深度数据 (8个相机) - 并行等待
+        如果超时或未启用深度返回 None
         """
         if not self.enable_depth:
             return None
 
-        import time
-        start_time = time.time()
-        synced_data = {}
+        import concurrent.futures as cf
 
-        for cam_id in self.depth_queues.keys():
-            try:
-                remaining = timeout - (time.time() - start_time)
-                if remaining <= 0:
+        cam_ids = list(self.depth_queues.keys())
+
+        def _fetch(cam_id):
+            return cam_id, self.depth_queues[cam_id].get(timeout=timeout)
+
+        synced_data = {}
+        with cf.ThreadPoolExecutor(max_workers=len(cam_ids)) as ex:
+            futures = {ex.submit(_fetch, cid): cid for cid in cam_ids}
+            for fut in cf.as_completed(futures, timeout=timeout):
+                try:
+                    cam_id, data = fut.result()
+                    synced_data[cam_id] = data
+                except Exception:
                     return None
 
-                data = self.depth_queues[cam_id].get(timeout=remaining)
-                synced_data[cam_id] = data
-
-            except queue.Empty:
-                return None
-
+        if len(synced_data) != len(cam_ids):
+            return None
         return synced_data
 
     def clear_queues(self):
@@ -418,34 +424,48 @@ class CameraManager:
 
     def get_extrinsics(self, cam_id: str) -> np.ndarray:
         """
-        获取相机外参矩阵 (相机相对车辆的变换)
+        获取相机安装外参矩阵（Camera→Vehicle，相机相对于车辆的固定安装位姿）。
+
+        注意：此处从 camera_config.py 中的安装参数计算，而非运行时 get_transform()。
+        原因：carla.Sensor.get_transform() 返回世界坐标系中的绝对变换，
+        在车辆 spawn 初期可能不准确，且会随车辆移动而变化，不适合作为恒定标定参数。
+
         Returns:
-            T: (4, 4) 外参矩阵 (车辆→相机)
+            T: (4, 4) float32，Camera→Vehicle 变换矩阵（安装位姿，帧间恒定）
         """
-        camera = self.cameras[cam_id]
-        transform = camera.get_transform()
+        # 找到对应相机的安装配置
+        cam_cfg = None
+        for cfg in self.camera_configs:
+            if cfg['id'] == cam_id:
+                cam_cfg = cfg
+                break
+        if cam_cfg is None:
+            raise ValueError(f"Unknown camera id: {cam_id}")
 
-        # 转换为4x4矩阵
-        T = np.eye(4, dtype=np.float32)
+        # 安装位置（相机光心在车辆坐标系中的位置，单位：米）
+        px, py, pz = cam_cfg['position']
+        # 安装旋转（pitch, yaw, roll，单位：度）
+        pitch_deg, yaw_deg, roll_deg = cam_cfg['rotation']
 
-        # 旋转矩阵
-        pitch = np.radians(transform.rotation.pitch)
-        yaw = np.radians(transform.rotation.yaw)
-        roll = np.radians(transform.rotation.roll)
+        pitch = np.radians(pitch_deg)
+        yaw   = np.radians(yaw_deg)
+        roll  = np.radians(roll_deg)
 
-        # 旋转矩阵 (ZYX顺序)
-        cy, sy = np.cos(yaw), np.sin(yaw)
+        cy, sy = np.cos(yaw),   np.sin(yaw)
         cp, sp = np.cos(pitch), np.sin(pitch)
-        cr, sr = np.cos(roll), np.sin(roll)
+        cr, sr = np.cos(roll),  np.sin(roll)
 
+        # ZYX 旋转矩阵（Vehicle→Camera 方向，对应 Camera→Vehicle 的转置）
+        # 这里构建的是 Camera→Vehicle（即相机轴在车辆坐标系中的方向）
         R = np.array([
-            [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
-            [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
-            [-sp, cp*sr, cp*cr]
-        ])
+            [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
+            [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
+            [  -sp,            cp*sr,             cp*cr  ]
+        ], dtype=np.float32)
 
+        T = np.eye(4, dtype=np.float32)
         T[:3, :3] = R
-        T[:3, 3] = [transform.location.x, transform.location.y, transform.location.z]
+        T[:3, 3]  = [px, py, pz]
 
         return T
 

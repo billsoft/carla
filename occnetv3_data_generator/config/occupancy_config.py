@@ -101,6 +101,85 @@ CARLA_TO_OCCUPANCY = {
 # 11:Driveable, 12:OtherFlat, 13:Sidewalk, 14:Terrain, 6:RoadLine
 GROUND_LABELS = [11, 12, 13, 14, 6]
 
+# ========== CARLA 语义标签 → Occupancy 映射（与 dense_occupancy_collection 对齐）==========
+# 用于 ground_truth_voxel_generator 的地面查询，消除对 dense_occupancy_collection 包的依赖
+CARLA_TO_OCCUPANCY_MAPPING = {
+    0: 0,   # NONE -> free
+    1: 11,  # Roads -> driveable_surface
+    2: 13,  # Sidewalks -> sidewalk
+    3: 15,  # Buildings -> manmade
+    4: 15,  # Walls -> manmade
+    5: 1,   # Fences -> barrier
+    6: 15,  # Poles -> manmade
+    7: 8,   # TrafficLight -> traffic_cone
+    8: 8,   # TrafficSigns -> traffic_cone
+    9: 16,  # Vegetation -> vegetation
+    10: 14, # Terrain -> terrain
+    11: 0,  # Sky -> free
+    12: 7,  # Pedestrians -> pedestrian
+    13: 7,  # Rider -> pedestrian
+    14: 4,  # Car -> car
+    15: 10, # Truck -> truck
+    16: 3,  # Bus -> bus
+    17: 3,  # Train -> bus
+    18: 6,  # Motorcycle -> motorcycle
+    19: 2,  # Bicycle -> bicycle
+    20: 17, # Static -> general_object
+    21: 17, # Dynamic -> general_object
+    22: 17, # Other -> general_object
+    23: 12, # Water -> other_flat
+    24: 11, # RoadLines -> driveable_surface
+    25: 12, # Ground -> other_flat
+    26: 15, # Bridge -> manmade
+    27: 11, # RailTrack -> driveable_surface
+    28: 1,  # GuardRail -> barrier
+    29: 17, # Rock -> general_object
+}
+
+# Occupancy 标签名称（18类，与 dense_occupancy_collection 完全对齐）
+OCCUPANCY_LABELS = [
+    'free',                 # 0
+    'barrier',              # 1
+    'bicycle',              # 2
+    'bus',                  # 3
+    'car',                  # 4
+    'construction_vehicle', # 5
+    'motorcycle',           # 6
+    'pedestrian',           # 7
+    'traffic_cone',         # 8
+    'trailer',              # 9
+    'truck',                # 10
+    'driveable_surface',    # 11
+    'other_flat',           # 12
+    'sidewalk',             # 13
+    'terrain',              # 14
+    'manmade',              # 15
+    'vegetation',           # 16
+    'general_object',       # 17
+]
+
+# 可视化颜色（与 occupancy_viewer/viewer.js 保持一致）
+OCCUPANCY_COLORS = [
+    (0, 0, 0),        # 0: free
+    (200, 200, 200),  # 1: barrier
+    (255, 215, 0),    # 2: bicycle
+    (255, 99, 71),    # 3: bus
+    (255, 140, 0),    # 4: car
+    (255, 165, 0),    # 5: construction_vehicle
+    (255, 20, 147),   # 6: motorcycle
+    (255, 0, 0),      # 7: pedestrian
+    (255, 255, 0),    # 8: traffic_cone
+    (65, 105, 225),   # 9: trailer
+    (0, 0, 255),      # 10: truck
+    (80, 80, 80),     # 11: driveable_surface
+    (120, 120, 120),  # 12: other_flat
+    (160, 160, 160),  # 13: sidewalk
+    (139, 69, 19),    # 14: terrain
+    (220, 220, 220),  # 15: manmade
+    (34, 139, 34),    # 16: vegetation
+    (255, 0, 255),    # 17: general_object
+]
+
 # ========== Actor类型映射 (更细粒度) ==========
 ACTOR_TYPE_MAPPING = {
     # 车辆细分

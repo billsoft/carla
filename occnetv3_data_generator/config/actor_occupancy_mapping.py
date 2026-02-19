@@ -14,7 +14,7 @@ CARLA Actor类型到18分类Occupancy的完整映射配置
 # 此文件不再重复定义，避免配置冲突和颜色不一致问题
 # ============================================================================
 
-from dense_occupancy_collection.config.occupancy_config import (
+from config.occupancy_config import (
     OCCUPANCY_LABELS as OCCUPANCY_LABELS_LIST,
     OCCUPANCY_COLORS as OCCUPANCY_COLORS_LIST
 )

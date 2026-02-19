@@ -104,7 +104,9 @@
       "Read(//c/Users/bills/.claude/plans/**)",
       "Bash(/c/ProgramData/anaconda3/envs/deepsys/python.exe:*)",
       "Bash(/c/ProgramData/anaconda3/envs/carla/python.exe:*)",
-      "Bash(tee:*)"
+      "Bash(tee:*)",
+      "Bash(test:*)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []
