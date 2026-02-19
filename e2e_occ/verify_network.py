@@ -1,16 +1,17 @@
-import sys
-import os
 import torch
 import torch.nn as nn
 import time
+import os
+import sys
 
-# Add project root to path
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(project_root)
-
-# Import E2E-OccNet components
-from e2e_occ.config import E2EOccConfig
-from e2e_occ.e2e_occ_net import E2EOccNet
+try:
+    # For use as a package
+    from .config import E2EOccConfig
+    from .e2e_occ_net import E2EOccNet
+except ImportError:
+    # For direct script execution
+    from config import E2EOccConfig
+    from e2e_occ_net import E2EOccNet
 
 def test_e2e_network():
     print("=" * 60)

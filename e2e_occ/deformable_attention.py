@@ -132,18 +132,11 @@ class DeformableDecoderLayer(nn.Module):
         
         self.use_self_attn = use_self_attn
         if self.use_self_attn:
-            # Restored Self-Attention
             self.self_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
-            self.norm1 = nn.LayerNorm(dim)
-        
+            self.norm_self = nn.LayerNorm(dim)
+
         self.cross_attn = DeformableCrossAttention(dim, num_heads, num_cameras, num_points, dropout)
-        
-        # Adjust Norm numbering based on self_attn existence
-        if self.use_self_attn:
-            self.norm2 = nn.LayerNorm(dim)
-        else:
-            self.norm1 = nn.LayerNorm(dim) # If no self_attn, cross_attn uses norm1
-            
+        self.norm_cross = nn.LayerNorm(dim)
         self.norm_mlp = nn.LayerNorm(dim)
         
         self.mlp = nn.Sequential(
@@ -156,13 +149,11 @@ class DeformableDecoderLayer(nn.Module):
     
     def forward(self, query, query_coords, image_feats, intrinsics=None, extrinsics=None):
         if self.use_self_attn:
-            # print(f"DEBUG: Running Self-Attention on query shape {query.shape}")
-            q = self.norm1(query)
+            q = self.norm_self(query)
             query = query + self.self_attn(q, q, q)[0]
-            
+
         # Cross-Attention
-        norm_q = self.norm2(query) if self.use_self_attn else self.norm1(query)
-        query = query + self.cross_attn(norm_q, query_coords, image_feats, intrinsics, extrinsics)
-        
+        query = query + self.cross_attn(self.norm_cross(query), query_coords, image_feats, intrinsics, extrinsics)
+
         query = query + self.mlp(self.norm_mlp(query))
         return query

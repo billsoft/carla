@@ -25,23 +25,28 @@ class OccupancyLoss(nn.Module):
     
     def lovasz_softmax(self, pred, target):
         B, C, X, Y, Z = pred.shape
-        pred = F.softmax(pred, dim=1)
-        losses = []
-        for b in range(B):
-            for c in range(C):
-                fg = (target[b] == c).float()
-                if fg.sum() == 0:
-                    continue
-                errors = (fg - pred[b, c]).abs()
-                errors_sorted, perm = torch.sort(errors.view(-1), descending=True)
-                fg_sorted = fg.view(-1)[perm]
-                grad = self.lovasz_grad(fg_sorted)
-                losses.append((errors_sorted * grad).sum())
-        if len(losses) == 0:
+        prob = F.softmax(pred, dim=1)  # [B, C, X, Y, Z]
+
+        # 展平 batch 和空间维度：[B*X*Y*Z]
+        prob_flat = prob.permute(1, 0, 2, 3, 4).reshape(C, -1)  # [C, N]
+        target_flat = target.reshape(-1)                          # [N]
+
+        loss_per_class = []
+        for c in range(C):
+            fg = (target_flat == c).float()  # [N]
+            if fg.sum() == 0:
+                continue
+            errors = (fg - prob_flat[c]).abs()  # [N]
+            errors_sorted, perm = torch.sort(errors, descending=True)
+            fg_sorted = fg[perm]
+            grad = self._lovasz_grad(fg_sorted)
+            loss_per_class.append((errors_sorted * grad).sum())
+
+        if len(loss_per_class) == 0:
             return torch.tensor(0.0, device=pred.device)
-        return sum(losses) / len(losses)
-    
-    def lovasz_grad(self, gt_sorted):
+        return torch.stack(loss_per_class).mean()
+
+    def _lovasz_grad(self, gt_sorted):
         n = len(gt_sorted)
         gts = gt_sorted.sum()
         intersection = gts - gt_sorted.cumsum(0)

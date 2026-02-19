@@ -1,10 +1,20 @@
 import torch
 import torch.nn as nn
-from config import E2EOccConfig
-from raw_embed import MultiCameraPatchEmbed
-from image_encoder import ImageEncoder
-from occ_decoder import OccupancyDecoder
-from voxel_head import VoxelHead
+
+try:
+    # 作为包导入时使用相对导入
+    from .config import E2EOccConfig
+    from .raw_embed import MultiCameraPatchEmbed
+    from .image_encoder import ImageEncoder
+    from .occ_decoder import OccupancyDecoder
+    from .voxel_head import VoxelHead
+except ImportError:
+    # 直接作为脚本运行时的回退
+    from config import E2EOccConfig
+    from raw_embed import MultiCameraPatchEmbed
+    from image_encoder import ImageEncoder
+    from occ_decoder import OccupancyDecoder
+    from voxel_head import VoxelHead
 
 class E2EOccNet(nn.Module):
     def __init__(self, config: E2EOccConfig = None):

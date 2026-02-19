@@ -95,9 +95,13 @@ class TemporalFusionModule(nn.Module):
     
     def align_memory(self, memory, ego_motion, spatial_shape):
         """
-        memory: [B, Q, C], Q = H*W*D
-        ego_motion: [B, 4, 4], T_{t-1 -> t}，平移单位为米
-        spatial_shape: (H, W, D) 对应体素空间 (X, Y, Z)，例如 (25, 25, 8)
+        memory: [B, Q, C], Q = H*W*D，上一帧（t-1）的体素特征
+        ego_motion: [B, 4, 4]，C_{t-1}→C_t 变换矩阵（上一帧体素坐标→当前帧体素坐标）
+                    由 train.py 计算：inv(extrinsics_t[:,0]) @ extrinsics_{t-1}[:,0]
+                    平移单位：米（与 voxel_range 一致）
+        spatial_shape: (H, W, D) 对应体素空间 (X, Y, Z)
+        目标：将上一帧 memory 中的特征，warp 到当前帧坐标系下，以便与当前帧特征对齐
+        实现：对当前帧体素网格的每个点 p_t，反查其在上一帧中的位置 p_{t-1} = ego_motion_inv @ p_t
         """
         if ego_motion is None:
             return memory
@@ -145,10 +149,10 @@ class TemporalFusionModule(nn.Module):
         # ego_motion 的平移单位是米，必须在同一坐标系下做矩阵乘法
         grid_flat_world = grid_flat * scale + offset  # [-1,1] -> 米
 
-        # 4. 逆变换：在当前帧坐标下，找上一帧的对应位置
-        # ego_motion: T_{t-1->t}，即上一帧 -> 当前帧
-        # 要反查上一帧位置：p_{t-1} = T_inv * p_t
-        T_inv = torch.inverse(ego_motion)  # [B, 4, 4]
+        # 4. 反查当前帧体素点 p_t 在上一帧坐标系中的位置
+        # ego_motion: C_{t-1}→C_t，故 inv = C_t→C_{t-1}
+        # p_{t-1} = inv(ego_motion) @ p_t
+        T_inv = torch.linalg.inv(ego_motion)  # [B, 4, 4]
         grid_warped_world = torch.bmm(grid_flat_world, T_inv.transpose(1, 2))  # [B, D*H*W, 4]
 
         # 5. 世界米坐标 -> 归一化坐标（供 grid_sample 使用）

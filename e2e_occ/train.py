@@ -55,6 +55,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch, use_
                     ego_motion = None
                     if t > 0:
                         ext_prev = extrinsics[:, t-1]
+                        # pose: [B, 4, 4], Camera→World (extrinsics 惯例)
+                        # ego_motion = inv(C_t→W) @ (C_{t-1}→W) = C_{t-1}→C_t
+                        # 语义：上一帧体素坐标系 → 当前帧体素坐标系
                         pose_t = ext_t[:, 0]
                         pose_prev = ext_prev[:, 0]
                         ego_motion = torch.linalg.inv(pose_t) @ pose_prev
@@ -130,10 +133,11 @@ def validate(model, loader, criterion, device):
                     ego_motion = None
                     if t > 0:
                         ext_prev = extrinsics[:, t-1]
+                        # ego_motion = inv(C_t→W) @ (C_{t-1}→W) = C_{t-1}→C_t
                         pose_t = ext_t[:, 0]
                         pose_prev = ext_prev[:, 0]
                         ego_motion = torch.linalg.inv(pose_t) @ pose_prev
-                    
+
                     outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
                     loss_dict = criterion(outputs['semantic'], vox_t)
                     seq_loss += loss_dict['total'].item()
