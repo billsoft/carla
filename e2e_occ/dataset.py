@@ -21,6 +21,8 @@ class OccupancyDataset(Dataset):
         
         self.samples = self._load_samples()
         self.intrinsics_data, self.extrinsics_data = self._load_calibration()
+        # 一次性构建并缓存，避免每次 __getitem__ 重复构建 tensor
+        self._cached_intrinsics, self._cached_extrinsics = self._get_camera_matrices()
         
     def _load_samples(self):
         split_file = os.path.join(self.data_root, f'{self.split}.txt')
@@ -121,14 +123,11 @@ class OccupancyDataset(Dataset):
         else:
             voxels = torch.zeros(self.voxel_size, dtype=torch.long)
             
-        # 3. Get Calibration
-        intrinsics, extrinsics = self._get_camera_matrices()
-        
         return {
             'images': images,
             'voxels': voxels,
-            'intrinsics': intrinsics,
-            'extrinsics': extrinsics
+            'intrinsics': self._cached_intrinsics,
+            'extrinsics': self._cached_extrinsics
         }
 
     def __getitem__(self, idx):

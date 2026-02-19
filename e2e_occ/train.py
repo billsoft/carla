@@ -35,93 +35,69 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch, use_
             memory = None
             seq_loss = 0.0
             seq_ce = 0.0
-            
-            # TBPTT Loop: Process sequence in chunks
+
+            # TBPTT 循环：每个 chunk 做一次明确的 backward，scaler 状态清晰
             for t_start in range(0, T, TBPTT_CHUNK_SIZE):
                 t_end = min(t_start + TBPTT_CHUNK_SIZE, T)
-                chunk_steps = t_end - t_start
-                
-                # Detach memory to truncate gradient history
+
+                # 截断梯度历史
                 if memory is not None:
                     memory = memory.detach()
-                
-                chunk_loss = 0.0
+
+                chunk_loss = torch.tensor(0.0, device=device)
                 total_weight = 0.0
-                
-                # Process steps within chunk
+
                 for t in range(t_start, t_end):
                     img_t = images[:, t]      # [B, N, C, H, W]
                     vox_t = voxels[:, t]      # [B, X, Y, Z]
                     ext_t = extrinsics[:, t]  # [B, N, 4, 4]
-                    
-                    # Calculate Ego-Motion: T_{t-1 -> t}
+
                     ego_motion = None
                     if t > 0:
-                        ext_prev = extrinsics[:, t-1] 
-                        pose_t = ext_t[:, 0] 
-                        pose_prev = ext_prev[:, 0] 
+                        ext_prev = extrinsics[:, t-1]
+                        pose_t = ext_t[:, 0]
+                        pose_prev = ext_prev[:, 0]
                         ego_motion = torch.linalg.inv(pose_t) @ pose_prev
-                        
+
                     with autocast(enabled=use_amp):
                         outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
                         loss_dict = criterion(outputs['semantic'], vox_t)
-                        
-                        # Time-weighted Loss: Give more weight to later frames in sequence
-                        # Weight grows linearly from 1.0 to 2.0 over the sequence
+
                         time_weight = 1.0 + (t / max(1, T - 1))
-                        
-                        step_loss = loss_dict['total']
-                        
-                        # Accumulate weighted loss
-                        chunk_loss += step_loss * time_weight
+                        chunk_loss = chunk_loss + loss_dict['total'] * time_weight
                         total_weight += time_weight
-                        
-                        # Metrics logging (raw loss)
-                        seq_loss += step_loss.item()
-                        seq_ce += loss_dict['ce'].item()
-                        
-                        # Update memory for next step
-                        memory = outputs['memory']
-                
-                # Backward for this chunk
-                # Normalize by total weight instead of simple average
-                loss_to_backprop = chunk_loss / (total_weight * grad_accum_steps)
-                scaler.scale(loss_to_backprop).backward()
-            
-            # Average metrics over full sequence
+
+                    seq_loss += loss_dict['total'].item()
+                    seq_ce += loss_dict['ce'].item()
+                    memory = outputs['memory']
+
+                # 每个 chunk 统一 backward 一次，scaler 状态始终明确
+                chunk_loss_norm = chunk_loss / (total_weight * grad_accum_steps)
+                scaler.scale(chunk_loss_norm).backward()
+
             loss_val = seq_loss / T
             ce_loss_val = seq_ce / T
-            
-            # For gradient accumulation step logic below
-            # We already backwarded, so 'loss' variable for step() check is just for logging/scaler logic?
-            # Actually, the outer loop structure expects 'loss' to be defined for scaler.scale(loss).backward()
-            # BUT we already did backward inside the TBPTT loop!
-            # We need to restructure the outer loop to NOT backward again if is_sequence.
-            
+
         else:
-            # Standard single-frame training
+            # 单帧训练
             with autocast(enabled=use_amp):
                 outputs = model(images, intrinsics, extrinsics)
                 losses = criterion(outputs['semantic'], voxels)
                 loss = losses['total'] / grad_accum_steps
                 loss_val = losses['total'].item()
                 ce_loss_val = losses['ce'].item()
-            
-            # Scale and Backward (Only for single frame case)
+
             scaler.scale(loss).backward()
-        
-        # Gradient Accumulation Step
+
+        # 梯度累积步进（两个分支的 scaler 状态此时均明确）
         if (i + 1) % grad_accum_steps == 0:
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            
-            # Optional: Aggressive cache clearing for debug (Slow!)
-            # torch.cuda.empty_cache() 
-        
-        total_loss += loss_val * grad_accum_steps # Restore scale for logging
+
+        total_loss += loss_val * grad_accum_steps
         
         if (i + 1) % 10 == 0:
             elapsed = time.time() - start

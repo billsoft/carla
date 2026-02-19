@@ -21,9 +21,12 @@ class OccupancyDecoder(nn.Module):
         ])
         
         self.coarse_to_fine = nn.Sequential(
+            nn.LayerNorm(config.embed_dim),
             nn.Linear(config.embed_dim, config.embed_dim * 2),
             nn.GELU(),
+            nn.Dropout(config.dropout),
             nn.Linear(config.embed_dim * 2, config.embed_dim),
+            nn.LayerNorm(config.embed_dim),
         )
         
         self.fine_layers = nn.ModuleList([

@@ -455,17 +455,124 @@ All dependencies are automatically downloaded and built by CMake.
 
 ---
 
+## 占用网络架构总览
+
+本项目包含三个迭代版本的占用网络，从轻量实验逐步发展到工业级端到端方案：
+
+| 项目 | 参数量 | 输出分辨率 | 特点 | 状态 |
+|------|--------|-----------|------|------|
+| `occ_network_nano` | 6.08M | (200,200,16) | 轻量级 LSS 风格，无时序 | 早期实验 |
+| `occ_network` (OccNetV3) | ~50M | (200,200,16) | Lift-Splat-Shoot + 时序 | 中间版本 |
+| `occ_transformer` | ~20M | (200,200,16) | 纯 Transformer，BEV 查询 | 并行方案 |
+| `e2e_occ` | ~9M | (400,400,32) | **端到端，粗细两阶段，GRU 时序** | **主力方案** ⭐ |
+
+所有网络共享同一数据集格式 (`dataset_10k`) 和 viewer (`occupancy_viewer`)。
+
+---
+
+## E2E 端到端占用网络 (e2e_occ) ⭐ 主力方案
+
+### 项目概述
+
+`e2e_occ` 是**当前主力方案**，参考特斯拉 FSD 架构设计，使用 Window Attention 图像编码 + 粗细两阶段可变形 Cross-Attention 解码 + GRU 时序融合。
+
+**关键特点:**
+- 输入: 8 相机 Bayer RAW `[B,8,1,960,1280]`
+- 输出: `(400,400,32)` 体素，18 语义类别
+- 参数量: ~9M，峰值显存 ~3GB（FP16）
+- 时序: GRU 记忆 + Ego-Motion 对齐 + TBPTT 训练
+
+### 网络架构
+
+```
+RAW [B,8,1,960,1280]
+  ↓ RGGB 解包 + Stem 卷积
+  → 特征图 [B,8,256,60,80]
+  ↓ 图像编码器 (Window Attention × 2层)
+  → 含2D位置编码 + 等距投影射线编码
+  ↓ 粗解码器 (Coarse, 25×25×8=5000 queries)
+  → Self-Attention + Deformable Cross-Attention
+  ↓ 时序融合 (GRU + Ego-Motion 对齐)
+  ↓ 细解码器 (Fine, 80×80×16=102400 queries)
+  → Deformable Cross-Attention + Depthwise Conv3d 空间一致性
+  ↓ 体素头 (VoxelHead)
+  → 分类 → 上采样 [B,18,400,400,32]
+```
+
+**关键设计**:
+- 串行处理 8 相机（显存×1，不是×8）
+- Fine 阶段强制使用梯度检查点（gradient checkpointing）
+- TBPTT chunk_size=2，截断长序列梯度
+
+### 快速开始
+
+```bash
+# 训练 (在项目根目录 d:\code\carla 下):
+/c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/train.py \
+    --dataset dataset_10k --batch-size 1 --epochs 50 --amp
+
+# 推理:
+/c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/inference.py \
+    --checkpoint e2e_occ/checkpoints/best.pth \
+    --dataset dataset_10k
+
+# 验证网络结构:
+/c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/verify_network.py
+```
+
+### 关键文件
+
+- [e2e_occ/config.py](e2e_occ/config.py) — `E2EOccConfig` 数据类，所有超参数
+- [e2e_occ/e2e_occ_net.py](e2e_occ/e2e_occ_net.py) — 主网络入口 `build_model()`
+- [e2e_occ/image_encoder.py](e2e_occ/image_encoder.py) — Window Attention 图像编码器
+- [e2e_occ/occ_decoder.py](e2e_occ/occ_decoder.py) — 粗细两阶段解码器
+- [e2e_occ/temporal_fusion.py](e2e_occ/temporal_fusion.py) — GRU + Ego-Motion 对齐
+- [e2e_occ/deformable_attention.py](e2e_occ/deformable_attention.py) — 可变形 Cross-Attention，含 3D→2D 投影
+- [e2e_occ/voxel_head.py](e2e_occ/voxel_head.py) — 分类头 + 上采样
+- [e2e_occ/loss.py](e2e_occ/loss.py) — `CrossEntropy + Lovász-Softmax` 组合损失
+- [e2e_occ/dataset.py](e2e_occ/dataset.py) — 支持序列 `[B,T,N,C,H,W]` 的数据加载器
+
+### 空间范围配置
+
+```python
+voxel_range = (-40.0, -40.0, -1.0, 40.0, 40.0, 5.4)  # x: ±40m, y: ±40m, z: -1~5.4m
+voxel_resolution = 0.2  # 0.2m/体素
+voxel_size = (400, 400, 32)  # 输出体素网格
+```
+
+---
+
+## OccNetV3 网络 (occ_network)
+
+**中间迭代版本**，基于 Lift-Splat-Shoot (LSS) 架构 + 深度监督 + 多任务损失。
+
+```bash
+# 训练:
+/c/ProgramData/anaconda3/envs/deepsys/python.exe occ_network/train.py \
+    --dataset dataset_10k_bak --batch-size 1 --epochs 20 --amp
+
+# 数据采集 (需要先启动 CARLA 服务器):
+/c/ProgramData/anaconda3/envs/carla/python.exe occnetv3_data_generator/main_collection.py \
+    --frames 1000 --output dataset_10k_bak --town Town10HD
+```
+
+**损失函数**: Focal Loss + Distance-Aware Loss + 边缘感知深度监督 L1 Log Loss。
+
+---
+
 ## Occupancy Network 项目说明 (occ_network_nano)
+
+> **注意**: `occ_network_nano` 是早期轻量级实验版本，当前主力方案请使用 `e2e_occ`。
 
 ### 项目概述
 
 `occ_network_nano` 是基于 CARLA 采集的数据训练的**轻量级 3D 占用网格预测网络**,使用 **Bayer RGGB 单通道 RAW 数据**作为输入。
 
 **关键特点:**
-- 🎯 输入: 8 个环视相机的 Bayer RAW 图像 (单通道 12-bit DNG)
-- 📦 输出: 3D 占用网格 `(200, 200, 16)` 体素, 18 个语义类别
-- 🚀 网络: 轻量级设计,总参数 6.08M
-- 🔧 数据集: `dataset_10k` (920 个样本,原始分辨率 500×500×40, 训练时下采样到 200×200×16)
+- 输入: 8 个环视相机的 Bayer RAW 图像 (单通道 12-bit DNG)
+- 输出: 3D 占用网格 `(200, 200, 16)` 体素, 18 个语义类别
+- 网络: 轻量级设计,总参数 6.08M
+- 数据集: `dataset_10k` (920 个样本,原始分辨率 500×500×40, 训练时下采样到 200×200×16)
 
 ### 目录结构
 
@@ -688,18 +795,11 @@ pip install rawpy
 
 ### 性能指标
 
-**预期性能** (训练 50 epochs):
+**预期性能** (训练 50 epochs，Class 0 权重 = 1.0):
 - Accuracy: 50-70%
 - mIoU: 20-35%
 - 推理速度: ~50-100 ms/sample (RTX 4090)
 - 显存占用: ~4-6 GB (batch_size=2, AMP)
-
-**当前问题** (epoch 32, 旧权重配置):
-- Accuracy: 19.13% ❌
-- mIoU: 3.59% ❌
-- Class 0 缺失 ❌
-
-**原因**: Class 0 权重过低 (0.1), 已修复为 1.0, 需要重新训练。
 
 ---
 
@@ -938,70 +1038,42 @@ DATA_DIR = "dataset_10k/occupancy"  # 真值标签
 # 启动 CARLA 服务器
 cmake --build Build --target launch
 
-# 采集数据 (选择一种方案)
-python carla_data_collection/scripts/collect_5_frames.py
-# 或
-python dense_occupancy_collection/main_data_collection.py --frames 100
+# 方案 A: 轻量级采集 (8 相机 RGB + 激光雷达占用标签)
+/c/ProgramData/anaconda3/envs/carla/python.exe carla_data_collection/scripts/collect_5_frames.py
+
+# 方案 B: 高质量 CubeMap 深度采集 (nuScenes 17 类)
+/c/ProgramData/anaconda3/envs/carla/python.exe dense_occupancy_collection/main_data_collection.py --frames 100
+
+# 方案 C: OccNetV3 格式采集
+/c/ProgramData/anaconda3/envs/carla/python.exe occnetv3_data_generator/main_collection.py \
+    --frames 1000 --output dataset_10k_bak --town Town10HD
 ```
 
-### 2. 数据验证
+### 2. 网络训练 (推荐 e2e_occ)
 
 ```bash
-# 验证数据集完整性
-python carla_data_collection/scripts/verify_occupancy.py
+# E2E 主力方案 (~9M 参数, 时序融合, 高分辨率输出):
+/c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/train.py \
+    --dataset dataset_10k --batch-size 1 --epochs 50 --amp
 
-# 可视化检查
-python occupancy_viewer/run_viewer.py
-# 修改 DATA_DIR 指向数据集目录
+# Transformer 方案 (~20M 参数):
+/c/ProgramData/anaconda3/envs/deepsys/python.exe occ_transformer/train_balanced.py \
+    --dataset dataset_10k --batch-size 2 --epochs 50 --lr 1e-4 --amp
+
+# 轻量级实验 (6.08M 参数, 无时序):
+/c/ProgramData/anaconda3/envs/deepsys/python.exe occ_network_nano/train_bayer.py \
+    --dataset dataset_10k --batch-size 2 --epochs 50 --amp
 ```
 
-### 3. 网络训练
-
-**选择网络架构** (二选一):
-
-**A. Bayer RAW 网络** (轻量级, 6.08M 参数):
-```bash
-conda activate deepsys
-python occ_network_nano/train_bayer.py \
-    --dataset dataset_10k \
-    --batch-size 2 \
-    --epochs 50 \
-    --amp
-```
-
-**B. Transformer 网络** (Balanced 版, ~20M 参数):
-```bash
-conda activate deepsys
-python occ_transformer/train_balanced.py \
-    --dataset dataset_10k \
-    --batch-size 2 \
-    --epochs 50 \
-    --lr 1e-4 \
-    --amp
-```
-
-### 4. 推理与评估
+### 3. 推理与可视化
 
 ```bash
-# Bayer 网络推理
-python occ_network_nano/inference_bayer.py \
-    --checkpoint outputs/bayer_raw/xxx/epoch_049.pth \
-    --dataset dataset_10k \
-    --num-samples 10
+# E2E 推理:
+/c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/inference.py \
+    --checkpoint e2e_occ/checkpoints/best.pth --dataset dataset_10k
 
-# Transformer 网络推理
-python occ_transformer/inference_transformer.py \
-    --checkpoint outputs/transformer_balanced/xxx/best.pth \
-    --dataset dataset_10k \
-    --model-type balanced
-```
-
-### 5. 可视化结果
-
-```bash
-# 启动 viewer (自动加载 inference_results)
-python occupancy_viewer/run_viewer.py
-# 浏览器访问: http://localhost:8085/
+# 启动 viewer (浏览器访问 http://localhost:8085/):
+/c/ProgramData/anaconda3/envs/deepsys/python.exe occupancy_viewer/run_viewer.py
 ```
 
 ---

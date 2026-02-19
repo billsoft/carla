@@ -96,82 +96,75 @@ class TemporalFusionModule(nn.Module):
     def align_memory(self, memory, ego_motion, spatial_shape):
         """
         memory: [B, Q, C], Q = H*W*D
-        ego_motion: [B, 4, 4], T_{t-1 -> t}
-        spatial_shape: (H, W, D) 例如 (25, 25, 8)
+        ego_motion: [B, 4, 4], T_{t-1 -> t}，平移单位为米
+        spatial_shape: (H, W, D) 对应体素空间 (X, Y, Z)，例如 (25, 25, 8)
         """
         if ego_motion is None:
             return memory
-        
+
         B, Q, C = memory.shape
         H, W, D = spatial_shape
         device = memory.device
-        
-        # 1. reshape为3D体积 [B, C, D, H, W] (grid_sample的5D格式: N,C,D,H,W)
-        # Note: input memory is [B, Q, C]. We assume Q = H*W*D in row-major order? 
-        # OccDecoder flattens coarse_feats: .view(B, cx, cy, cz, -1).permute(0, 4, 1, 2, 3) -> [B, C, X, Y, Z]
-        # Then permute(0, 2, 3, 4, 1).flatten(1, 3) -> [B, X*Y*Z, C]
-        # So memory comes in as [B, H*W*D, C].
-        # To get back to [B, C, D, H, W], we need to undo flatten and permute.
-        # mem_vol = memory.view(B, H, W, D, C).permute(0, 4, 3, 1, 2)
-        # H, W, D correspond to X, Y, Z.
-        # grid_sample uses (x, y, z).
-        # We need to be careful with coordinate alignment.
-        
+
+        # 体素空间的真实范围（与 E2EOccConfig.voxel_range 保持一致）
+        # X: [-40, 40], Y: [-40, 40], Z: [-1, 5.4]
+        x_range = (-40.0, 40.0)
+        y_range = (-40.0, 40.0)
+        z_range = (-1.0, 5.4)
+
+        # 坐标系转换用的 scale 和 offset（4D 齐次坐标，w 分量保持 1）
+        scale = torch.tensor([
+            (x_range[1] - x_range[0]) / 2,   # x: [-1,1] -> 40m
+            (y_range[1] - y_range[0]) / 2,   # y: [-1,1] -> 40m
+            (z_range[1] - z_range[0]) / 2,   # z: [-1,1] -> 3.2m
+            1.0
+        ], device=device)
+        offset = torch.tensor([
+            (x_range[0] + x_range[1]) / 2,   # x center = 0m
+            (y_range[0] + y_range[1]) / 2,   # y center = 0m
+            (z_range[0] + z_range[1]) / 2,   # z center = 2.2m
+            0.0
+        ], device=device)
+
+        # 1. 重塑为 3D 体积 [B, C, D, H, W]
+        # OccDecoder 传入的 memory 是 [B, H*W*D, C]，由 view(B,H,W,D,C) flatten 而来
         mem_vol = memory.view(B, H, W, D, C).permute(0, 4, 3, 1, 2)  # [B, C, D, H, W]
-        
-        # 2. 创建归一化3D网格
-        # grid_sample expects coordinates in [-1, 1]
+
+        # 2. 创建归一化 3D 采样网格 [-1, 1]
+        # grid_sample 的坐标顺序为 (x, y, z)，对应 (W, H, D)
         zs = torch.linspace(-1, 1, D, device=device)
         ys = torch.linspace(-1, 1, H, device=device)
         xs = torch.linspace(-1, 1, W, device=device)
-        # Meshgrid: indexing='ij' -> (D, H, W) order
         grid_d, grid_h, grid_w = torch.meshgrid(zs, ys, xs, indexing='ij')  # [D, H, W]
-        
-        # 齐次坐标 [D, H, W, 4]
-        # grid_sample expects last dim to be (x, y, z)
-        # Here x=W, y=H, z=D
         ones = torch.ones_like(grid_d)
-        grid_homo = torch.stack([grid_w, grid_h, grid_d, ones], dim=-1)
-        grid_homo = grid_homo.unsqueeze(0).expand(B, -1, -1, -1, -1)  # [B, D, H, W, 4]
-        
-        # 3. 逆变换 (在当前帧位置找历史帧内容)
-        # T_{t-1 -> t} maps p_{t-1} to p_t.
-        # We want to sample at p_t (grid locations), so we need to look up source location p_{t-1}.
-        # p_{t-1} = T_{t -> t-1} * p_t = T_{t-1 -> t}^{-1} * p_t
+        grid_homo = torch.stack([grid_w, grid_h, grid_d, ones], dim=-1)      # [D, H, W, 4]
+        grid_homo = grid_homo.unsqueeze(0).expand(B, -1, -1, -1, -1)         # [B, D, H, W, 4]
+        grid_flat = grid_homo.view(B, -1, 4)                                  # [B, D*H*W, 4]
+
+        # 3. 归一化坐标 -> 世界米坐标
+        # ego_motion 的平移单位是米，必须在同一坐标系下做矩阵乘法
+        grid_flat_world = grid_flat * scale + offset  # [-1,1] -> 米
+
+        # 4. 逆变换：在当前帧坐标下，找上一帧的对应位置
+        # ego_motion: T_{t-1->t}，即上一帧 -> 当前帧
+        # 要反查上一帧位置：p_{t-1} = T_inv * p_t
         T_inv = torch.inverse(ego_motion)  # [B, 4, 4]
-        
-        # 4. 应用变换
-        grid_flat = grid_homo.view(B, -1, 4)  # [B, D*H*W, 4]
-        # [B, N, 4] x [B, 4, 4]^T = [B, N, 4]
-        grid_warped = torch.bmm(grid_flat, T_inv.transpose(1, 2))  # [B, D*H*W, 4]
-        
-        # Extract (x, y, z)
-        grid_warped = grid_warped[..., :3].view(B, D, H, W, 3)  # [B, D, H, W, 3]
-        
-        # 5. 3D grid_sample
-        # Check for normalized range? grid_sample assumes [-1, 1].
-        # Our grid was [-1, 1]. The transformation T_inv is in world coordinates (meters)?
-        # Or grid coordinates?
-        # If ego_motion is in meters (real extrinsics), we cannot directly multiply with [-1, 1] grid.
-        # We implicitly assumed ego_motion is scaled to grid space or we are ignoring scale for now.
-        # Given "Minimal Repair" context, we assume the user accepts this logic or 
-        # ego_motion is passed appropriately scaled. 
-        # (Correct way: Grid[-1,1] -> Meter -> Transform -> Meter -> Grid[-1,1])
-        # For now we implement the logic as provided by user plan.
-        
+        grid_warped_world = torch.bmm(grid_flat_world, T_inv.transpose(1, 2))  # [B, D*H*W, 4]
+
+        # 5. 世界米坐标 -> 归一化坐标（供 grid_sample 使用）
+        grid_warped_norm = (grid_warped_world - offset) / scale                # 米 -> [-1,1]
+        grid_warped = grid_warped_norm[..., :3].view(B, D, H, W, 3)           # [B, D, H, W, 3]
+
+        # 6. 3D 采样
         aligned_vol = F.grid_sample(
             mem_vol, grid_warped,
             mode='bilinear', padding_mode='zeros', align_corners=True
         )  # [B, C, D, H, W]
-        
-        # 6. 转回原格式 [B, Q, C]
-        # [B, C, D, H, W] -> [B, D, H, W, C] -> [B, H, W, D, C] (Wait, we need to match original order)
-        # Original: view(B, H, W, D, C)
-        # aligned_vol is [B, C, D, H, W] (Channels first)
-        # We want [B, H, W, D, C]
-        # permute(0, 3, 4, 2, 1) -> [B, H, W, D, C]
+
+        # 7. 还原为 [B, Q, C]
+        # [B, C, D, H, W] -> permute(0,3,4,2,1) -> [B, H, W, D, C] -> reshape -> [B, Q, C]
         aligned = aligned_vol.permute(0, 3, 4, 2, 1).reshape(B, Q, C)
-        
+
         return aligned
 
     def _forward_impl(self, current, memory, ego_motion=None, spatial_shape=None):
