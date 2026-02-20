@@ -2,8 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from position_encoding import SineCosinePositionEncoding3D
-from deformable_attention import DeformableDecoderLayer
+try:
+    from .position_encoding import SineCosinePositionEncoding3D
+    from .deformable_attention import DeformableDecoderLayer
+except (ImportError, ValueError):
+    from position_encoding import SineCosinePositionEncoding3D
+    from deformable_attention import DeformableDecoderLayer
 
 class OccupancyDecoder(nn.Module):
     def __init__(self, config):

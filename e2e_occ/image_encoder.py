@@ -2,7 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from position_encoding import RayDirectionEncoding
+try:
+    # 优先相对导入（作为包使用时）
+    from .position_encoding import RayDirectionEncoding
+except (ImportError, ValueError):
+    # 回退到绝对导入（作为独立脚本运行时）
+    from position_encoding import RayDirectionEncoding
 
 class WindowAttention(nn.Module):
     def __init__(self, dim, num_heads, window_size=7):
