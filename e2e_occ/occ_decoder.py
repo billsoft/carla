@@ -33,7 +33,7 @@ class OccupancyDecoder(nn.Module):
             DeformableDecoderLayer(
                 config.embed_dim, config.num_heads, config.num_cameras,
                 config.num_sample_points, dropout=config.dropout,
-                use_self_attn=False # Disable self-attn for fine queries to save memory (Too heavy for 160k)
+                use_self_attn=config.use_fine_self_attention # Controlled by config (default False, 102K queries 开启会 OOM)
             ) for _ in range(config.decoder_layers)
         ])
         
@@ -47,7 +47,8 @@ class OccupancyDecoder(nn.Module):
                 dim=config.embed_dim,
                 num_heads=config.num_heads,
                 dropout=config.dropout,
-                use_checkpoint=True
+                use_checkpoint=True,
+                config=config
             )
 
         # Fine Stage Spatial Consistency (Option B: Spatial Conv)

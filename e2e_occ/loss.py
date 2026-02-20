@@ -27,9 +27,17 @@ class OccupancyLoss(nn.Module):
         B, C, X, Y, Z = pred.shape
         prob = F.softmax(pred, dim=1)  # [B, C, X, Y, Z]
 
-        # 展平 batch 和空间维度：[B*X*Y*Z]
+        # 展平 batch 和空间维度
         prob_flat = prob.permute(1, 0, 2, 3, 4).reshape(C, -1)  # [C, N]
         target_flat = target.reshape(-1)                          # [N]
+
+        # 过滤 ignore_index，与 forward 中的 CE 损失保持一致
+        valid_mask = (target_flat != self.ignore_index)
+        prob_flat = prob_flat[:, valid_mask]      # [C, N_valid]
+        target_flat = target_flat[valid_mask]     # [N_valid]
+
+        if target_flat.numel() == 0:
+            return torch.tensor(0.0, device=pred.device)
 
         loss_per_class = []
         for c in range(C):
@@ -56,13 +64,3 @@ class OccupancyLoss(nn.Module):
             jaccard[1:] = jaccard[1:] - jaccard[:-1]
         return jaccard
 
-class SceneFlowLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, pred_flow, target_flow, mask=None):
-        diff = (pred_flow - target_flow).abs()
-        if mask is not None:
-            diff = diff * mask.unsqueeze(1)
-            return diff.sum() / (mask.sum() * 3 + 1e-6)
-        return diff.mean()

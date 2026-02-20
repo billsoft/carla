@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from position_encoding import SineCosinePositionEncoding2D, RayDirectionEncoding
+from position_encoding import RayDirectionEncoding
 
 class WindowAttention(nn.Module):
     def __init__(self, dim, num_heads, window_size=7):
@@ -57,9 +57,6 @@ class ImageEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        # Removed redundant 2D Position Encoding (covered by Ray Encoding)
-        # self.pos_embed = SineCosinePositionEncoding2D(config.embed_dim)
-        
         if config.use_ray_encoding:
             self.ray_embed = RayDirectionEncoding(config.embed_dim, config.feat_size, config.num_cameras)
             
@@ -74,8 +71,6 @@ class ImageEncoder(nn.Module):
     
     def _process_single_camera(self, x, rays=None):
         x = x.squeeze(1)
-        # x = x + pos.unsqueeze(0)
-        
         if rays is not None:
             x = x + rays.squeeze(1)
             
@@ -85,11 +80,6 @@ class ImageEncoder(nn.Module):
 
     def forward(self, x, intrinsics=None, extrinsics=None):
         B, N, C, H, W = x.shape
-        
-        # pos = self.pos_embed(H, W, x.device) 
-        # if pos.dim() == 2:
-        #     pos = pos.view(H, W, C)
-            
         ray_feat = None
         if self.config.use_ray_encoding and intrinsics is not None:
             ray_feat = self.ray_embed(x, intrinsics, extrinsics)

@@ -100,8 +100,6 @@ class DeformableCrossAttention(nn.Module):
             locs = ref_cam.unsqueeze(2).unsqueeze(3) + off_cam
             locs_flat = locs.view(B, Q * self.num_heads * self.num_points, 1, 2)
             
-            v_cam_flat = v_cam.permute(0, 3, 4, 1, 2).reshape(B, C, H, W)
-            
             # Optimization: Loop over Heads
             sampled_list = []
             for h in range(self.num_heads):

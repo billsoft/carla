@@ -1,6 +1,7 @@
 import torch
 import sys
-sys.path.insert(0, '/home/claude/e2e_occ')
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import E2EOccConfig
 from e2e_occ_net import build_model
 from loss import OccupancyLoss

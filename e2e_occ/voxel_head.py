@@ -52,14 +52,17 @@ class VoxelHead(nn.Module):
         # 2. 低分辨率分类
         logits_small = self.cls_head(x)  # -> [B, 18, 80, 80, 16]
 
-        # 3. 两步上采样 + 可学习精化
-        # Step 1: 80x80x16 -> 200x200x32
-        logits_mid = F.interpolate(logits_small, size=(200, 200, 32), mode='trilinear', align_corners=False)
-        logits_mid = self.refine1(logits_mid) + logits_mid  # 残差，保留插值基础
+        # 3. 两步上采样 + 可学习精化（尺寸从 config.voxel_size 派生，修改 config 自动生效）
+        vx, vy, vz = self.config.voxel_size          # e.g. (400, 400, 32)
+        mid_size = (vx // 2, vy // 2, vz)            # e.g. (200, 200, 32)
 
-        # Step 2: 200x200x32 -> 400x400x32
-        logits_final = F.interpolate(logits_mid, size=(400, 400, 32), mode='trilinear', align_corners=False)
-        logits_final = logits_final + self.refine2(logits_final)  # 残差精化，学习细粒度边界
+        # Step 1: fine_size -> mid_size
+        logits_mid = F.interpolate(logits_small, size=mid_size, mode='trilinear', align_corners=False)
+        logits_mid = self.refine1(logits_mid) + logits_mid
+
+        # Step 2: mid_size -> voxel_size
+        logits_final = F.interpolate(logits_mid, size=(vx, vy, vz), mode='trilinear', align_corners=False)
+        logits_final = logits_final + self.refine2(logits_final)
 
         return logits_final
 

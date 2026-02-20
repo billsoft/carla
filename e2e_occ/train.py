@@ -184,21 +184,35 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     config = E2EOccConfig()
+    start_epoch = 0
+
+    # 如果有 resume 参数，则从 checkpoint 加载
+    if args.resume:
+        print(f"正在从 {args.resume} 恢复...")
+        ckpt = torch.load(args.resume, map_location=device)
+        
+        # 关键：从 checkpoint 加载 config 来构建模型
+        if 'config' in ckpt:
+            config = ckpt['config']
+            print("已从 Checkpoint 加载模型配置.")
+        else:
+            print("警告: Checkpoint 中未找到 'config'，将使用默认配置。这可能导致错误！")
+
+    # 使用正确的 config 构建模型、损失函数和优化器
     model = build_model(config).to(device)
-    print(f'Model params: {model.get_num_params() / 1e6:.2f}M')
-    
     criterion = OccupancyLoss(num_classes=config.num_classes)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
-    
-    start_epoch = 0
+
+    # 如果恢复，现在加载模型和优化器的状态
     if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         start_epoch = ckpt['epoch'] + 1
-        print(f'Resumed from epoch {start_epoch}')
+        print(f"成功从 epoch {start_epoch - 1} 恢复.")
+
+    print(f'模型已构建，参数量: {model.get_num_params() / 1e6:.2f}M')
         
     train_loader = get_dataloader(args.data_root, 'train', args.batch_size, args.num_workers, config)
     val_loader = get_dataloader(args.data_root, 'val', args.batch_size, args.num_workers, config)
@@ -224,6 +238,7 @@ def main():
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'loss': val_loss,
+                'config': config,  # 保存 config 对象
             }, os.path.join(args.output_dir, 'best_model.pth'))
             print(f'Saved best model at epoch {epoch}', flush=True)
 

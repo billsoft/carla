@@ -1,25 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Tuple, Optional, Dict, List
-
-class SineCosinePositionEncoding2D(nn.Module):
-    def __init__(self, dim, temperature=10000):
-        super().__init__()
-        self.dim = dim
-        self.temperature = temperature
-    
-    def forward(self, h, w, device):
-        y_pos = torch.arange(h, device=device).float().unsqueeze(1).repeat(1, w)
-        x_pos = torch.arange(w, device=device).float().unsqueeze(0).repeat(h, 1)
-        dim_t = torch.arange(self.dim // 4, device=device).float()
-        dim_t = self.temperature ** (2 * (dim_t // 2) / (self.dim // 4))
-        pos_x = x_pos.unsqueeze(-1) / dim_t
-        pos_y = y_pos.unsqueeze(-1) / dim_t
-        pos_x = torch.stack([pos_x.sin(), pos_x.cos()], dim=-1).flatten(-2)
-        pos_y = torch.stack([pos_y.sin(), pos_y.cos()], dim=-1).flatten(-2)
-        return torch.cat([pos_x, pos_y], dim=-1)
+from typing import Tuple
 
 class SineCosinePositionEncoding3D(nn.Module):
     def __init__(self, dim, temperature=10000):
@@ -47,14 +29,6 @@ class SineCosinePositionEncoding3D(nn.Module):
         if pe.shape[-1] < self.dim:
             pe = F.pad(pe, (0, self.dim - pe.shape[-1]))
         return pe.view(-1, self.dim)
-
-class LearnedCameraEmbedding(nn.Module):
-    def __init__(self, num_cameras, dim):
-        super().__init__()
-        self.embed = nn.Embedding(num_cameras, dim)
-    
-    def forward(self, camera_ids):
-        return self.embed(camera_ids)
 
 class RayDirectionEncoding(nn.Module):
     """

@@ -73,10 +73,11 @@ class GRUGate(nn.Module):
         return (1 - z) * memory + z * h_candidate
 
 class TemporalFusionModule(nn.Module):
-    def __init__(self, dim, num_heads=8, dropout=0.1, use_checkpoint=True):
+    def __init__(self, dim, num_heads=8, dropout=0.1, use_checkpoint=True, config=None):
         super().__init__()
         self.dim = dim
         self.use_checkpoint = use_checkpoint
+        self.config = config
         
         # Attention & Gate
         self.temporal_attn = EfficientTemporalAttention(dim, num_heads, dropout)
@@ -110,11 +111,14 @@ class TemporalFusionModule(nn.Module):
         H, W, D = spatial_shape
         device = memory.device
 
-        # 体素空间的真实范围（与 E2EOccConfig.voxel_range 保持一致）
-        # X: [-40, 40], Y: [-40, 40], Z: [-1, 5.4]
-        x_range = (-40.0, 40.0)
-        y_range = (-40.0, 40.0)
-        z_range = (-1.0, 5.4)
+        # 体素空间的真实范围，从 config.voxel_range 读取
+        if self.config is not None:
+            xmin, ymin, zmin, xmax, ymax, zmax = self.config.voxel_range
+        else:
+            xmin, ymin, zmin, xmax, ymax, zmax = -40.0, -40.0, -1.0, 40.0, 40.0, 5.4
+        x_range = (xmin, xmax)
+        y_range = (ymin, ymax)
+        z_range = (zmin, zmax)
 
         # 坐标系转换用的 scale 和 offset（4D 齐次坐标，w 分量保持 1）
         scale = torch.tensor([

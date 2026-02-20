@@ -1,0 +1,2202 @@
+================================================================================
+代码摘要 - e2e_occ
+================================================================================
+
+统计信息:
+  文件数: 17
+  总行数: 2100
+
+================================================================================
+文件结构 (已忽略 .md)
+================================================================================
+
+e2e_occ/
+├── __init__.py
+├── config.py
+├── dataset.py
+├── deformable_attention.py
+├── e2e_occ_net.py
+├── image_encoder.py
+├── inference.py
+├── loss.py
+├── occ_decoder.py
+├── position_encoding.py
+├── profile_network.py
+├── raw_embed.py
+├── temporal_fusion.py
+├── test.py
+├── train.py
+├── verify_network.py
+└── voxel_head.py
+
+================================================================================
+文件内容
+================================================================================
+
+--------------------------------------------------------------------------------
+文件: __init__.py (7 行)
+--------------------------------------------------------------------------------
+from .config import E2EOccConfig
+from .e2e_occ_net import E2EOccNet, build_model
+from .loss import OccupancyLoss
+from .dataset import OccupancyDataset, get_dataloader
+
+__all__ = ['E2EOccConfig', 'E2EOccNet', 'build_model', 'OccupancyLoss', 'OccupancyDataset', 'get_dataloader']
+
+
+--------------------------------------------------------------------------------
+文件: config.py (61 行)
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import Tuple
+
+@dataclass
+class E2EOccConfig:
+    """
+    端到端占用网络(End-to-End Occupancy)配置
+    """
+    num_cameras: int = 8                    # 相机数量
+    image_size: Tuple[int, int] = (960, 1280) # 图像尺寸 (高, 宽)
+    raw_channels: int = 1                   # 原始图像通道数 (例如, 1表示灰度图)
+    
+    # --- 模型容量与性能平衡配置 (目标显存占用: 18-20GB) ---
+    embed_dim: int = 256                    # Transformer的嵌入维度 (从 384 降为 256 以优化性能)
+    num_heads: int = 8                      # 多头注意力机制的头数
+    encoder_layers: int = 2                 # Transformer编码器层数 (从 4 降为 2 以提高效率)
+    decoder_layers: int = 2                 # Transformer解码器层数 (从 3 降为 2)
+    
+    # --- 分辨率优化配置 ---
+    coarse_size: Tuple[int, int, int] = (25, 25, 8)    # 粗查询网格尺寸 (长, 宽, 高), 将查询点从20K减少到5K, 修复自注意力机制中的内存溢出(OOM)问题
+    fine_size: Tuple[int, int, int] = (80, 80, 16)     # 精细查询网格尺寸 (长, 宽, 高), 对应102.4K个查询点
+    voxel_size: Tuple[int, int, int] = (400, 400, 32)  # 体素尺寸
+    
+    # --- 模型通用超参数 ---
+    num_classes: int = 18                   # 语义分割的类别数量
+    num_sample_points: int = 4              # 可变形注意力中的采样点数
+    dropout: float = 0.1                    # Dropout比率, 用于防止过拟合
+    
+    # --- 功能开关 ---
+    use_ray_encoding: bool = True           # 是否使用光线位置编码
+    use_self_attention: bool = True         # 粗查询阶段是否使用自注意力机制
+    use_fine_self_attention: bool = False   # 精细查询阶段是否使用自注意力机制 (102K queries，默认关闭防止 OOM)
+    
+    # --- 时序融合设置 ---
+    use_temporal: bool = True               # 是否启用时序融合
+    use_ego_motion: bool = True             # 是否启用自车运动补偿对齐
+    temporal_frames: int = 2                # 用于时序融合的帧数 (从 4 降为 2 以减少内存使用)
+    memory_dim: int = 256                   # 记忆模块的维度, 应与 embed_dim 保持一致
+    
+    # --- 几何与体素定义 ---
+    voxel_range: Tuple[float, ...] = (-40.0, -40.0, -1.0, 40.0, 40.0, 5.4) # 感知范围/体素范围 (xmin, ymin, zmin, xmax, ymax, zmax)，单位为米
+    voxel_resolution: float = 0.2           # 体素分辨率, 每个体素的大小 (米)
+    
+    @property
+    def feat_size(self) -> Tuple[int, int]:
+        """
+        计算并返回由图像主干网络输出的特征图尺寸 (高, 宽)。
+        通常是输入图像尺寸除以主干网络的步长 (这里是16)。
+        """
+        return (self.image_size[0] // 16, self.image_size[1] // 16)
+    
+    @property
+    def num_coarse_queries(self) -> int:
+        """计算并返回粗查询的总数。"""
+        return self.coarse_size[0] * self.coarse_size[1] * self.coarse_size[2]
+    
+    @property
+    def num_fine_queries(self) -> int:
+        """计算并返回精细查询的总数。"""
+        return self.fine_size[0] * self.fine_size[1] * self.fine_size[2]
+
+
+--------------------------------------------------------------------------------
+文件: dataset.py (254 行)
+--------------------------------------------------------------------------------
+import torch
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import os
+import json
+import rawpy
+
+
+class OccupancyDataset(Dataset):
+    def __init__(self, data_root, split='train', config=None):
+        self.data_root = data_root
+        self.split = split
+        self.config = config
+        self.num_cameras = config.num_cameras if config else 8
+        self.image_size = config.image_size if config else (960, 1280)
+        self.voxel_size = config.voxel_size if config else (400, 400, 32)
+
+        # Temporal settings
+        self.sequence_length = 1
+        if config and hasattr(config, 'use_temporal') and config.use_temporal:
+            self.sequence_length = getattr(config, 'temporal_frames', 1)
+
+        self.samples = self._load_samples()
+
+        # 路径探测：按优先级尝试多种数据来源
+        # 优先级 1：camera_params/{sample_id}.npz（dense_occupancy_collection 格式，含绝对 extrinsics）
+        self._camera_params_dir = os.path.join(data_root, 'camera_params')
+        self._has_per_frame_params = os.path.isdir(self._camera_params_dir)
+
+        # 优先级 2：ego_pose/{sample_id}.npy（occnetv3_data_generator 格式，Vehicle→World 绝对位姿）
+        self._ego_pose_dir = os.path.join(data_root, 'ego_pose')
+        self._has_ego_pose = os.path.isdir(self._ego_pose_dir)
+
+        # 静态标定（calibration/intrinsics.json + extrinsics.json）
+        # 用于：①相机内参（恒定）②当逐帧绝对外参不可用时的退化备用
+        self._cached_intrinsics, self._cached_extrinsics = self._load_static_calibration()
+
+    # ------------------------------------------------------------------
+    # 样本列表加载
+    # ------------------------------------------------------------------
+
+    def _load_samples(self):
+        split_file = os.path.join(self.data_root, f'{self.split}.txt')
+        if os.path.exists(split_file):
+            with open(split_file, 'r') as f:
+                return [line.strip() for line in f.readlines()]
+        return []
+
+    # ------------------------------------------------------------------
+    # 静态标定（备用，相机安装参数，所有帧相同）
+    # ------------------------------------------------------------------
+
+    def _load_static_calibration(self):
+        """加载 calibration/ 目录下的静态相机安装参数（备用）。
+        注意：这些参数是固定的相机安装外参，不含车辆位姿，
+        不能用于跨帧 ego_motion 计算。
+        """
+        calib_dir = os.path.join(self.data_root, 'calibration')
+        int_path = os.path.join(calib_dir, 'intrinsics.json')
+        ext_path = os.path.join(calib_dir, 'extrinsics.json')
+
+        if not os.path.exists(int_path) or not os.path.exists(ext_path):
+            return self._get_default_camera_params()
+
+        with open(int_path, 'r') as f:
+            int_data = json.load(f)
+        with open(ext_path, 'r') as f:
+            ext_data = json.load(f)
+
+        K_list, E_list = [], []
+        for i in range(self.num_cameras):
+            cam_name = f'cam_{i}'
+            cfg_int = int_data[cam_name]
+            K = torch.eye(3)
+            K[0, 0] = cfg_int['fx']
+            K[1, 1] = cfg_int['fy']
+            K[0, 2] = cfg_int['cx']
+            K[1, 2] = cfg_int['cy']
+            K_list.append(K)
+
+            cfg_ext = ext_data[cam_name]
+            E = torch.eye(4)
+            E[:3, :3] = torch.tensor(cfg_ext['rotation_matrix'])
+            E[:3, 3] = torch.tensor(cfg_ext['translation'])
+            E_list.append(E)
+
+        return torch.stack(K_list), torch.stack(E_list)
+
+    def _get_default_camera_params(self):
+        intrinsics = torch.eye(3).unsqueeze(0).repeat(self.num_cameras, 1, 1)
+        intrinsics[:, 0, 0] = 800
+        intrinsics[:, 1, 1] = 800
+        intrinsics[:, 0, 2] = self.image_size[1] / 2
+        intrinsics[:, 1, 2] = self.image_size[0] / 2
+        extrinsics = torch.eye(4).unsqueeze(0).repeat(self.num_cameras, 1, 1)
+        return intrinsics, extrinsics
+
+    # ------------------------------------------------------------------
+    # 逐帧相机参数（含车辆绝对位姿，用于 ego_motion 计算）
+    # ------------------------------------------------------------------
+
+    def _load_per_frame_params(self, sample_id):
+        """加载逐帧相机参数 npz，包含当前帧车辆绝对位姿。
+
+        npz 格式（由数据采集器 dense_occupancy_collection 生成）：
+            intrinsics: [N, 3, 3]  相机内参
+            extrinsics: [N, 4, 4]  World→Camera 变换（含当前帧车辆绝对位姿）
+
+        相邻帧的 extrinsics 差值即为 ego_motion，这是跨帧时序对齐的关键。
+        """
+        npz_path = os.path.join(self._camera_params_dir, f'{sample_id}.npz')
+        if not os.path.exists(npz_path):
+            return None, None
+
+        data = np.load(npz_path, allow_pickle=False)
+        intrinsics = torch.from_numpy(data['intrinsics'].astype(np.float32))  # [N, 3, 3]
+        extrinsics = torch.from_numpy(data['extrinsics'].astype(np.float32))  # [N, 4, 4]
+        return intrinsics, extrinsics
+
+    # ------------------------------------------------------------------
+    # ego_pose 路径（occnetv3_data_generator 格式）
+    # ------------------------------------------------------------------
+
+    def _load_ego_pose_params(self, sample_id):
+        """从 ego_pose/{sample_id}.npy 和静态 calibration 计算逐帧绝对外参。
+
+        occnetv3_data_generator 格式：
+            ego_pose/{sample_id}.npy  → (4,4) Vehicle→World（每帧不同）
+            calibration/extrinsics.json → Camera→Vehicle（相机安装位姿，恒定）
+
+        组合公式：
+            T_cam_world = ego_pose @ T_cam_vehicle   (Camera→World，每帧不同)
+
+        相邻帧的 T_cam_world 差值即为真实 ego_motion，时序对齐才能正确工作。
+        """
+        ego_pose_path = os.path.join(self._ego_pose_dir, f'{sample_id}.npy')
+        if not os.path.exists(ego_pose_path):
+            return None, None
+
+        ego_pose = np.load(ego_pose_path).astype(np.float32)  # (4,4) Vehicle→World
+
+        # 内参直接用静态标定（内参恒定）
+        K = self._cached_intrinsics  # [N, 3, 3]
+
+        # 外参：ego_pose @ T_cam_vehicle → Camera→World（每帧不同）
+        E_list = []
+        for i in range(self.num_cameras):
+            T_rel = self._cached_extrinsics[i].numpy()  # (4,4) Camera→Vehicle（恒定）
+            T_abs = ego_pose @ T_rel                    # (4,4) Camera→World（逐帧变化）
+            E_list.append(torch.from_numpy(T_abs))
+        E = torch.stack(E_list)  # [N, 4, 4]
+
+        return K, E
+
+    def _get_frame_params(self, sample_id):
+        """获取帧级相机参数（含当前帧车辆绝对位姿的外参）。
+
+        优先级：
+          1. camera_params/{sample_id}.npz（dense_occupancy_collection 格式）
+          2. ego_pose/{sample_id}.npy + calibration/（occnetv3_data_generator 格式）
+          3. 静态 calibration 退化（时序对齐失效，但不崩溃）
+        """
+        # 优先级 1
+        if self._has_per_frame_params:
+            K, E = self._load_per_frame_params(sample_id)
+            if K is not None:
+                return K, E
+        # 优先级 2
+        if self._has_ego_pose:
+            K, E = self._load_ego_pose_params(sample_id)
+            if K is not None:
+                return K, E
+        # 优先级 3（退化：时序对齐失效，记录警告）
+        return self._cached_intrinsics, self._cached_extrinsics
+
+    # ------------------------------------------------------------------
+    # 图像加载
+    # ------------------------------------------------------------------
+
+    def _load_dng_image(self, dng_path):
+        try:
+            with rawpy.imread(dng_path) as raw:
+                img = raw.raw_image_visible.astype(np.float32)
+                img = img / 4095.0  # 12-bit normalize to [0, 1]
+                img = img[np.newaxis, :, :]  # [1, H, W]
+                return torch.from_numpy(img)
+        except Exception as e:
+            print(f"Error loading DNG {dng_path}: {e}")
+            return torch.zeros(1, *self.image_size)
+
+    # ------------------------------------------------------------------
+    # Dataset 接口
+    # ------------------------------------------------------------------
+
+    def __len__(self):
+        if self.sequence_length > 1:
+            return max(0, len(self.samples) - self.sequence_length + 1)
+        return len(self.samples)
+
+    def _load_single_frame(self, idx):
+        sample_id = self.samples[idx]
+
+        # 1. Load Images [N, 1, H, W]
+        images = []
+        for i in range(self.num_cameras):
+            dng_path = os.path.join(self.data_root, 'images', sample_id, f'cam_{i}.dng')
+            if os.path.exists(dng_path):
+                img = self._load_dng_image(dng_path)
+            else:
+                img = torch.zeros(1, *self.image_size)
+            images.append(img)
+        images = torch.stack(images, dim=0).float()  # [N, 1, H, W]
+
+        # 2. Load Voxels [X, Y, Z]
+        occ_path = os.path.join(self.data_root, 'occupancy', f'{sample_id}.npy')
+        if os.path.exists(occ_path):
+            voxels = torch.from_numpy(np.load(occ_path)).long()
+        else:
+            voxels = torch.zeros(self.voxel_size, dtype=torch.long)
+
+        # 3. 相机参数：优先逐帧 npz（含绝对位姿），否则使用静态标定
+        intrinsics, extrinsics = self._get_frame_params(sample_id)
+
+        return {
+            'images': images,           # [N, 1, H, W]
+            'voxels': voxels,           # [X, Y, Z]
+            'intrinsics': intrinsics,   # [N, 3, 3]
+            'extrinsics': extrinsics,   # [N, 4, 4]，逐帧不同（含绝对位姿）
+        }
+
+    def __getitem__(self, idx):
+        if self.sequence_length == 1:
+            return self._load_single_frame(idx)
+
+        frames = [self._load_single_frame(idx + t) for t in range(self.sequence_length)]
+
+        # intrinsics 假定相机内参恒定（只取第 0 帧）
+        # extrinsics 每帧不同（含车辆绝对位姿），[T, N, 4, 4] 用于 ego_motion 计算
+        return {
+            'images': torch.stack([f['images'] for f in frames]),         # [T, N, C, H, W]
+            'voxels': torch.stack([f['voxels'] for f in frames]),         # [T, X, Y, Z]
+            'intrinsics': frames[0]['intrinsics'],                        # [N, 3, 3]
+            'extrinsics': torch.stack([f['extrinsics'] for f in frames]), # [T, N, 4, 4]
+        }
+
+
+def get_dataloader(data_root, split='train', batch_size=1, num_workers=4, config=None):
+    dataset = OccupancyDataset(data_root, split, config)
+    shuffle = split == 'train'
+    return DataLoader(
+        dataset, batch_size=batch_size, shuffle=shuffle,
+        num_workers=num_workers, pin_memory=True, drop_last=shuffle
+    )
+
+
+--------------------------------------------------------------------------------
+文件: deformable_attention.py (160 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DeformableCrossAttention(nn.Module):
+    def __init__(self, dim, num_heads, num_cameras, num_points=1, dropout=0.1):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.num_cameras = num_cameras
+        self.num_points = num_points
+        self.head_dim = dim // num_heads
+        
+        self.sampling_offsets = nn.Linear(dim, num_cameras * num_heads * num_points * 2)
+        self.attention_weights = nn.Linear(dim, num_cameras * num_heads * num_points)
+        self.value_proj = nn.Linear(dim, dim)
+        self.output_proj = nn.Linear(dim, dim)
+        self.dropout = nn.Dropout(dropout)
+        self._init_weights()
+    
+    def _init_weights(self):
+        nn.init.constant_(self.sampling_offsets.weight, 0.0)
+        nn.init.constant_(self.sampling_offsets.bias, 0.0)
+        nn.init.xavier_uniform_(self.attention_weights.weight)
+        nn.init.constant_(self.attention_weights.bias, 0.0)
+    
+    def get_reference_points(self, query_coords, intrinsics, extrinsics, H, W):
+        """
+        Project 3D query coordinates to 2D image reference points.
+        query_coords: [B, Q, 3] in [0, 1]
+        """
+        B, Q, _ = query_coords.shape
+        N = self.num_cameras
+        
+        # Map [0,1] to World Coords [-40, 40] ...
+        real_x = query_coords[..., 0] * 80.0 - 40.0
+        real_y = query_coords[..., 1] * 80.0 - 40.0
+        real_z = query_coords[..., 2] * 6.4 - 1.0
+        world_points = torch.stack([real_x, real_y, real_z, torch.ones_like(real_x)], dim=-1) # [B, Q, 4]
+        
+        # Expand for cameras
+        world_points = world_points.unsqueeze(1).expand(-1, N, -1, -1) # [B, N, Q, 4]
+        
+        # World to Camera
+        inv_extrinsics = torch.inverse(extrinsics) # [B, N, 4, 4]
+        cam_points = torch.matmul(inv_extrinsics.unsqueeze(2), world_points.unsqueeze(-1)).squeeze(-1)
+        
+        # Camera to Image
+        cam_points_3d = cam_points[..., :3] # [B, N, Q, 3]
+        img_points_h = torch.matmul(intrinsics.unsqueeze(2), cam_points_3d.unsqueeze(-1)).squeeze(-1)
+        
+        # Normalize
+        depth = img_points_h[..., 2] + 1e-6
+        u = img_points_h[..., 0] / depth
+        v = img_points_h[..., 1] / depth
+        
+        # Normalize to [-1, 1]
+        u_norm = 2.0 * u / (W - 1) - 1.0
+        v_norm = 2.0 * v / (H - 1) - 1.0
+        
+        ref_points = torch.stack([u_norm, v_norm], dim=-1) # [B, N, Q, 2]
+        
+        return ref_points
+
+    def forward(self, query, query_coords, image_feats, intrinsics=None, extrinsics=None):
+        """
+        Serial Camera Loop Implementation for Memory Efficiency
+        """
+        B, Q, C = query.shape
+        _, N, _, H, W = image_feats.shape
+        
+        # 1. Get Reference Points
+        if intrinsics is not None and extrinsics is not None:
+            reference_points = self.get_reference_points(query_coords, intrinsics, extrinsics, H, W)
+        else:
+            reference_points = torch.zeros(B, N, Q, 2, device=query.device)
+            
+        # 2. Predict Offsets & Weights
+        offsets = self.sampling_offsets(query) 
+        offsets = offsets.view(B, Q, N, self.num_heads, self.num_points, 2)
+        offsets = offsets.tanh() * 0.5 
+        
+        attn_weights = self.attention_weights(query)
+        attn_weights = attn_weights.view(B, Q, N, self.num_heads, self.num_points)
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        
+        # 3. Project Values
+        value_proj = self.value_proj(image_feats.permute(0, 1, 3, 4, 2)) 
+        value_proj = value_proj.view(B, N, H, W, self.num_heads, self.head_dim)
+        
+        # 4. Serial Sampling Loop
+        output = torch.zeros(B, Q, self.num_heads, self.head_dim, device=query.device)
+        
+        for cam in range(N):
+            ref_cam = reference_points[:, cam] 
+            off_cam = offsets[:, :, cam]
+            w_cam = attn_weights[:, :, cam]
+            v_cam = value_proj[:, cam]
+            
+            locs = ref_cam.unsqueeze(2).unsqueeze(3) + off_cam
+            locs_flat = locs.view(B, Q * self.num_heads * self.num_points, 1, 2)
+            
+            v_cam_flat = v_cam.permute(0, 3, 4, 1, 2).reshape(B, C, H, W)
+            
+            # Optimization: Loop over Heads
+            sampled_list = []
+            for h in range(self.num_heads):
+                v_h = v_cam[..., h, :].permute(0, 3, 1, 2) 
+                
+                locs_h = locs[:, :, h, :]
+                locs_h = locs_h.contiguous().view(B, Q * self.num_points, 1, 2)
+                
+                s_h = F.grid_sample(v_h, locs_h, mode='bilinear', align_corners=False, padding_mode='zeros')
+                s_h = s_h.view(B, self.head_dim, Q, self.num_points).permute(0, 2, 3, 1) 
+                
+                w_h = w_cam[:, :, h, :].unsqueeze(-1)
+                
+                weighted = (s_h * w_h).sum(dim=2)
+                sampled_list.append(weighted)
+            
+            output_cam = torch.stack(sampled_list, dim=2)
+            output = output + output_cam
+            
+        output = output.view(B, Q, C)
+        output = self.output_proj(output)
+        
+        return self.dropout(output)
+
+class DeformableDecoderLayer(nn.Module):
+    def __init__(self, dim, num_heads, num_cameras, num_points=1, mlp_ratio=4.0, dropout=0.1, use_self_attn=True):
+        super().__init__()
+        
+        self.use_self_attn = use_self_attn
+        if self.use_self_attn:
+            self.self_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+            self.norm_self = nn.LayerNorm(dim)
+
+        self.cross_attn = DeformableCrossAttention(dim, num_heads, num_cameras, num_points, dropout)
+        self.norm_cross = nn.LayerNorm(dim)
+        self.norm_mlp = nn.LayerNorm(dim)
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, int(dim * mlp_ratio)),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(dim * mlp_ratio), dim),
+            nn.Dropout(dropout),
+        )
+    
+    def forward(self, query, query_coords, image_feats, intrinsics=None, extrinsics=None):
+        if self.use_self_attn:
+            q = self.norm_self(query)
+            query = query + self.self_attn(q, q, q)[0]
+
+        # Cross-Attention
+        query = query + self.cross_attn(self.norm_cross(query), query_coords, image_feats, intrinsics, extrinsics)
+
+        query = query + self.mlp(self.norm_mlp(query))
+        return query
+
+
+--------------------------------------------------------------------------------
+文件: e2e_occ_net.py (56 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+
+try:
+    # 作为包导入时使用相对导入
+    from .config import E2EOccConfig
+    from .raw_embed import MultiCameraPatchEmbed
+    from .image_encoder import ImageEncoder
+    from .occ_decoder import OccupancyDecoder
+    from .voxel_head import VoxelHead
+except ImportError:
+    # 直接作为脚本运行时的回退
+    from config import E2EOccConfig
+    from raw_embed import MultiCameraPatchEmbed
+    from image_encoder import ImageEncoder
+    from occ_decoder import OccupancyDecoder
+    from voxel_head import VoxelHead
+
+class E2EOccNet(nn.Module):
+    def __init__(self, config: E2EOccConfig = None):
+        super().__init__()
+        self.config = config or E2EOccConfig()
+        self.patch_embed = MultiCameraPatchEmbed(self.config)
+        self.encoder = ImageEncoder(self.config)
+        self.decoder = OccupancyDecoder(self.config)
+        self.head = VoxelHead(self.config)
+        self._init_weights()
+    
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.Conv2d, nn.Conv3d, nn.ConvTranspose3d)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, images, intrinsics=None, extrinsics=None, memory=None, ego_motion=None):
+        feats = self.patch_embed(images)
+        feats = self.encoder(feats, intrinsics, extrinsics)
+        voxel_feats, new_memory = self.decoder(feats, intrinsics, extrinsics, memory, ego_motion)
+        logits = self.head(voxel_feats)
+        return {
+            'semantic': logits,
+            'memory': new_memory
+        }
+    
+    def get_num_params(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+def build_model(config=None):
+    config = config or E2EOccConfig()
+    return E2EOccNet(config)
+
+
+--------------------------------------------------------------------------------
+文件: image_encoder.py (106 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+from position_encoding import RayDirectionEncoding
+
+class WindowAttention(nn.Module):
+    def __init__(self, dim, num_heads, window_size=7):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.scale = (dim // num_heads) ** -0.5
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
+    
+    def forward(self, x):
+        B, H, W, C = x.shape
+        ws = self.window_size
+        pad_h = (ws - H % ws) % ws
+        pad_w = (ws - W % ws) % ws
+        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
+        Hp, Wp = H + pad_h, W + pad_w
+        x = x.view(B, Hp // ws, ws, Wp // ws, ws, C)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(-1, ws * ws, C)
+        qkv = self.qkv(x).reshape(-1, ws * ws, 3, self.num_heads, C // self.num_heads)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        x = (attn @ v).transpose(1, 2).reshape(-1, ws * ws, C)
+        x = self.proj(x)
+        x = x.view(B, Hp // ws, Wp // ws, ws, ws, C)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B, Hp, Wp, C)
+        return x[:, :H, :W, :]
+
+class EncoderBlock(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4.0, window_size=7, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = WindowAttention(dim, num_heads, window_size)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, int(dim * mlp_ratio)),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(dim * mlp_ratio), dim),
+            nn.Dropout(dropout),
+        )
+    
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+class ImageEncoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        if config.use_ray_encoding:
+            self.ray_embed = RayDirectionEncoding(config.embed_dim, config.feat_size, config.num_cameras)
+            
+        self.blocks = nn.ModuleList([
+            EncoderBlock(config.embed_dim, config.num_heads, dropout=config.dropout)
+            for _ in range(config.encoder_layers)
+        ])
+        self.norm = nn.LayerNorm(config.embed_dim)
+        
+        # Disable checkpoint for Encoder as per plan
+        self.use_checkpoint = False
+    
+    def _process_single_camera(self, x, rays=None):
+        x = x.squeeze(1)
+        if rays is not None:
+            x = x + rays.squeeze(1)
+            
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+    def forward(self, x, intrinsics=None, extrinsics=None):
+        B, N, C, H, W = x.shape
+        ray_feat = None
+        if self.config.use_ray_encoding and intrinsics is not None:
+            ray_feat = self.ray_embed(x, intrinsics, extrinsics)
+            ray_feat = ray_feat.permute(0, 1, 3, 4, 2)
+            
+        x = x.permute(0, 1, 3, 4, 2)
+        
+        outs = []
+        for i in range(N):
+            x_cam = x[:, i:i+1] 
+            ray_cam = ray_feat[:, i:i+1] if ray_feat is not None else None
+            
+            if self.use_checkpoint and self.training:
+                out_cam = checkpoint(self._process_single_camera, x_cam, ray_cam, use_reentrant=False)
+            else:
+                out_cam = self._process_single_camera(x_cam, ray_cam)
+                
+            outs.append(out_cam)
+            
+        x = torch.stack(outs, dim=1)
+        x = self.norm(x)
+        x = x.permute(0, 1, 4, 2, 3)
+        return x
+
+
+--------------------------------------------------------------------------------
+文件: inference.py (228 行)
+--------------------------------------------------------------------------------
+import torch
+import numpy as np
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+from config import E2EOccConfig
+from e2e_occ_net import build_model
+from dataset import OccupancyDataset
+
+
+class OccInference:
+    def __init__(self, checkpoint_path, device='cuda'):
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        self.config = ckpt.get('config', E2EOccConfig())
+        self.model = build_model(self.config).to(self.device)
+        self.model.load_state_dict(ckpt['model'])
+        self.model.eval()
+        print(f'[Inference] Model loaded from {checkpoint_path}')
+        print(f'[Inference] Device: {self.device}')
+
+    @torch.no_grad()
+    def predict_batch(self, images, intrinsics, extrinsics):
+        """
+        推理单帧（非时序）
+        images:     [B, N, C, H, W]
+        intrinsics: [B, N, 3, 3]
+        extrinsics: [B, N, 4, 4]
+        returns:    [B, X, Y, Z] uint8 numpy
+        """
+        images = images.to(self.device)
+        intrinsics = intrinsics.to(self.device)
+        extrinsics = extrinsics.to(self.device)
+
+        with torch.amp.autocast('cuda', enabled=(self.device.type == 'cuda')):
+            outputs = self.model(images, intrinsics, extrinsics)
+
+        logits = outputs['semantic']           # [B, 18, 400, 400, 32]
+        pred = logits.argmax(dim=1)            # [B, 400, 400, 32]
+        return pred.cpu().numpy().astype(np.uint8)
+
+    def benchmark(self, num_runs=100, warmup=10):
+        dummy_img = torch.randn(1, self.config.num_cameras, 1, *self.config.image_size).to(self.device)
+        dummy_K   = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(1, self.config.num_cameras, 1, 1).to(self.device)
+        dummy_E   = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(1, self.config.num_cameras, 1, 1).to(self.device)
+
+        for _ in range(warmup):
+            with torch.no_grad():
+                self.model(dummy_img, dummy_K, dummy_E)
+
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        start = time.time()
+        for _ in range(num_runs):
+            with torch.no_grad():
+                self.model(dummy_img, dummy_K, dummy_E)
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+
+        elapsed = time.time() - start
+        fps = num_runs / elapsed
+        print(f'FPS: {fps:.2f}, Latency: {1000/fps:.2f}ms')
+        return fps
+
+
+def run_inference_on_dataset(checkpoint_path, data_root, output_dir, num_samples=100, device='cuda'):
+    """
+    对 dataset_10k_bak 格式的数据集进行推理，输出保存到 output_dir/occupancy/<sample_id>.npy
+    格式与原始数据集完全相同，可直接用 dataset_viewer_v2 查看。
+    """
+    engine = OccInference(checkpoint_path, device=device)
+    config = engine.config
+
+    # 使用单帧模式（不用时序，推理更简单）
+    config_infer = E2EOccConfig()
+    config_infer.use_temporal = False
+    config_infer.temporal_frames = 1
+
+    dataset = OccupancyDataset(data_root, split='train', config=config_infer)
+
+    # 同时也加载 val/test
+    all_samples = []
+    for split in ['train', 'val', 'test']:
+        txt = Path(data_root) / f'{split}.txt'
+        if txt.exists():
+            with open(txt) as f:
+                all_samples += [l.strip() for l in f if l.strip()]
+    # 去重
+    all_samples = list(dict.fromkeys(all_samples))
+
+    # 如果没有split文件，直接扫occupancy目录
+    if not all_samples:
+        occ_dir = Path(data_root) / 'occupancy'
+        all_samples = sorted([f.stem for f in occ_dir.glob('*.npy')])
+
+    total = min(num_samples, len(all_samples))
+    print(f'[Inference] Dataset: {data_root}')
+    print(f'[Inference] Total samples: {len(all_samples)}, running: {total}')
+
+    # 输出目录结构与原数据集一致（viewer直接能读）
+    out_occ_dir = Path(output_dir) / 'occupancy'
+    out_occ_dir.mkdir(parents=True, exist_ok=True)
+
+    # 同时写 train.txt 方便viewer加载
+    written_ids = []
+
+    for i, sample_id in enumerate(all_samples[:total]):
+        t0 = time.time()
+
+        # 加载图像
+        images = []
+        img_dir = Path(data_root) / 'images' / sample_id
+        for cam_i in range(config.num_cameras):
+            dng_path = img_dir / f'cam_{cam_i}.dng'
+            npy_path = img_dir / f'cam_{cam_i}.npy'
+
+            img = None
+            if dng_path.exists():
+                try:
+                    import rawpy
+                    with rawpy.imread(str(dng_path)) as raw:
+                        arr = raw.raw_image_visible.astype(np.float32)
+                        arr = arr / 4095.0
+                        img = torch.from_numpy(arr[np.newaxis])   # [1, H, W]
+                except Exception as e:
+                    print(f'  [warn] DNG load failed cam_{cam_i}: {e}')
+
+            if img is None and npy_path.exists():
+                arr = np.load(npy_path).astype(np.float32)
+                img = torch.from_numpy(arr)
+
+            if img is None:
+                img = torch.zeros(1, *config.image_size)
+
+            images.append(img)
+
+        images = torch.stack(images, dim=0).unsqueeze(0).float()  # [1, N, 1, H, W]
+
+        # 加载相机参数
+        intrinsics = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(1, config.num_cameras, 1, 1)
+        extrinsics = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(1, config.num_cameras, 1, 1)
+
+        # 优先加载 ego_pose + calibration
+        K_path = Path(data_root) / 'camera_params' / f'{sample_id}.npz'
+        ego_path = Path(data_root) / 'ego_pose' / f'{sample_id}.npy'
+
+        if K_path.exists():
+            d = np.load(K_path, allow_pickle=False)
+            intrinsics = torch.from_numpy(d['intrinsics'].astype(np.float32)).unsqueeze(0)
+            extrinsics = torch.from_numpy(d['extrinsics'].astype(np.float32)).unsqueeze(0)
+        elif ego_path.exists():
+            calib_K = Path(data_root) / 'calibration' / 'intrinsics.json'
+            calib_E = Path(data_root) / 'calibration' / 'extrinsics.json'
+            if calib_K.exists() and calib_E.exists():
+                import json
+                with open(calib_K) as f:
+                    kd = json.load(f)
+                with open(calib_E) as f:
+                    ed = json.load(f)
+                ego_pose = np.load(str(ego_path)).astype(np.float32)
+                K_list, E_list = [], []
+                for ci in range(config.num_cameras):
+                    ck = kd.get(f'cam_{ci}', {})
+                    K = np.eye(3, dtype=np.float32)
+                    K[0,0] = ck.get('fx', 800); K[1,1] = ck.get('fy', 800)
+                    K[0,2] = ck.get('cx', 640); K[1,2] = ck.get('cy', 480)
+                    K_list.append(K)
+                    ce = ed.get(f'cam_{ci}', {})
+                    R = np.array(ce.get('rotation_matrix', np.eye(3).tolist()), dtype=np.float32)
+                    t = np.array(ce.get('translation', [0,0,0]), dtype=np.float32)
+                    T_rel = np.eye(4, dtype=np.float32)
+                    T_rel[:3,:3] = R; T_rel[:3,3] = t
+                    T_abs = ego_pose @ T_rel
+                    E_list.append(T_abs)
+                intrinsics = torch.from_numpy(np.stack(K_list)).unsqueeze(0)
+                extrinsics = torch.from_numpy(np.stack(E_list)).unsqueeze(0)
+
+        # 推理
+        pred = engine.predict_batch(images, intrinsics, extrinsics)  # [1, 400, 400, 32]
+        pred_voxel = pred[0]  # [400, 400, 32]
+
+        # 保存（格式与数据集一致）
+        out_path = out_occ_dir / f'{sample_id}.npy'
+        np.save(str(out_path), pred_voxel)
+        written_ids.append(sample_id)
+
+        elapsed = time.time() - t0
+        non_empty = int(np.count_nonzero(pred_voxel))
+        print(f'[{i+1:4d}/{total}] {sample_id}  non_empty={non_empty:,}  {elapsed*1000:.0f}ms', flush=True)
+
+    # 写 train.txt 供 viewer 加载
+    with open(Path(output_dir) / 'train.txt', 'w') as f:
+        f.write('\n'.join(written_ids))
+
+    print(f'\n[Inference] Done. Results saved to: {output_dir}')
+    print(f'[Inference] Viewer command:')
+    print(f'  python d:/code/carla/dataset_viewer_v2/server.py --dataset {output_dir}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description='E2E Occupancy Inference')
+    parser.add_argument('--checkpoint', type=str, required=True, help='模型checkpoint路径')
+    parser.add_argument('--data_root',  type=str, default='d:/code/carla/dataset_10k_bak', help='数据集根目录')
+    parser.add_argument('--output',     type=str, default='d:/code/carla/inference_results', help='推理结果输出目录')
+    parser.add_argument('--num_samples',type=int, default=100, help='推理样本数量')
+    parser.add_argument('--device',     type=str, default='cuda', help='cuda 或 cpu')
+    parser.add_argument('--benchmark',  action='store_true', help='只跑性能测试')
+    args = parser.parse_args()
+
+    if args.benchmark:
+        engine = OccInference(args.checkpoint, args.device)
+        engine.benchmark()
+        return
+
+    run_inference_on_dataset(
+        checkpoint_path=args.checkpoint,
+        data_root=args.data_root,
+        output_dir=args.output,
+        num_samples=args.num_samples,
+        device=args.device,
+    )
+
+
+if __name__ == '__main__':
+    main()
+
+
+--------------------------------------------------------------------------------
+文件: loss.py (67 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class OccupancyLoss(nn.Module):
+    def __init__(self, num_classes=18, ignore_index=255, lovasz_weight=0.5):
+        super().__init__()
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+        self.lovasz_weight = lovasz_weight
+    
+    def forward(self, pred, target):
+        B, C, X, Y, Z = pred.shape
+        pred_flat = pred.permute(0, 2, 3, 4, 1).reshape(-1, C)
+        target_flat = target.reshape(-1)
+        valid_mask = target_flat != self.ignore_index
+        pred_valid = pred_flat[valid_mask]
+        target_valid = target_flat[valid_mask]
+        if pred_valid.numel() == 0:
+            return {'total': torch.tensor(0.0, device=pred.device), 'ce': torch.tensor(0.0, device=pred.device), 'lovasz': torch.tensor(0.0, device=pred.device)}
+        ce_loss = F.cross_entropy(pred_valid, target_valid)
+        lovasz_loss = self.lovasz_softmax(pred, target)
+        total_loss = ce_loss + self.lovasz_weight * lovasz_loss
+        return {'total': total_loss, 'ce': ce_loss, 'lovasz': lovasz_loss}
+    
+    def lovasz_softmax(self, pred, target):
+        B, C, X, Y, Z = pred.shape
+        prob = F.softmax(pred, dim=1)  # [B, C, X, Y, Z]
+
+        # 展平 batch 和空间维度
+        prob_flat = prob.permute(1, 0, 2, 3, 4).reshape(C, -1)  # [C, N]
+        target_flat = target.reshape(-1)                          # [N]
+
+        # 过滤 ignore_index，与 forward 中的 CE 损失保持一致
+        valid_mask = (target_flat != self.ignore_index)
+        prob_flat = prob_flat[:, valid_mask]      # [C, N_valid]
+        target_flat = target_flat[valid_mask]     # [N_valid]
+
+        if target_flat.numel() == 0:
+            return torch.tensor(0.0, device=pred.device)
+
+        loss_per_class = []
+        for c in range(C):
+            fg = (target_flat == c).float()  # [N]
+            if fg.sum() == 0:
+                continue
+            errors = (fg - prob_flat[c]).abs()  # [N]
+            errors_sorted, perm = torch.sort(errors, descending=True)
+            fg_sorted = fg[perm]
+            grad = self._lovasz_grad(fg_sorted)
+            loss_per_class.append((errors_sorted * grad).sum())
+
+        if len(loss_per_class) == 0:
+            return torch.tensor(0.0, device=pred.device)
+        return torch.stack(loss_per_class).mean()
+
+    def _lovasz_grad(self, gt_sorted):
+        n = len(gt_sorted)
+        gts = gt_sorted.sum()
+        intersection = gts - gt_sorted.cumsum(0)
+        union = gts + (1 - gt_sorted).cumsum(0)
+        jaccard = 1.0 - intersection / (union + 1e-6)
+        if n > 1:
+            jaccard[1:] = jaccard[1:] - jaccard[:-1]
+        return jaccard
+
+
+
+--------------------------------------------------------------------------------
+文件: occ_decoder.py (135 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+from position_encoding import SineCosinePositionEncoding3D
+from deformable_attention import DeformableDecoderLayer
+
+class OccupancyDecoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.coarse_query = nn.Parameter(torch.randn(1, config.num_coarse_queries, config.embed_dim) * 0.02)
+        self.pos_3d = SineCosinePositionEncoding3D(config.embed_dim)
+        
+        self.coarse_layers = nn.ModuleList([
+            DeformableDecoderLayer(
+                config.embed_dim, config.num_heads, config.num_cameras,
+                config.num_sample_points, dropout=config.dropout,
+                use_self_attn=config.use_self_attention # Use config switch
+            ) for _ in range(config.decoder_layers)
+        ])
+        
+        self.coarse_to_fine = nn.Sequential(
+            nn.LayerNorm(config.embed_dim),
+            nn.Linear(config.embed_dim, config.embed_dim * 2),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.embed_dim * 2, config.embed_dim),
+            nn.LayerNorm(config.embed_dim),
+        )
+        
+        self.fine_layers = nn.ModuleList([
+            DeformableDecoderLayer(
+                config.embed_dim, config.num_heads, config.num_cameras,
+                config.num_sample_points, dropout=config.dropout,
+                use_self_attn=config.use_fine_self_attention # Controlled by config (default False, 102K queries 开启会 OOM)
+            ) for _ in range(config.decoder_layers)
+        ])
+        
+        self.register_buffer('coarse_ref', self._create_reference_points(config.coarse_size))
+        self.register_buffer('fine_ref', self._create_reference_points(config.fine_size))
+        
+        # Temporal Fusion Module
+        if config.use_temporal:
+            from temporal_fusion import TemporalFusionModule
+            self.temporal_fusion = TemporalFusionModule(
+                dim=config.embed_dim,
+                num_heads=config.num_heads,
+                dropout=config.dropout,
+                use_checkpoint=True,
+                config=config
+            )
+
+        # Fine Stage Spatial Consistency (Option B: Spatial Conv)
+        self.fine_spatial_conv = nn.Sequential(
+            nn.Conv3d(config.embed_dim, config.embed_dim, kernel_size=3, padding=1, groups=config.embed_dim),
+            nn.BatchNorm3d(config.embed_dim),
+            nn.GELU(),
+        )
+
+        # Checkpoint Strategy
+        self.checkpoint_coarse = False
+        self.checkpoint_fine = True
+    
+    def _create_reference_points(self, size):
+        x = torch.linspace(0, 1, size[0])
+        y = torch.linspace(0, 1, size[1])
+        z = torch.linspace(0, 1, size[2])
+        grid_x, grid_y, grid_z = torch.meshgrid(x, y, z, indexing='ij')
+        ref = torch.stack([grid_x, grid_y, grid_z], dim=-1)
+        return ref.view(-1, 3)
+    
+    def forward(self, image_feats, intrinsics=None, extrinsics=None, memory=None, ego_motion=None):
+        B = image_feats.shape[0]
+        device = image_feats.device
+        cx, cy, cz = self.config.coarse_size
+        
+        # Coarse Stage
+        coarse_pos = self.pos_3d(cx, cy, cz, device)
+        query = self.coarse_query.expand(B, -1, -1) + coarse_pos.unsqueeze(0)
+        ref = self.coarse_ref.unsqueeze(0).expand(B, -1, -1)
+        
+        for layer in self.coarse_layers:
+            if self.checkpoint_coarse and self.training:
+                query = checkpoint(layer, query, ref, image_feats, intrinsics, extrinsics, use_reentrant=False)
+            else:
+                query = layer(query, ref, image_feats, intrinsics, extrinsics)
+            
+        coarse_feats = query.view(B, cx, cy, cz, -1).permute(0, 4, 1, 2, 3)
+        
+        # Temporal Fusion (BEV Space)
+        new_memory = None
+        if self.config.use_temporal and hasattr(self, 'temporal_fusion'):
+             # [B, C, X, Y, Z] -> [B, X*Y*Z, C]
+             coarse_flat = coarse_feats.permute(0, 2, 3, 4, 1).flatten(1, 3)
+             # Pass ego_motion and spatial shape for alignment
+             fused_flat, new_memory = self.temporal_fusion(
+                 coarse_flat, 
+                 memory, 
+                 ego_motion=ego_motion, 
+                 spatial_shape=(cx, cy, cz)
+             )
+             # Reshape back [B, Q, C] -> [B, X, Y, Z, C] -> [B, C, X, Y, Z]
+             coarse_feats = fused_flat.view(B, cx, cy, cz, self.config.embed_dim).permute(0, 4, 1, 2, 3)
+        
+        # Fine Stage Setup
+        fx, fy, fz = self.config.fine_size
+        fine_feats = F.interpolate(coarse_feats, size=(fx, fy, fz), mode='trilinear', align_corners=False)
+        fine_feats = fine_feats.permute(0, 2, 3, 4, 1).reshape(B, -1, self.config.embed_dim)
+        fine_feats = self.coarse_to_fine(fine_feats)
+        
+        fine_pos = self.pos_3d(fx, fy, fz, device)
+        query = fine_feats + fine_pos.unsqueeze(0)
+        ref = self.fine_ref.unsqueeze(0).expand(B, -1, -1)
+        
+        # Fine Layers with Checkpointing
+        for layer in self.fine_layers:
+            if self.checkpoint_fine and self.training:
+                query = checkpoint(layer, query, ref, image_feats, intrinsics, extrinsics, use_reentrant=False)
+            else:
+                query = layer(query, ref, image_feats, intrinsics, extrinsics)
+                
+        # Fine Stage Spatial Consistency
+        # query is [B, Q, C] -> [B, fx, fy, fz, C]
+        query_reshaped = query.view(B, fx, fy, fz, -1)
+        # Permute to [B, C, fx, fy, fz] for Conv3d
+        query_vol = query_reshaped.permute(0, 4, 1, 2, 3).contiguous()
+        # Apply Conv3d and Residual
+        query_vol_out = self.fine_spatial_conv(query_vol)
+        query_vol = query_vol + query_vol_out
+        # Permute back to [B, fx, fy, fz, C] for output
+        output = query_vol.permute(0, 2, 3, 4, 1)
+        
+        return output, new_memory
+
+
+--------------------------------------------------------------------------------
+文件: position_encoding.py (138 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple
+
+class SineCosinePositionEncoding3D(nn.Module):
+    def __init__(self, dim, temperature=10000):
+        super().__init__()
+        self.dim = dim
+        self.temperature = temperature
+    
+    def forward(self, x, y, z, device):
+        d = self.dim // 6
+        dim_t = torch.arange(d, device=device).float()
+        dim_t = self.temperature ** (2 * (dim_t // 2) / d)
+        xs = torch.arange(x, device=device).float()
+        ys = torch.arange(y, device=device).float()
+        zs = torch.arange(z, device=device).float()
+        pos_x = xs.view(-1, 1, 1, 1) / dim_t.view(1, 1, 1, -1)
+        pos_y = ys.view(1, -1, 1, 1) / dim_t.view(1, 1, 1, -1)
+        pos_z = zs.view(1, 1, -1, 1) / dim_t.view(1, 1, 1, -1)
+        px = torch.stack([pos_x.sin(), pos_x.cos()], -1).flatten(-2)
+        py = torch.stack([pos_y.sin(), pos_y.cos()], -1).flatten(-2)
+        pz = torch.stack([pos_z.sin(), pos_z.cos()], -1).flatten(-2)
+        px = px.expand(x, y, z, -1)
+        py = py.expand(x, y, z, -1)
+        pz = pz.expand(x, y, z, -1)
+        pe = torch.cat([px, py, pz], dim=-1)
+        if pe.shape[-1] < self.dim:
+            pe = F.pad(pe, (0, self.dim - pe.shape[-1]))
+        return pe.view(-1, self.dim)
+
+class RayDirectionEncoding(nn.Module):
+    """
+    射线方向编码 (Restored)
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        image_size: Tuple[int, int],
+        num_cameras: int = 8,
+        num_freqs: int = 10,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.image_size = image_size
+        self.num_freqs = num_freqs
+        self.num_cameras = num_cameras
+
+        # Input: 3 (x, y, z)
+        # Encoded: 3 + 3 * 2 * num_freqs
+        self.input_dim = 3 + 3 * 2 * num_freqs
+        
+        self.proj = nn.Sequential(
+            nn.Linear(self.input_dim, dim),
+            nn.LayerNorm(dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim, dim)
+        )
+    
+    def _sinusoidal_encoding(self, x: torch.Tensor) -> torch.Tensor:
+        freq_bands = 2.0 ** torch.linspace(0, self.num_freqs - 1, self.num_freqs, device=x.device)
+        x_expanded = x.unsqueeze(-1) * freq_bands
+        sin_x = torch.sin(x_expanded * torch.pi)
+        cos_x = torch.cos(x_expanded * torch.pi)
+        embeddings = torch.stack([sin_x, cos_x], dim=-1)
+        embeddings = embeddings.flatten(start_dim=-3)
+        return torch.cat([x, embeddings], dim=-1)
+
+    def get_rays_from_params(self, intrinsics, extrinsics, H, W):
+        """
+        intrinsics: [B, N, 3, 3]
+        extrinsics: [B, N, 4, 4]
+        
+        Updated to use equidistant projection model: theta = r / f
+        to match d:/code/carla/occ_network/models/position_encoding.py
+        """
+        B, N, _, _ = intrinsics.shape
+        device = intrinsics.device
+        
+        # 1. Pixel Coordinates
+        y, x = torch.meshgrid(
+            torch.linspace(0, H-1, H, device=device),
+            torch.linspace(0, W-1, W, device=device),
+            indexing='ij'
+        )
+        # Shift to center
+        cx = W / 2.0
+        cy = H / 2.0
+        dx = x - cx
+        dy = y - cy
+        
+        # 2. Radius in image plane
+        r = torch.sqrt(dx**2 + dy**2)
+        phi = torch.atan2(dy, dx)
+        
+        # 3. Equidistant Projection: theta = r / f
+        # We need focal length f. Intrinsics[0,0] is fx.
+        # Assuming fx approx fy approx f
+        # [B, N, 1, 1]
+        f = intrinsics[..., 0, 0].unsqueeze(-1).unsqueeze(-1) 
+        
+        theta = r.unsqueeze(0).unsqueeze(0) / f
+        
+        # 4. Spherical to Cartesian (Camera Frame)
+        # Z is forward, X right, Y down
+        # sin(theta) is the radial component
+        sin_theta = torch.sin(theta)
+        cam_z = torch.cos(theta)
+        cam_x = sin_theta * torch.cos(phi.unsqueeze(0).unsqueeze(0))
+        cam_y = sin_theta * torch.sin(phi.unsqueeze(0).unsqueeze(0))
+        
+        cam_dirs = torch.stack([cam_x, cam_y, cam_z], dim=-1) # [B, N, H, W, 3]
+        
+        # 5. Camera to World
+        # cam_dirs is [B, N, H, W, 3]
+        # R is [B, N, 3, 3]
+        R = extrinsics[..., :3, :3]
+        
+        # Rotate: (R @ dir^T)^T = dir @ R^T
+        # [B, N, H, W, 3] @ [B, N, 3, 3]^T
+        world_dirs = torch.einsum('bnij,bnhwj->bnhwi', R, cam_dirs)
+        
+        return world_dirs
+
+    def forward(self, x, intrinsics=None, extrinsics=None):
+        B, N, C, H, W = x.shape
+        
+        if intrinsics is None:
+            return torch.zeros(B, N, H, W, self.dim, device=x.device)
+            
+        rays = self.get_rays_from_params(intrinsics, extrinsics, H, W)
+        encoded_rays = self._sinusoidal_encoding(rays)
+        encoded = self.proj(encoded_rays) # [B, N, H, W, dim]
+        
+        return encoded.permute(0, 1, 4, 2, 3) # [B, N, dim, H, W]
+
+
+--------------------------------------------------------------------------------
+文件: profile_network.py (106 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import sys
+import os
+import gc
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from config import E2EOccConfig
+from e2e_occ_net import E2EOccNet
+
+def print_mem(tag):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        mem = torch.cuda.memory_allocated() / 1024**3
+        max_mem = torch.cuda.max_memory_allocated() / 1024**3
+        print(f"[{tag}] Mem: {mem:.2f} GB (Max: {max_mem:.2f} GB)")
+
+def verify_layers():
+    print("--- Layer-wise Memory Verification (After Fix) ---")
+    config = E2EOccConfig()
+    # Explicitly set the new safe values
+    config.embed_dim = 256
+    config.coarse_size = (25, 25, 8) # 5000 queries
+    config.fine_size = (80, 80, 16)
+    config.decoder_layers = 2
+    
+    print(f"Config: Dim={config.embed_dim}, Coarse={config.coarse_size}, Fine={config.fine_size}")
+    
+    model = E2EOccNet(config).cuda()
+    model.train() 
+    
+    print_mem("Model Loaded")
+    
+    # Inputs
+    B = 1
+    N = 8
+    imgs = torch.randn(B, N, 1, 960, 1280).cuda()
+    intrinsics = torch.eye(3).cuda().unsqueeze(0).unsqueeze(0).repeat(B, N, 1, 1)
+    extrinsics = torch.eye(4).cuda().unsqueeze(0).unsqueeze(0).repeat(B, N, 1, 1)
+    
+    print_mem("Inputs Created")
+    
+    # 1. Patch Embed
+    feats = model.patch_embed(imgs)
+    print_mem("After Patch Embed")
+    
+    # 2. Encoder
+    feats = model.encoder(feats, intrinsics, extrinsics)
+    print_mem("After Encoder")
+    
+    # 3. Decoder Steps
+    decoder = model.decoder
+    image_feats = feats
+    
+    cx, cy, cz = decoder.config.coarse_size
+    coarse_pos = decoder.pos_3d(cx, cy, cz, feats.device)
+    query = decoder.coarse_query.expand(B, -1, -1) + coarse_pos.unsqueeze(0)
+    ref = decoder.coarse_ref.unsqueeze(0).expand(B, -1, -1)
+    
+    print_mem("Before Coarse Loop")
+    
+    for i, layer in enumerate(decoder.coarse_layers):
+        query = layer(query, ref, image_feats, intrinsics, extrinsics)
+        print_mem(f"After Coarse Layer {i}")
+        
+    coarse_feats = query.view(B, cx, cy, cz, -1).permute(0, 4, 1, 2, 3)
+    
+    # Fine Setup
+    fx, fy, fz = decoder.config.fine_size
+    fine_feats = torch.nn.functional.interpolate(coarse_feats, size=(fx, fy, fz), mode='trilinear', align_corners=False)
+    fine_feats = fine_feats.permute(0, 2, 3, 4, 1).reshape(B, -1, decoder.config.embed_dim)
+    fine_feats = decoder.coarse_to_fine(fine_feats)
+    
+    fine_pos = decoder.pos_3d(fx, fy, fz, feats.device)
+    query = fine_feats + fine_pos.unsqueeze(0)
+    ref = decoder.fine_ref.unsqueeze(0).expand(B, -1, -1)
+    
+    print_mem("Before Fine Loop")
+    
+    for i, layer in enumerate(decoder.fine_layers):
+        query = layer(query, ref, image_feats, intrinsics, extrinsics)
+        print_mem(f"After Fine Layer {i}")
+        
+    output = query.view(B, fx, fy, fz, -1).permute(0, 4, 1, 2, 3)
+    
+    # Head
+    logits = model.head(output)
+    print_mem("After Head")
+    
+    # Backward
+    loss = logits.sum()
+    loss.backward()
+    print_mem("After Backward")
+    
+    if torch.cuda.max_memory_allocated() / 1024**3 < 20.0:
+        print("\nSUCCESS: Memory is within 20GB limit!")
+    else:
+        print("\nWARNING: Memory still high.")
+
+if __name__ == "__main__":
+    try:
+        verify_layers()
+    except Exception as e:
+        print(f"\nCRASHED: {e}")
+
+
+--------------------------------------------------------------------------------
+文件: raw_embed.py (54 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RAWPatchEmbed(nn.Module):
+    def __init__(self, embed_dim=256):
+        super().__init__()
+        # Replace manual RGGB unpacking with learnable convolution
+        # Input: 1 channel (RAW), Output: 4 channels (RGGB-like features)
+        # Kernel: 2x2, Stride: 2 -> Halves H/W, quadruples channels
+        self.rggb_conv = nn.Conv2d(1, 4, kernel_size=2, stride=2, bias=False)
+        
+        self.stem = nn.Sequential(
+            nn.Conv2d(4, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.GELU(),
+            nn.Conv2d(256, embed_dim, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(embed_dim),
+        )
+    
+    def forward(self, x):
+        B, N, C, H, W = x.shape
+        # Flatten batch and camera dimensions for convolution
+        x = x.view(B * N, C, H, W)
+        
+        # Apply learnable RGGB downsampling
+        x = self.rggb_conv(x)
+        
+        # Apply Stem
+        x = self.stem(x)
+        
+        _, D, Hf, Wf = x.shape
+        return x.view(B, N, D, Hf, Wf)
+
+class MultiCameraPatchEmbed(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.patch_embed = RAWPatchEmbed(embed_dim=config.embed_dim)
+        self.norm = nn.LayerNorm(config.embed_dim)
+    
+    def forward(self, images):
+        B, N, C, H, W = images.shape
+        feats = self.patch_embed(images)
+        feats = feats.permute(0, 1, 3, 4, 2)
+        feats = self.norm(feats)
+        feats = feats.permute(0, 1, 4, 2, 3)
+        return feats
+
+
+--------------------------------------------------------------------------------
+文件: temporal_fusion.py (208 行)
+--------------------------------------------------------------------------------
+"""
+时序融合模块 (工业级优化版)
+特性:
+1. Ego-Motion Alignment: 基于自车运动的特征对齐
+2. FlashAttention: 高效注意力计算
+3. Checkpointing: 训练显存优化
+4. GRU Memory: 循环记忆更新
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+class EfficientTemporalAttention(nn.Module):
+    """
+    基于 FlashAttention 的高效时序注意力
+    """
+    def __init__(self, dim, num_heads=8, dropout=0.1):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.o_proj = nn.Linear(dim, dim)
+        
+        self.dropout = dropout
+        
+    def forward(self, query, key, value):
+        """
+        query: [B, Q, C]
+        key:   [B, Q, C]
+        value: [B, Q, C]
+        """
+        B, Q, C = query.shape
+        
+        # Projections
+        q = self.q_proj(query).view(B, Q, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(key).view(B, Q, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(value).view(B, Q, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # FlashAttention (PyTorch 2.0+)
+        # scaled_dot_product_attention 自动选择最优 kernel (FlashAttn, MemEff, etc.)
+        output = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout if self.training else 0.0
+        )
+        
+        output = output.transpose(1, 2).contiguous().view(B, Q, C)
+        return self.o_proj(output)
+
+class GRUGate(nn.Module):
+    """
+    GRU 门控更新
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.update_gate = nn.Sequential(nn.Linear(dim * 2, dim), nn.Sigmoid())
+        self.reset_gate = nn.Sequential(nn.Linear(dim * 2, dim), nn.Sigmoid())
+        self.candidate = nn.Sequential(nn.Linear(dim * 2, dim), nn.Tanh())
+    
+    def forward(self, current, memory):
+        concat = torch.cat([current, memory], dim=-1)
+        z = self.update_gate(concat)
+        r = self.reset_gate(concat)
+        
+        concat_reset = torch.cat([current, r * memory], dim=-1)
+        h_candidate = self.candidate(concat_reset)
+        
+        return (1 - z) * memory + z * h_candidate
+
+class TemporalFusionModule(nn.Module):
+    def __init__(self, dim, num_heads=8, dropout=0.1, use_checkpoint=True, config=None):
+        super().__init__()
+        self.dim = dim
+        self.use_checkpoint = use_checkpoint
+        self.config = config
+        
+        # Attention & Gate
+        self.temporal_attn = EfficientTemporalAttention(dim, num_heads, dropout)
+        self.gate = GRUGate(dim)
+        
+        # Norms & FFN
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(dim * 4, dim), nn.Dropout(dropout)
+        )
+        
+    def _init_memory(self, B, Q, C, device):
+        return torch.zeros(B, Q, C, device=device)
+    
+    def align_memory(self, memory, ego_motion, spatial_shape):
+        """
+        memory: [B, Q, C], Q = H*W*D，上一帧（t-1）的体素特征
+        ego_motion: [B, 4, 4]，C_{t-1}→C_t 变换矩阵（上一帧体素坐标→当前帧体素坐标）
+                    由 train.py 计算：inv(extrinsics_t[:,0]) @ extrinsics_{t-1}[:,0]
+                    平移单位：米（与 voxel_range 一致）
+        spatial_shape: (H, W, D) 对应体素空间 (X, Y, Z)
+        目标：将上一帧 memory 中的特征，warp 到当前帧坐标系下，以便与当前帧特征对齐
+        实现：对当前帧体素网格的每个点 p_t，反查其在上一帧中的位置 p_{t-1} = ego_motion_inv @ p_t
+        """
+        if ego_motion is None:
+            return memory
+
+        B, Q, C = memory.shape
+        H, W, D = spatial_shape
+        device = memory.device
+
+        # 体素空间的真实范围，从 config.voxel_range 读取
+        if self.config is not None:
+            xmin, ymin, zmin, xmax, ymax, zmax = self.config.voxel_range
+        else:
+            xmin, ymin, zmin, xmax, ymax, zmax = -40.0, -40.0, -1.0, 40.0, 40.0, 5.4
+        x_range = (xmin, xmax)
+        y_range = (ymin, ymax)
+        z_range = (zmin, zmax)
+
+        # 坐标系转换用的 scale 和 offset（4D 齐次坐标，w 分量保持 1）
+        scale = torch.tensor([
+            (x_range[1] - x_range[0]) / 2,   # x: [-1,1] -> 40m
+            (y_range[1] - y_range[0]) / 2,   # y: [-1,1] -> 40m
+            (z_range[1] - z_range[0]) / 2,   # z: [-1,1] -> 3.2m
+            1.0
+        ], device=device)
+        offset = torch.tensor([
+            (x_range[0] + x_range[1]) / 2,   # x center = 0m
+            (y_range[0] + y_range[1]) / 2,   # y center = 0m
+            (z_range[0] + z_range[1]) / 2,   # z center = 2.2m
+            0.0
+        ], device=device)
+
+        # 1. 重塑为 3D 体积 [B, C, D, H, W]
+        # OccDecoder 传入的 memory 是 [B, H*W*D, C]，由 view(B,H,W,D,C) flatten 而来
+        mem_vol = memory.view(B, H, W, D, C).permute(0, 4, 3, 1, 2)  # [B, C, D, H, W]
+
+        # 2. 创建归一化 3D 采样网格 [-1, 1]
+        # grid_sample 的坐标顺序为 (x, y, z)，对应 (W, H, D)
+        zs = torch.linspace(-1, 1, D, device=device)
+        ys = torch.linspace(-1, 1, H, device=device)
+        xs = torch.linspace(-1, 1, W, device=device)
+        grid_d, grid_h, grid_w = torch.meshgrid(zs, ys, xs, indexing='ij')  # [D, H, W]
+        ones = torch.ones_like(grid_d)
+        grid_homo = torch.stack([grid_w, grid_h, grid_d, ones], dim=-1)      # [D, H, W, 4]
+        grid_homo = grid_homo.unsqueeze(0).expand(B, -1, -1, -1, -1)         # [B, D, H, W, 4]
+        grid_flat = grid_homo.view(B, -1, 4)                                  # [B, D*H*W, 4]
+
+        # 3. 归一化坐标 -> 世界米坐标
+        # ego_motion 的平移单位是米，必须在同一坐标系下做矩阵乘法
+        grid_flat_world = grid_flat * scale + offset  # [-1,1] -> 米
+
+        # 4. 反查当前帧体素点 p_t 在上一帧坐标系中的位置
+        # ego_motion: C_{t-1}→C_t，故 inv = C_t→C_{t-1}
+        # p_{t-1} = inv(ego_motion) @ p_t
+        T_inv = torch.linalg.inv(ego_motion)  # [B, 4, 4]
+        grid_warped_world = torch.bmm(grid_flat_world, T_inv.transpose(1, 2))  # [B, D*H*W, 4]
+
+        # 5. 世界米坐标 -> 归一化坐标（供 grid_sample 使用）
+        grid_warped_norm = (grid_warped_world - offset) / scale                # 米 -> [-1,1]
+        grid_warped = grid_warped_norm[..., :3].view(B, D, H, W, 3)           # [B, D, H, W, 3]
+
+        # 6. 3D 采样
+        aligned_vol = F.grid_sample(
+            mem_vol, grid_warped,
+            mode='bilinear', padding_mode='zeros', align_corners=True
+        )  # [B, C, D, H, W]
+
+        # 7. 还原为 [B, Q, C]
+        # [B, C, D, H, W] -> permute(0,3,4,2,1) -> [B, H, W, D, C] -> reshape -> [B, Q, C]
+        aligned = aligned_vol.permute(0, 3, 4, 2, 1).reshape(B, Q, C)
+
+        return aligned
+
+    def _forward_impl(self, current, memory, ego_motion=None, spatial_shape=None):
+        # 1. Align Memory (Warping)
+        if memory is not None and ego_motion is not None and spatial_shape is not None:
+            memory = self.align_memory(memory, ego_motion, spatial_shape)
+            
+        if memory is None:
+            B, Q, C = current.shape
+            memory = self._init_memory(B, Q, C, current.device)
+            
+        # 2. Attention
+        q = self.norm1(current)
+        k = self.norm1(memory)
+        v = k # value is aligned memory
+        
+        attn_out = self.temporal_attn(q, k, v)
+        fused = current + attn_out
+        
+        # 3. FFN
+        fused = fused + self.ffn(self.norm2(fused))
+        
+        # 4. Gate Update
+        new_memory = self.gate(fused, memory)
+        
+        return fused, new_memory
+
+    def forward(self, current, memory=None, ego_motion=None, spatial_shape=None):
+        if self.use_checkpoint and self.training:
+            return checkpoint(self._forward_impl, current, memory, ego_motion, spatial_shape, use_reentrant=False)
+        else:
+            return self._forward_impl(current, memory, ego_motion, spatial_shape)
+
+
+--------------------------------------------------------------------------------
+文件: test.py (60 行)
+--------------------------------------------------------------------------------
+import torch
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import E2EOccConfig
+from e2e_occ_net import build_model
+from loss import OccupancyLoss
+
+def test_forward():
+    print("=" * 60)
+    print("E2E-OccNet Test (400x400x32 output)")
+    print("=" * 60)
+    config = E2EOccConfig()
+    print(f"\nConfig:")
+    print(f"  Image size: {config.image_size}")
+    print(f"  Feature size: {config.feat_size}")
+    print(f"  Coarse size: {config.coarse_size} ({config.num_coarse_queries} queries)")
+    print(f"  Fine size: {config.fine_size} ({config.num_fine_queries} queries)")
+    print(f"  Voxel size: {config.voxel_size}")
+    print(f"  Voxel resolution: {config.voxel_resolution}m")
+    print(f"  Num classes: {config.num_classes}")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"\nDevice: {device}")
+    model = build_model(config).to(device)
+    num_params = model.get_num_params()
+    print(f"Parameters: {num_params / 1e6:.2f}M")
+    batch_size = 1
+    images = torch.randn(batch_size, config.num_cameras, 1, *config.image_size).to(device)
+    print(f"\nInput shape: {images.shape}")
+    if device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
+    with torch.no_grad():
+        outputs = model(images)
+    logits = outputs['semantic']
+    print(f"Output shape: {logits.shape}")
+    assert logits.shape == (batch_size, config.num_classes, *config.voxel_size), f"Expected {(batch_size, config.num_classes, *config.voxel_size)}, got {logits.shape}"
+    if device.type == 'cuda':
+        mem = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
+        print(f"Peak memory (inference): {mem:.2f} GB")
+    target = torch.randint(0, config.num_classes, (batch_size, *config.voxel_size)).to(device)
+    criterion = OccupancyLoss(num_classes=config.num_classes)
+    if device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
+    model.train()
+    outputs = model(images)
+    losses = criterion(outputs['semantic'], target)
+    losses['total'].backward()
+    if device.type == 'cuda':
+        mem = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
+        print(f"Peak memory (training): {mem:.2f} GB")
+    print(f"\nLoss: {losses['total'].item():.4f}")
+    print(f"CE Loss: {losses['ce'].item():.4f}")
+    print(f"Lovasz Loss: {losses['lovasz'].item():.4f}")
+    print("\n" + "=" * 60)
+    print("Test PASSED!")
+    print("=" * 60)
+
+if __name__ == '__main__':
+    test_forward()
+
+
+--------------------------------------------------------------------------------
+文件: train.py (232 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import argparse
+import os
+import sys
+import time
+from config import E2EOccConfig
+from e2e_occ_net import build_model
+from loss import OccupancyLoss
+from dataset import get_dataloader
+
+# conda activate deepsys
+# python d:\code\carla\e2e_occ\train.py --batch_size 1 --epochs 100 --amp --data_root d:\code\carla\dataset_10k_bak
+
+# 禁用输出缓冲，确保每条日志立即显示（Windows下默认行缓冲会导致输出积压）
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch, use_amp=False, grad_accum_steps=1):
+    model.train()
+    total_loss = 0.0
+    start = time.time()
+    optimizer.zero_grad()
+    
+    # TBPTT Settings
+    TBPTT_CHUNK_SIZE = 2  # Truncate gradients every 2 steps
+    
+    for i, batch in enumerate(loader):
+        images = batch['images'].to(device)
+        voxels = batch['voxels'].to(device)
+        intrinsics = batch['intrinsics'].to(device)
+        extrinsics = batch['extrinsics'].to(device)
+        
+        # Check for sequence data [B, T, N, C, H, W]
+        is_sequence = images.dim() == 6
+        
+        loss_val = 0.0
+        ce_loss_val = 0.0
+        
+        if is_sequence:
+            B, T, N, C, H, W = images.shape
+            memory = None
+            seq_loss = 0.0
+            seq_ce = 0.0
+
+            # TBPTT 循环：每个 chunk 做一次明确的 backward，scaler 状态清晰
+            for t_start in range(0, T, TBPTT_CHUNK_SIZE):
+                t_end = min(t_start + TBPTT_CHUNK_SIZE, T)
+
+                # 截断梯度历史
+                if memory is not None:
+                    memory = memory.detach()
+
+                chunk_loss = torch.tensor(0.0, device=device)
+                total_weight = 0.0
+
+                for t in range(t_start, t_end):
+                    img_t = images[:, t]      # [B, N, C, H, W]
+                    vox_t = voxels[:, t]      # [B, X, Y, Z]
+                    ext_t = extrinsics[:, t]  # [B, N, 4, 4]
+
+                    ego_motion = None
+                    if t > 0:
+                        ext_prev = extrinsics[:, t-1]
+                        # pose: [B, 4, 4], Camera→World (extrinsics 惯例)
+                        # ego_motion = inv(C_t→W) @ (C_{t-1}→W) = C_{t-1}→C_t
+                        # 语义：上一帧体素坐标系 → 当前帧体素坐标系
+                        pose_t = ext_t[:, 0]
+                        pose_prev = ext_prev[:, 0]
+                        ego_motion = torch.linalg.inv(pose_t) @ pose_prev
+
+                        # Log ego_motion for the first batch of each epoch
+                        if i == 0 and t == 1:
+                            print(f"\n--- Ego-motion check (epoch {epoch}) ---")
+                            print(ego_motion[0].detach().cpu().numpy())
+                            print("------------------------------------\n")
+
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                        outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
+                        loss_dict = criterion(outputs['semantic'], vox_t)
+
+                        time_weight = 1.0 + (t / max(1, T - 1))
+                        chunk_loss = chunk_loss + loss_dict['total'] * time_weight
+                        total_weight += time_weight
+
+                    seq_loss += loss_dict['total'].item()
+                    seq_ce += loss_dict['ce'].item()
+                    memory = outputs['memory']
+
+                # 每个 chunk 统一 backward 一次，scaler 状态始终明确
+                chunk_loss_norm = chunk_loss / (total_weight * grad_accum_steps)
+                scaler.scale(chunk_loss_norm).backward()
+
+            loss_val = seq_loss / T
+            ce_loss_val = seq_ce / T
+
+        else:
+            # 单帧训练
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                outputs = model(images, intrinsics, extrinsics)
+                losses = criterion(outputs['semantic'], voxels)
+                loss = losses['total'] / grad_accum_steps
+                loss_val = losses['total'].item()
+                ce_loss_val = losses['ce'].item()
+
+            scaler.scale(loss).backward()
+
+        # 梯度累积步进（两个分支的 scaler 状态此时均明确）
+        if (i + 1) % grad_accum_steps == 0:
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+
+        total_loss += loss_val * grad_accum_steps
+
+        # 每步都打印，确保实时可见（小数据集时每10步一次可能长时间无输出）
+        elapsed = time.time() - start
+        print(f'Epoch {epoch} [{i+1}/{len(loader)}] Loss: {loss_val:.4f} CE: {ce_loss_val:.4f} Time: {elapsed:.1f}s', flush=True)
+            
+    return total_loss / len(loader)
+
+def validate(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0.0
+    with torch.no_grad():
+        for batch in loader:
+            images = batch['images'].to(device)
+            voxels = batch['voxels'].to(device)
+            intrinsics = batch['intrinsics'].to(device)
+            extrinsics = batch['extrinsics'].to(device)
+            
+            is_sequence = images.dim() == 6
+            
+            if is_sequence:
+                B, T, N, C, H, W = images.shape
+                memory = None
+                seq_loss = 0.0
+                
+                for t in range(T):
+                    img_t = images[:, t]
+                    vox_t = voxels[:, t]
+                    ext_t = extrinsics[:, t]
+                    
+                    ego_motion = None
+                    if t > 0:
+                        ext_prev = extrinsics[:, t-1]
+                        # ego_motion = inv(C_t→W) @ (C_{t-1}→W) = C_{t-1}→C_t
+                        pose_t = ext_t[:, 0]
+                        pose_prev = ext_prev[:, 0]
+                        ego_motion = torch.linalg.inv(pose_t) @ pose_prev
+
+                    outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
+                    loss_dict = criterion(outputs['semantic'], vox_t)
+                    seq_loss += loss_dict['total'].item()
+                    memory = outputs['memory']
+                
+                total_loss += seq_loss / T
+            else:
+                outputs = model(images, intrinsics, extrinsics)
+                losses = criterion(outputs['semantic'], voxels)
+                total_loss += losses['total'].item()
+            
+    # Clear cache after validation to free up memory for training
+    torch.cuda.empty_cache()
+    return total_loss / len(loader)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_root', type=str, default='./data')
+    parser.add_argument('--output_dir', type=str, default='./checkpoints')
+    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--num_workers', type=int, default=0, help='Number of workers. Default 0 for Windows to avoid deadlocks.')
+    parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision training')
+    parser.add_argument('--grad_accum', type=int, default=1, help='Gradient accumulation steps')
+    args = parser.parse_args()
+    
+    os.makedirs(args.output_dir, exist_ok=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    config = E2EOccConfig()
+    model = build_model(config).to(device)
+    print(f'Model params: {model.get_num_params() / 1e6:.2f}M')
+    
+    criterion = OccupancyLoss(num_classes=config.num_classes)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
+    
+    start_epoch = 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt['model'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        start_epoch = ckpt['epoch'] + 1
+        print(f'Resumed from epoch {start_epoch}')
+        
+    train_loader = get_dataloader(args.data_root, 'train', args.batch_size, args.num_workers, config)
+    val_loader = get_dataloader(args.data_root, 'val', args.batch_size, args.num_workers, config)
+    
+    best_loss = float('inf')
+    
+    print(f"Starting training with AMP={args.amp}, Grad Accum={args.grad_accum}", flush=True)
+    print(f"Temporal Training: {config.use_temporal} (Frames={config.temporal_frames})", flush=True)
+    
+    for epoch in range(start_epoch, args.epochs):
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, 
+                               use_amp=args.amp, grad_accum_steps=args.grad_accum)
+        
+        val_loss = validate(model, val_loader, criterion, device)
+        print(f'Epoch {epoch}: Train Loss {train_loss:.4f}, Val Loss {val_loss:.4f}', flush=True)
+
+        scheduler.step()
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            torch.save({
+                'epoch': epoch,
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'loss': val_loss,
+            }, os.path.join(args.output_dir, 'best_model.pth'))
+            print(f'Saved best model at epoch {epoch}', flush=True)
+
+if __name__ == '__main__':
+    main()
+
+
+--------------------------------------------------------------------------------
+文件: verify_network.py (159 行)
+--------------------------------------------------------------------------------
+import torch
+import time
+import os
+import sys
+import traceback
+
+# 确保根目录在路径中，以便进行类似包的导入
+# 这使得脚本可以从任何地方运行
+try:
+    # 假设脚本在 e2e_occ/ 目录中
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from config import E2EOccConfig
+    from e2e_occ_net import E2EOccNet
+except (ImportError, ValueError):
+    # 针对不同执行上下文的回退
+    print("无法从相对路径导入，尝试作为包导入。")
+    from e2e_occ.config import E2EOccConfig
+    from e2e_occ.e2e_occ_net import E2EOccNet
+
+
+def print_header(title):
+    """打印格式化的标题。"""
+    print("\n" + "=" * 60)
+    print(f" {title}")
+    print("=" * 60)
+
+
+def print_section(title):
+    """打印格式化的段落标题。"""
+    print(f"\n--- {title} ---")
+
+
+def run_verification():
+    """
+    对 E2EOccNet 模型进行全面验证，
+    重点关注序列前向传播、形状正确性和数值稳定性。
+    """
+    print_header("E2E-OccNet 网络验证")
+    
+    try:
+        # --- 1. 设置环境和配置 ---
+        print_section("1. 设置环境和配置")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"PyTorch 版本: {torch.__version__}")
+        print(f"运行设备: {device}")
+
+        config = E2EOccConfig()
+        print("配置已加载:")
+        print(f"  - 时序融合: {config.use_temporal} (帧数: {config.temporal_frames})")
+        print(f"  - 自车运动对齐: {config.use_ego_motion}")
+        print(f"  - 粗查询数: {config.num_coarse_queries}")
+        print(f"  - 精细查询数: {config.num_fine_queries}")
+        print(f"  - 最终体素网格: {config.voxel_size}")
+
+        # --- 2. 构建模型 ---
+        print_section("2. 构建模型")
+        model = E2EOccNet(config).to(device).eval() # 设置为评估模式
+        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"模型构建成功，参数量: {num_params / 1e6:.2f}M")
+
+        # --- 3. 为序列创建伪输入 ---
+        print_section("3. 为序列创建伪输入")
+        B = 1  # 批量大小
+        T = config.temporal_frames # 使用配置中的序列长度
+        N = config.num_cameras
+        C, H, W = config.raw_channels, config.image_size[0], config.image_size[1]
+
+        images_seq = torch.randn(B, T, N, C, H, W, device=device)
+        intrinsics = torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, N, -1, -1)
+        
+        # 模拟简单的前进自车运动作为外参
+        extrinsics_seq = torch.eye(4, device=device).view(1, 1, 1, 4, 4).expand(B, T, N, -1, -1).clone()
+        for t in range(1, T):
+            # 每个时间步沿x轴前进1米
+            extrinsics_seq[:, t, :, 0, 3] = t * 1.0
+        
+        print(f"为 {T} 帧的序列创建了伪数据。")
+        print(f"  - 图像形状: {images_seq.shape}")
+        print(f"  - 外参形状: {extrinsics_seq.shape}")
+
+        # --- 4. 运行序列推理 ---
+        print_section("4. 运行序列推理")
+        
+        memory = None
+        with torch.no_grad():
+            for t in range(T):
+                print(f"\n处理时间步 {t+1}/{T}...")
+                
+                img_t = images_seq[:, t]
+                ext_t = extrinsics_seq[:, t]
+                
+                ego_motion = None
+                if config.use_ego_motion and t > 0:
+                    # 自车运动是从前一帧到当前帧的变换。
+                    # T_{t-1 -> t} = (T_{world -> t}) @ T_{t-1 -> world}
+                    # 假设外参是相机到世界的位姿 (T_c->w)
+                    pose_curr = ext_t[:, 0]  # 以第一个相机为参考
+                    pose_prev = extrinsics_seq[:, t-1, 0]
+                    ego_motion = torch.linalg.inv(pose_curr) @ pose_prev
+                    print("  - 已为对齐计算自车运动矩阵。")
+
+                # 前向传播
+                start_time = time.time()
+                outputs = model(
+                    images=img_t, 
+                    intrinsics=intrinsics, 
+                    extrinsics=ext_t, 
+                    memory=memory, 
+                    ego_motion=ego_motion
+                )
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # --- 5. 验证当前步骤的输出 ---
+                print(f"  - 前向传播完成，耗时 {duration_ms:.2f} ms。")
+
+                # 检查语义logits
+                logits = outputs.get('semantic')
+                assert logits is not None, "模型输出缺少 'semantic' 键。"
+                expected_shape = (B, config.num_classes, *config.voxel_size)
+                if logits.shape == expected_shape:
+                    print(f"  ✅ 语义 logits 形状正确: {logits.shape}")
+                else:
+                    raise AssertionError(f"语义 logits 形状不匹配！期望 {expected_shape}, 得到 {logits.shape}")
+                
+                if torch.isnan(logits).any() or torch.isinf(logits).any():
+                    raise ValueError("语义 logits 包含 NaN 或 Inf 值！")
+                else:
+                    print("  ✅ 语义 logits 数值有效 (无 NaN/Inf)。")
+
+                # 检查时序记忆
+                if config.use_temporal:
+                    memory = outputs.get('memory')
+                    assert memory is not None, "时序融合已启用，但模型输出缺少 'memory' 键。"
+                    
+                    expected_mem_shape = (B, config.num_coarse_queries, config.memory_dim)
+                    if memory.shape == expected_mem_shape:
+                        print(f"  ✅ Memory 形状正确: {memory.shape}")
+                    else:
+                         raise AssertionError(f"Memory 形状不匹配！期望 {expected_mem_shape}, 得到 {memory.shape}")
+
+                    if torch.isnan(memory).any() or torch.isinf(memory).any():
+                        raise ValueError("Memory 包含 NaN 或 Inf 值！")
+                    else:
+                        print("  ✅ Memory 数值有效 (无 NaN/Inf)。")
+                    
+                    # 为下一次迭代分离 memory，模拟推理循环
+                    memory = memory.detach()
+        
+        print_header("✅ 验证成功通过！")
+
+    except Exception as e:
+        print_header("❌ 验证失败")
+        print(f"发生错误: {e}")
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    run_verification()
+
+
+--------------------------------------------------------------------------------
+文件: voxel_head.py (69 行)
+--------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VoxelHead(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        dim = config.embed_dim
+        
+        # Classification First Approach (Low Memory)
+        # Input: [B, dim, 80, 80, 16]
+        
+        # 1. Reduce channels first
+        self.conv1 = nn.Sequential(
+            nn.Conv3d(dim, dim // 2, kernel_size=3, padding=1),
+            nn.BatchNorm3d(dim // 2),
+            nn.GELU(),
+        )
+        
+        self.conv2 = nn.Sequential(
+            nn.Conv3d(dim // 2, dim // 4, kernel_size=3, padding=1),
+            nn.BatchNorm3d(dim // 4),
+            nn.GELU(),
+        )
+        
+        # 2. Classify at low resolution
+        # [B, 64, 80, 80, 16] -> [B, 18, 80, 80, 16]
+        self.cls_head = nn.Conv3d(dim // 4, config.num_classes, kernel_size=1)
+        
+        # 3. 上采样精化层（两步：80->200->400，每步插值后卷积残差精化）
+        self.refine1 = nn.Sequential(
+            nn.Conv3d(config.num_classes, config.num_classes, kernel_size=3, padding=1),
+            nn.BatchNorm3d(config.num_classes),
+            nn.ReLU(inplace=True)
+        )
+        # refine2 在最终 logits 层，不加激活函数，加 BN 稳定训练
+        self.refine2 = nn.Sequential(
+            nn.Conv3d(config.num_classes, config.num_classes, kernel_size=3, padding=1),
+            nn.BatchNorm3d(config.num_classes),
+        )
+
+    def forward(self, x):
+        # x: [B, fx, fy, fz, C] (from OccDecoder)
+        # Permute to [B, C, fx, fy, fz] for Conv3d/Interpolate
+        x = x.permute(0, 4, 1, 2, 3).contiguous()
+
+        # 1. 降维
+        x = self.conv1(x)  # -> [B, 128, 80, 80, 16]
+        x = self.conv2(x)  # -> [B, 64, 80, 80, 16]
+
+        # 2. 低分辨率分类
+        logits_small = self.cls_head(x)  # -> [B, 18, 80, 80, 16]
+
+        # 3. 两步上采样 + 可学习精化（尺寸从 config.voxel_size 派生，修改 config 自动生效）
+        vx, vy, vz = self.config.voxel_size          # e.g. (400, 400, 32)
+        mid_size = (vx // 2, vy // 2, vz)            # e.g. (200, 200, 32)
+
+        # Step 1: fine_size -> mid_size
+        logits_mid = F.interpolate(logits_small, size=mid_size, mode='trilinear', align_corners=False)
+        logits_mid = self.refine1(logits_mid) + logits_mid
+
+        # Step 2: mid_size -> voxel_size
+        logits_final = F.interpolate(logits_mid, size=(vx, vy, vz), mode='trilinear', align_corners=False)
+        logits_final = logits_final + self.refine2(logits_final)
+
+        return logits_final
+
+

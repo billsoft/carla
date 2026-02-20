@@ -1,94 +1,105 @@
 import torch
-import torch.nn as nn
 import time
 import os
 import sys
+import traceback
 
+# 确保根目录在路径中，以便进行类似包的导入
+# 这使得脚本可以从任何地方运行
 try:
-    # For use as a package
-    from .config import E2EOccConfig
-    from .e2e_occ_net import E2EOccNet
-except ImportError:
-    # For direct script execution
+    # 假设脚本在 e2e_occ/ 目录中
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from config import E2EOccConfig
     from e2e_occ_net import E2EOccNet
+except (ImportError, ValueError):
+    # 针对不同执行上下文的回退
+    print("无法从相对路径导入，尝试作为包导入。")
+    from e2e_occ.config import E2EOccConfig
+    from e2e_occ.e2e_occ_net import E2EOccNet
 
-def test_e2e_network():
+
+def print_header(title):
+    """打印格式化的标题。"""
+    print("\n" + "=" * 60)
+    print(f" {title}")
     print("=" * 60)
-    print("E2E-OccNet Network Verification")
-    print("=" * 60)
-    print(f"PyTorch Version: {torch.__version__}")
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
-    
-    # 1. Initialize Configuration
-    print("\n[1] Initializing Configuration...")
-    config = E2EOccConfig()
-    print(f"  Embed Dim: {config.embed_dim}")
-    print(f"  Coarse Size: {config.coarse_size}")
-    print(f"  Fine Size: {config.fine_size}")
-    print(f"  Temporal Frames: {config.temporal_frames}")
-    print(f"  Use Temporal: {config.use_temporal}")
-    print(f"  Use Ego Motion: {config.use_ego_motion}")
 
-    # 2. Build Model
-    print("\n[2] Building Model...")
-    model = E2EOccNet(config).to(device)
-    model.eval()
-    print(f"  Model Parameters: {model.get_num_params() / 1e6:.2f}M")
 
-    # 3. Create Dummy Inputs
-    print("\n[3] Creating Dummy Inputs...")
-    B = 1
-    T = 2 # Sequence length
-    N = config.num_cameras
-    H, W = config.image_size
-    
-    # Create sequence of inputs
-    # Images: [B, N, C, H, W] (Raw channels=1)
-    images_seq = torch.randn(B, T, N, config.raw_channels, H, W, device=device)
-    
-    # Intrinsics: [B, N, 3, 3]
-    intrinsics = torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, N, -1, -1)
-    
-    # Extrinsics: [B, T, N, 4, 4]
-    # Simulate simple forward motion
-    extrinsics_seq = torch.eye(4, device=device).view(1, 1, 1, 4, 4).expand(B, T, N, -1, -1).clone()
-    for t in range(T):
-        extrinsics_seq[:, t, :, 0, 3] = t * 1.0 # Move 1m forward per step
-        
-    memory = None
-    
-    # 4. Run Sequential Inference
-    print("\n[4] Running Sequential Inference...")
+def print_section(title):
+    """打印格式化的段落标题。"""
+    print(f"\n--- {title} ---")
+
+
+def run_verification():
+    """
+    对 E2EOccNet 模型进行全面验证，
+    重点关注序列前向传播、形状正确性和数值稳定性。
+    """
+    print_header("E2E-OccNet 网络验证")
     
     try:
+        # --- 1. 设置环境和配置 ---
+        print_section("1. 设置环境和配置")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"PyTorch 版本: {torch.__version__}")
+        print(f"运行设备: {device}")
+
+        config = E2EOccConfig()
+        print("配置已加载:")
+        print(f"  - 时序融合: {config.use_temporal} (帧数: {config.temporal_frames})")
+        print(f"  - 自车运动对齐: {config.use_ego_motion}")
+        print(f"  - 粗查询数: {config.num_coarse_queries}")
+        print(f"  - 精细查询数: {config.num_fine_queries}")
+        print(f"  - 最终体素网格: {config.voxel_size}")
+
+        # --- 2. 构建模型 ---
+        print_section("2. 构建模型")
+        model = E2EOccNet(config).to(device).eval() # 设置为评估模式
+        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"模型构建成功，参数量: {num_params / 1e6:.2f}M")
+
+        # --- 3. 为序列创建伪输入 ---
+        print_section("3. 为序列创建伪输入")
+        B = 1  # 批量大小
+        T = config.temporal_frames # 使用配置中的序列长度
+        N = config.num_cameras
+        C, H, W = config.raw_channels, config.image_size[0], config.image_size[1]
+
+        images_seq = torch.randn(B, T, N, C, H, W, device=device)
+        intrinsics = torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, N, -1, -1)
+        
+        # 模拟简单的前进自车运动作为外参
+        extrinsics_seq = torch.eye(4, device=device).view(1, 1, 1, 4, 4).expand(B, T, N, -1, -1).clone()
+        for t in range(1, T):
+            # 每个时间步沿x轴前进1米
+            extrinsics_seq[:, t, :, 0, 3] = t * 1.0
+        
+        print(f"为 {T} 帧的序列创建了伪数据。")
+        print(f"  - 图像形状: {images_seq.shape}")
+        print(f"  - 外参形状: {extrinsics_seq.shape}")
+
+        # --- 4. 运行序列推理 ---
+        print_section("4. 运行序列推理")
+        
+        memory = None
         with torch.no_grad():
             for t in range(T):
-                print(f"\n  --- Time Step {t} ---")
+                print(f"\n处理时间步 {t+1}/{T}...")
                 
-                # Get current frame data
                 img_t = images_seq[:, t]
                 ext_t = extrinsics_seq[:, t]
                 
-                # Calculate Ego-Motion (relative pose)
                 ego_motion = None
-                if t > 0:
-                    # Previous frame extrinsics
-                    ext_prev = extrinsics_seq[:, t-1]
-                    
-                    # Assuming extrinsics are Pose (Camera-to-World)
-                    # We use the first camera (ego) as reference
-                    pose_t = ext_t[:, 0] # [B, 4, 4]
-                    pose_prev = ext_prev[:, 0] # [B, 4, 4]
-                    
-                    # Calculate relative transform: T_{t-1 -> t}
-                    # P_t = T^{-1} * P_{t-1} -> T_{t-1 -> t} = Pose_t^{-1} * Pose_{t-1}
-                    ego_motion = torch.linalg.inv(pose_t) @ pose_prev
-                    print("    Calculated Ego-Motion matrix")
-                
-                # Forward Pass
+                if config.use_ego_motion and t > 0:
+                    # 自车运动是从前一帧到当前帧的变换。
+                    # T_{t-1 -> t} = (T_{world -> t}) @ T_{t-1 -> world}
+                    # 假设外参是相机到世界的位姿 (T_c->w)
+                    pose_curr = ext_t[:, 0]  # 以第一个相机为参考
+                    pose_prev = extrinsics_seq[:, t-1, 0]
+                    ego_motion = torch.linalg.inv(pose_curr) @ pose_prev
+                    print("  - 已为对齐计算自车运动矩阵。")
+
+                # 前向传播
                 start_time = time.time()
                 outputs = model(
                     images=img_t, 
@@ -97,46 +108,51 @@ def test_e2e_network():
                     memory=memory, 
                     ego_motion=ego_motion
                 )
-                end_time = time.time()
+                duration_ms = (time.time() - start_time) * 1000
                 
-                # Check Outputs
-                logits = outputs['semantic']
-                new_memory = outputs['memory']
-                
-                print(f"    Inference Time: {(end_time - start_time)*1000:.2f} ms")
-                print(f"    Output Logits Shape: {logits.shape}")
-                
-                if new_memory is not None:
-                    print(f"    New Memory Shape: {new_memory.shape}")
-                    # Check if memory has NaN
-                    if torch.isnan(new_memory).any():
-                        print("    ❌ Error: Memory contains NaN values!")
-                    else:
-                        print("    ✅ Memory values valid")
-                else:
-                    print("    Memory is None (Expected for first frame if temporal disabled, but enabled here)")
+                # --- 5. 验证当前步骤的输出 ---
+                print(f"  - 前向传播完成，耗时 {duration_ms:.2f} ms。")
 
-                # Verify Output Shape
-                # VoxelHead output should be [B, num_classes, X, Y, Z]
-                # Config voxel_size is (400, 400, 32)
+                # 检查语义logits
+                logits = outputs.get('semantic')
+                assert logits is not None, "模型输出缺少 'semantic' 键。"
                 expected_shape = (B, config.num_classes, *config.voxel_size)
                 if logits.shape == expected_shape:
-                    print(f"    ✅ Output Shape Correct: {logits.shape}")
+                    print(f"  ✅ 语义 logits 形状正确: {logits.shape}")
                 else:
-                    print(f"    ❌ Output Shape Mismatch! Expected {expected_shape}, got {logits.shape}")
+                    raise AssertionError(f"语义 logits 形状不匹配！期望 {expected_shape}, 得到 {logits.shape}")
                 
-                # Update memory for next step
-                memory = new_memory
-                # Detach to simulate TBPTT or just inference loop
-                if memory is not None:
+                if torch.isnan(logits).any() or torch.isinf(logits).any():
+                    raise ValueError("语义 logits 包含 NaN 或 Inf 值！")
+                else:
+                    print("  ✅ 语义 logits 数值有效 (无 NaN/Inf)。")
+
+                # 检查时序记忆
+                if config.use_temporal:
+                    memory = outputs.get('memory')
+                    assert memory is not None, "时序融合已启用，但模型输出缺少 'memory' 键。"
+                    
+                    expected_mem_shape = (B, config.num_coarse_queries, config.memory_dim)
+                    if memory.shape == expected_mem_shape:
+                        print(f"  ✅ Memory 形状正确: {memory.shape}")
+                    else:
+                         raise AssertionError(f"Memory 形状不匹配！期望 {expected_mem_shape}, 得到 {memory.shape}")
+
+                    if torch.isnan(memory).any() or torch.isinf(memory).any():
+                        raise ValueError("Memory 包含 NaN 或 Inf 值！")
+                    else:
+                        print("  ✅ Memory 数值有效 (无 NaN/Inf)。")
+                    
+                    # 为下一次迭代分离 memory，模拟推理循环
                     memory = memory.detach()
-                
-        print("\n✅ Network Verification Passed Successfully!")
         
+        print_header("✅ 验证成功通过！")
+
     except Exception as e:
-        print(f"\n❌ Network Verification Failed: {e}")
-        import traceback
+        print_header("❌ 验证失败")
+        print(f"发生错误: {e}")
         traceback.print_exc()
 
+
 if __name__ == "__main__":
-    test_e2e_network()
+    run_verification()
