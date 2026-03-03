@@ -187,12 +187,12 @@ cmake --build Build --target launch
 
 # 2. 数据采集
 /c/ProgramData/anaconda3/envs/carla/python.exe occnetv3_data_generator/main_collection.py \
-    --frames 1000 --output dataset_10k --town Town10HD \
-    --num-vehicles 30 --num-walkers 10
+    --frames 100 --output d:/code/carla/dataset_10k_bak \
+    --town Town10HD --num-vehicles 30 --num-walkers 10
 
 # 3. 可视化采集结果
 /c/ProgramData/anaconda3/envs/carla/python.exe occnetv3_data_generator/visualize_dataset.py \
-    --dataset dataset_10k --sample 0
+    --dataset d:/code/carla/dataset_10k_bak --sample 0
 ```
 
 参数：`--frames`(帧数)，`--output`(输出目录)，`--town`(地图)，`--num-vehicles`，`--num-walkers`，`--clear-output`
@@ -373,15 +373,21 @@ dataset_10k/
 ### 运行命令
 
 ```bash
-# 训练
+# 训练（在项目根目录 d:\code\carla 下执行）
 /c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/train.py \
-    --dataset dataset_10k --batch-size 1 --epochs 50 --amp
+    --data_root d:/code/carla/dataset_10k_bak \
+    --batch_size 1 --epochs 50 --amp
+
+# 可选参数: --output_dir d:/code/carla/checkpoints --lr 1e-4 --resume path/to/ckpt.pth
+# --grad_accum 2  （梯度累积，等效扩大 batch size）
+# --num_workers 0 （Windows 下默认 0，避免死锁）
 
 # 推理
 /c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/inference.py \
-    --checkpoint e2e_occ/checkpoints/best.pth --dataset dataset_10k
+    --checkpoint d:/code/carla/checkpoints/best.pth \
+    --data_root d:/code/carla/dataset_10k_bak
 
-# 验证网络结构
+# 验证网络结构（无需数据集）
 /c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/verify_network.py
 ```
 
@@ -410,15 +416,18 @@ cmake --build Build --target launch
 
 # 2. 数据采集（carla 环境）
 /c/ProgramData/anaconda3/envs/carla/python.exe occnetv3_data_generator/main_collection.py \
-    --frames 1000 --output dataset_10k --town Town10HD
+    --frames 100 --output d:/code/carla/dataset_10k_bak \
+    --town Town10HD --num-vehicles 30 --num-walkers 10
 
 # 3. 训练（deepsys 环境）
 /c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/train.py \
-    --dataset dataset_10k --batch-size 1 --epochs 50 --amp
+    --data_root d:/code/carla/dataset_10k_bak \
+    --batch_size 1 --epochs 50 --amp
 
 # 4. 推理
 /c/ProgramData/anaconda3/envs/deepsys/python.exe e2e_occ/inference.py \
-    --checkpoint e2e_occ/checkpoints/best.pth --dataset dataset_10k
+    --checkpoint d:/code/carla/checkpoints/best.pth \
+    --data_root d:/code/carla/dataset_10k_bak
 
 # 5. 可视化
 /c/ProgramData/anaconda3/envs/deepsys/python.exe occupancy_viewer/run_viewer.py
