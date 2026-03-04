@@ -32,3 +32,4 @@ occ_network/checkpoints/
 occ_network_lite/checkpoints_lite/
 code_summary_for_ai.txt
 voxel_mapping.log
+e2e_occ_code_summary.txt
