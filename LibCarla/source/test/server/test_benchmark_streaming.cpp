@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -11,6 +11,7 @@
 #include <carla/streaming/Client.h>
 #include <carla/streaming/Server.h>
 
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
 
 #include <algorithm>
@@ -35,7 +36,7 @@ public:
       _client(),
       _message(make_special_message(message_size)),
       _client_callback(),
-      _work_to_do(_client_callback),
+      _work_to_do(boost::asio::make_work_guard(_client_callback)),
       _success_ratio(success_ratio) {}
 
   void AddStream() {
@@ -119,7 +120,7 @@ private:
 
   boost::asio::io_context _client_callback;
 
-  boost::asio::io_context::work _work_to_do;
+  boost::asio::executor_work_guard<boost::asio::io_context::executor_type> _work_to_do;
 
   const double _success_ratio;
 
@@ -130,7 +131,7 @@ private:
 
 static size_t get_max_concurrency() {
   size_t concurrency = std::thread::hardware_concurrency() / 2u;
-  return std::max((size_t) 2u, concurrency);
+  return std::max(static_cast<size_t>(2u), concurrency);
 }
 
 static void benchmark_image(

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -12,7 +12,7 @@
 #include "Carla/Actor/ActorDescription.h"
 
 #include <util/disable-ue4-macros.h>
-#include "carla/geom/GeoLocation.h"
+#include "carla/geom/GeoProjection.h"
 #include <util/enable-ue4-macros.h>
 
 #include "GnssSensor.generated.h"
@@ -61,7 +61,7 @@ protected:
 
 private:
 
-  carla::geom::GeoLocation CurrentGeoReference;
+  carla::geom::GeoProjection CurrentGeoProjection;
 
   float LatitudeDeviation;
   float LongitudeDeviation;

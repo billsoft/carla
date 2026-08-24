@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -15,8 +15,9 @@
 #include "CarlaRecorderAnimVehicleWheels.h"
 #include "CarlaRecorderLightVehicle.h"
 #include "CarlaRecorderLightScene.h"
-#include "CarlaRecorderDoorVehicle.h"	
+#include "CarlaRecorderDoorVehicle.h"
 #include "CarlaRecorderWalkerBones.h"
+#include "CarlaRecorderWeather.h"
 
 #include <unordered_map>
 
@@ -81,6 +82,9 @@ public:
   // set walker bones
   void ProcessReplayerWalkerBones(const CarlaRecorderWalkerBones &Walker);
 
+  // set weather
+  void ProcessReplayerWeather(const CarlaRecorderWeather &Weather);
+  
   // replay finish
   bool ProcessReplayerFinish(bool bApplyAutopilot, bool bIgnoreHero, std::unordered_map<uint32_t, bool> &IsHero);
 
@@ -106,7 +110,7 @@ private:
     uint32_t DesiredId,
     bool SpawnSensors);
 
-  FCarlaActor* FindTrafficLightAt(FVector Location);
+  FCarlaActor* FindTrafficSignAt(FVector Location);
 
   // enable / disable physics for an actor
   bool SetActorSimulatePhysics(FCarlaActor *CarlaActor, bool bEnabled);

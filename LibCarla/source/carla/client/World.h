@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -92,6 +92,12 @@ namespace client {
 
     /// Change the weather in the simulation.
     void SetWeather(const rpc::WeatherParameters &weather);
+
+    /// Get gravity value used for the IMU sensor accelerometer calculation.
+    float GetIMUSensorGravity() const;
+
+    /// Set gravity value used for the IMU sensor accelerometer calculation.
+    void SetIMUSensorGravity(float gravity);
 
     /// Query if the Weather is enabled or not
     bool IsWeatherEnabled() const;

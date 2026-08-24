@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -69,10 +69,10 @@ protected:
 public:
 
   UPROPERTY(EditAnywhere)
-  UBoxComponent *TriggerVolume;
+  TObjectPtr<UBoxComponent> TriggerVolume;
 
   UPROPERTY(BlueprintReadWrite, Category = "Traffic Routes", EditAnywhere)
-  TArray<USplineComponent *> Routes;
+  TArray<TObjectPtr<USplineComponent>> Routes;
 
   UPROPERTY(BlueprintReadWrite, Category = "Traffic Routes", EditAnywhere, EditFixedSize)
   TArray<float> Probabilities;

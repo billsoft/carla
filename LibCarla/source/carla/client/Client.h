@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -9,7 +9,8 @@
 #include "carla/client/detail/Simulator.h"
 #include "carla/client/World.h"
 #include "carla/client/Map.h"
-#include "carla/PythonUtil.h"
+// #include "carla/PythonUtil.h" // Architectural correction: this header used to include "carla/PythonUtil.h" and pass PythonUtil::ReleaseGILDeleter() to the simulator shared_ptr below. PythonUtil.h has been moved into PythonAPI (it was the sole Python touchpoint in LibCarla). The C++ client now uses the default shared_ptr deleter; PythonAPI bindings can re-introduce GIL-aware destruction at the bindings layer if a future workload requires it.
+#include "carla/geom/Transform.h"
 #include "carla/trafficmanager/TrafficManager.h"
 
 namespace carla {
@@ -118,8 +119,8 @@ namespace client {
       return _simulator->GetCurrentEpisode();
     }
 
-    std::string StartRecorder(std::string name, bool additional_data = false) {
-      return _simulator->StartRecorder(name, additional_data);
+    std::string StartRecorder(std::string name, bool additional_data = false, bool stop_replayer = true) {
+      return _simulator->StartRecorder(name, additional_data, stop_replayer);
     }
 
     void StopRecorder(void) {
@@ -138,9 +139,15 @@ namespace client {
       return _simulator->ShowRecorderActorsBlocked(name, min_time, min_distance);
     }
 
-    std::string ReplayFile(std::string name, double start, double duration,
-        uint32_t follow_id, bool replay_sensors) {
-      return _simulator->ReplayFile(name, start, duration, follow_id, replay_sensors);
+    std::string ReplayFile(
+        std::string name, double start, double duration,
+        uint32_t follow_id, bool replay_sensors,
+        bool replay_weather = false,
+        const geom::Transform& offset = geom::Transform(),
+        std::string map_override = "") {
+      return _simulator->ReplayFile(
+          std::move(name), start, duration, follow_id, replay_sensors,
+          replay_weather, offset, std::move(map_override));
     }
 
     void StopReplayer(bool keep_actors) {
@@ -185,8 +192,7 @@ namespace client {
       uint16_t port,
       size_t worker_threads)
     : _simulator(
-        new detail::Simulator(host, port, worker_threads),
-        PythonUtil::ReleaseGILDeleter()) {}
+        std::make_shared<detail::Simulator>(host, port, worker_threads)) {}
 
 } // namespace client
 } // namespace carla

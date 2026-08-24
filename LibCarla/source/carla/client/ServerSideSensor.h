@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -7,6 +7,8 @@
 #pragma once
 
 #include "carla/client/Sensor.h"
+#include "carla/rpc/CustomV2XBytes.h"
+
 #include <bitset>
 
 namespace carla {
@@ -55,6 +57,10 @@ namespace client {
 
     /// Return if the sensor is publishing for ROS2
     bool IsEnabledForROS();
+
+    /// Send a binary message through this sensor. Only supported on the custom
+    /// V2X sensor (sensor.other.v2x_custom).
+    void Send(const rpc::CustomV2XBytes &data);
 
     /// @copydoc Actor::Destroy()
     ///

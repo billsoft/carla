@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -7,8 +7,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Kismet/BlueprintFunctionLibrary.h"
 #include "Engine/PostProcessVolume.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
+#include "Misc/Paths.h"
 #include "PostProcessJsonUtils.generated.h"
 
 USTRUCT(BlueprintType)
@@ -22,6 +23,7 @@ struct FPostProcessSettingsWrapper
 
 
 class UPostProcessComponent;
+class USceneCaptureComponent2D;
 
 UCLASS()
 class CARLA_API UPostProcessJsonUtils : public UBlueprintFunctionLibrary

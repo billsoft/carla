@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -29,7 +29,7 @@ void Router::Stop() {
 Router::Router(uint16_t port) :
   _next(0) {
 
-  _endpoint = boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string("0.0.0.0"), port);
+  _endpoint = boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("0.0.0.0"), port);
   _listener = std::make_shared<carla::multigpu::Listener>(_pool.io_context(), _endpoint);
 }
 
@@ -114,7 +114,7 @@ void Router::Write(MultiGPUCommand id, Buffer &&buffer) {
   CommandHeader header;
   header.id = id;
   header.size = buffer.size();
-  Buffer buf_header((uint8_t *) &header, sizeof(header));
+  Buffer buf_header(reinterpret_cast<uint8_t *>(&header), sizeof(header));
 
   auto view_header = carla::BufferView::CreateFrom(std::move(buf_header));
   auto view_data = carla::BufferView::CreateFrom(std::move(buffer));
@@ -134,7 +134,7 @@ std::future<SessionInfo> Router::WriteToNext(MultiGPUCommand id, Buffer &&buffer
   CommandHeader header;
   header.id = id;
   header.size = buffer.size();
-  Buffer buf_header((uint8_t *) &header, sizeof(header));
+  Buffer buf_header(reinterpret_cast<uint8_t *>(&header), sizeof(header));
 
   auto view_header = carla::BufferView::CreateFrom(std::move(buf_header));
   auto view_data = carla::BufferView::CreateFrom(std::move(buffer));
@@ -166,7 +166,7 @@ std::future<SessionInfo> Router::WriteToOne(std::weak_ptr<Primary> server, Multi
   CommandHeader header;
   header.id = id;
   header.size = buffer.size();
-  Buffer buf_header((uint8_t *) &header, sizeof(header));
+  Buffer buf_header(reinterpret_cast<uint8_t *>(&header), sizeof(header));
 
   auto view_header = carla::BufferView::CreateFrom(std::move(buf_header));
   auto view_data = carla::BufferView::CreateFrom(std::move(buffer));

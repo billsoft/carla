@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma de
+# Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma de
 # Barcelona (UAB).
 #
 # This work is licensed under the terms of the MIT license.
@@ -38,7 +38,11 @@ class TestSensorTickTime(SyncSmokeTest):
       "sensor.camera.semantic_segmentation",
       "sensor.camera.dvs",
       "sensor.other.obstacle",
-      "sensor.camera.instance_segmentation"
+      "sensor.camera.instance_segmentation",
+      "sensor.camera.rgb_fisheye",
+      "sensor.camera.depth_fisheye",
+      "sensor.camera.semantic_segmentation_fisheye",
+      "sensor.camera.instance_segmentation_fisheye"
     }
     spawned_sensors = []
     sensor_tick = 1.0

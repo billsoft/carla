@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -61,7 +61,7 @@ struct FVehicleActorDefinition
 
   /// Assign a static mesh into the actor.
   UPROPERTY(EditAnywhere, BlueprintReadWrite)
-  UStaticMesh* mesh = nullptr;
+  TObjectPtr<UStaticMesh> mesh = nullptr;
 
   /// Colors represent the avaliable colors for each actor
   UPROPERTY(EditAnywhere, BlueprintReadWrite)

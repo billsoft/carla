@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -70,6 +70,15 @@ void Parameters::SetGlobalPercentageSpeedDifference(const float percentage) {
 
 void Parameters::SetGlobalLaneOffset(const float offset) {
   global_lane_offset = offset;
+}
+
+void Parameters::SetLargeVehicleWideTurn(const ActorPtr &actor, const bool enable) {
+  const auto entry = std::make_pair(actor->GetId(), enable);
+  large_vehicle_wide_turn.AddEntry(entry);
+}
+
+void Parameters::SetGlobalLargeVehicleWideTurn(const bool enable) {
+  global_large_vehicle_wide_turn = enable;
 }
 
 void Parameters::SetCollisionDetection(const ActorPtr &reference_actor, const ActorPtr &other_actor, const bool detect_collision) {
@@ -272,6 +281,16 @@ float Parameters::GetLaneOffset(const ActorId &actor_id) const {
   }
 
   return offset;
+}
+
+bool Parameters::GetLargeVehicleWideTurn(const ActorId &actor_id) const {
+  bool enable = global_large_vehicle_wide_turn;
+
+  if (large_vehicle_wide_turn.Contains(actor_id)) {
+    enable = large_vehicle_wide_turn.GetValue(actor_id);
+  }
+
+  return enable;
 }
 
 bool Parameters::GetCollisionDetection(const ActorId &reference_actor_id, const ActorId &other_actor_id) const {

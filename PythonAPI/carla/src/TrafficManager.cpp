@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -55,8 +55,10 @@ void InterSetImportedRoute(carla::traffic_manager::TrafficManager& self, const A
 boost::python::list InterGetNextAction(carla::traffic_manager::TrafficManager& self, const ActorPtr &actor_ptr) {
   boost::python::list l;
   auto next_action = self.GetNextAction(actor_ptr->GetId());
-  l.append(RoadOptionToString(next_action.first));
-  l.append(next_action.second);
+  if (next_action.second != nullptr) {
+    l.append(RoadOptionToString(next_action.first));
+    l.append(next_action.second);
+  }
   return l;
 }
 
@@ -85,6 +87,8 @@ void export_trafficmanager() {
     .def("set_desired_speed", &ctm::TrafficManager::SetDesiredSpeed, (arg("actor"), arg("speed")))
     .def("global_percentage_speed_difference", &ctm::TrafficManager::SetGlobalPercentageSpeedDifference, (arg("percentage")))
     .def("global_lane_offset", &ctm::TrafficManager::SetGlobalLaneOffset, (arg("offset")))
+    .def("vehicle_large_vehicle_wide_turn", &ctm::TrafficManager::SetLargeVehicleWideTurn, (arg("actor"), arg("enable")))
+    .def("global_large_vehicle_wide_turn", &ctm::TrafficManager::SetGlobalLargeVehicleWideTurn, (arg("enable")))
     .def("update_vehicle_lights", &ctm::TrafficManager::SetUpdateVehicleLights, (arg("actor"), arg("do_update")))
     .def("collision_detection", &ctm::TrafficManager::SetCollisionDetection, (arg("reference_actor"), arg("other_actor"), arg("detect_collision")))
     .def("force_lane_change", &ctm::TrafficManager::SetForceLaneChange, (arg("actor"), arg("direction")))

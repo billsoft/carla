@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -28,6 +28,7 @@
 #include "carla/rpc/VehicleWheels.h"
 #include "carla/rpc/Texture.h"
 #include "carla/rpc/MaterialParameter.h"
+#include "carla/rpc/CustomV2XBytes.h"
 
 #include <optional>
 
@@ -259,12 +260,24 @@ namespace detail {
       _client.SetWeatherParameters(weather);
     }
 
+    float GetIMUSensorGravity() {
+      return _client.GetIMUSensorGravity();
+    }
+
+    void SetIMUSensorGravity(float gravity) {
+      _client.SetIMUSensorGravity(gravity);
+    }
+
     bool IsWeatherEnabled() {
       return _client.IsWeatherEnabled();
     }
 
     rpc::VehiclePhysicsControl GetVehiclePhysicsControl(const Vehicle &vehicle) const {
       return _client.GetVehiclePhysicsControl(vehicle.GetId());
+    }
+
+    rpc::VehicleTelemetryData GetVehicleTelemetryData(const Vehicle &vehicle) const {
+      return _client.GetVehicleTelemetryData(vehicle.GetId());
     }
 
     rpc::VehicleLightState GetVehicleLightState(const Vehicle &vehicle) const {
@@ -442,6 +455,42 @@ namespace detail {
       _client.AddActorAngularImpulse(actor.GetId(), torque);
     }
 
+    geom::Transform GetActorComponentWorldTransform(const Actor &actor, const std::string &component_name) {
+      return _client.GetActorComponentWorldTransform(actor.GetId(), component_name);
+    }
+
+    geom::Transform GetActorComponentRelativeTransform(const Actor &actor, const std::string &component_name) {
+      return _client.GetActorComponentRelativeTransform(actor.GetId(), component_name);
+    }
+
+    std::vector<geom::Transform> GetActorBoneWorldTransforms(const Actor &actor) {
+      return _client.GetActorBoneWorldTransforms(actor.GetId());
+    }
+
+    std::vector<geom::Transform> GetActorBoneRelativeTransforms(const Actor &actor) {
+      return _client.GetActorBoneRelativeTransforms(actor.GetId());
+    }
+
+    std::vector<std::string> GetActorComponentNames(const Actor &actor) {
+      return _client.GetActorComponentNames(actor.GetId());
+    }
+
+    std::vector<std::string> GetActorBoneNames(const Actor &actor) {
+      return _client.GetActorBoneNames(actor.GetId());
+    }
+
+    std::vector<geom::Transform> GetActorSocketWorldTransforms(const Actor &actor) {
+      return _client.GetActorSocketWorldTransforms(actor.GetId());
+    }
+
+    std::vector<geom::Transform> GetActorSocketRelativeTransforms(const Actor &actor) {
+      return _client.GetActorSocketRelativeTransforms(actor.GetId());
+    }
+
+    std::vector<std::string> GetActorSocketNames(const Actor &actor) {
+      return _client.GetActorSocketNames(actor.GetId());
+    }
+
     geom::Vector3D GetActorAcceleration(const Actor &actor) const {
       return GetActorSnapshot(actor).acceleration;
     }
@@ -612,8 +661,8 @@ namespace detail {
     // =========================================================================
     /// @{
 
-    std::string StartRecorder(std::string name, bool additional_data) {
-      return _client.StartRecorder(std::move(name), additional_data);
+    std::string StartRecorder(std::string name, bool additional_data, bool stop_replayer) {
+      return _client.StartRecorder(std::move(name), additional_data, stop_replayer);
     }
 
     void StopRecorder(void) {
@@ -632,9 +681,11 @@ namespace detail {
       return _client.ShowRecorderActorsBlocked(std::move(name), min_time, min_distance);
     }
 
-    std::string ReplayFile(std::string name, double start, double duration,
-        uint32_t follow_id, bool replay_sensors) {
-      return _client.ReplayFile(std::move(name), start, duration, follow_id, replay_sensors);
+    std::string ReplayFile(
+      std::string name, double start, double duration,
+      uint32_t follow_id, bool replay_sensors, bool replay_weather, const geom::Transform& offset,
+      std::string map_override) {
+      return _client.ReplayFile(std::move(name), start, duration, follow_id, replay_sensors, replay_weather, offset, map_override);
     }
 
     void SetReplayerTimeFactor(double time_factor) {
@@ -679,6 +730,8 @@ namespace detail {
     void UnSubscribeFromGBuffer(
         Actor & sensor,
         uint32_t gbuffer_id);
+
+    void Send(const Sensor &sensor, const rpc::CustomV2XBytes &data);
 
     /// @}
     // =========================================================================
@@ -730,6 +783,14 @@ namespace detail {
 
     void DrawDebugShape(const rpc::DebugShape &shape) {
       _client.DrawDebugShape(shape);
+    }
+
+    void ClearDebugShape() {
+      _client.ClearDebugShape();
+    }
+
+    void ClearDebugString() {
+      _client.ClearDebugString();
     }
 
     /// @}

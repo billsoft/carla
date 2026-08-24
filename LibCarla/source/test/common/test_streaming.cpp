@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -15,6 +15,8 @@
 #include <carla/streaming/low_level/Client.h>
 #include <carla/streaming/low_level/Server.h>
 
+#include <boost/asio/executor_work_guard.hpp>
+
 #include <atomic>
 
 using namespace std::chrono_literals;
@@ -27,7 +29,7 @@ public:
   boost::asio::io_context service;
 
   explicit io_context_running(size_t threads = 2u)
-    : _work_to_do(service) {
+    : _work_to_do(boost::asio::make_work_guard(service)) {
     _threads.CreateThreads(threads, [this]() { service.run(); });
   }
 
@@ -37,7 +39,7 @@ public:
 
 private:
 
-  boost::asio::io_context::work _work_to_do;
+  boost::asio::executor_work_guard<boost::asio::io_context::executor_type> _work_to_do;
 
   carla::ThreadGroup _threads;
 };
@@ -231,8 +233,13 @@ TEST(streaming, stream_outlives_server) {
       std::this_thread::sleep_for(20ms);
     } // client dies here.
     ASSERT_GT(messages_received, 0u);
+    // Detach the sender from this iteration's stream before the server tears
+    // down. Otherwise the sender can call Session::Write on a session whose
+    // io_context is being stopped inside ~Server, which segfaults
+    // intermittently in Release builds on slow runners.
+    std::atomic_store_explicit(&stream, std::shared_ptr<Stream>(), std::memory_order_relaxed);
+    std::this_thread::sleep_for(20ms);
   } // server dies here.
-  std::this_thread::sleep_for(20ms);
   done = true;
 } // stream dies here.
 
@@ -276,4 +283,59 @@ TEST(streaming, multi_stream) {
       ASSERT_GE(pair.first, number_of_messages - 3u);
     }
   }
+}
+
+// When the ROS2 topic-visibility default is left off (the out-of-the-box
+// behavior), a freshly created stream is not visible to ROS 2 until something
+// explicitly enables it.
+TEST(streaming, ros_topic_visibility_default_off) {
+  using namespace carla::streaming;
+  using namespace carla::streaming::detail;
+
+  Server srv(TESTING_PORT);
+  constexpr stream_id_type sensor_id{1u};
+  srv.GetToken(sensor_id); // Materializes the stream in the dispatcher.
+  EXPECT_FALSE(srv.IsEnabledForROS(sensor_id));
+}
+
+// With the default flag on, every stream created afterwards is ROS-visible from
+// the moment it is born (this is what ROS2TopicVisibility=true delivers).
+TEST(streaming, ros_topic_visibility_default_on) {
+  using namespace carla::streaming;
+  using namespace carla::streaming::detail;
+
+  Server srv(TESTING_PORT);
+  srv.SetROS2TopicVisibilityDefaultEnabled(true);
+  constexpr stream_id_type sensor_id{1u};
+  srv.GetToken(sensor_id);
+  EXPECT_TRUE(srv.IsEnabledForROS(sensor_id));
+}
+
+// The default flag must also apply to streams born through MakeStream(), not
+// only through the GetToken() create-on-miss path.
+TEST(streaming, ros_topic_visibility_make_stream_path) {
+  using namespace carla::streaming;
+  using namespace carla::streaming::detail;
+
+  Server srv(TESTING_PORT);
+  srv.SetROS2TopicVisibilityDefaultEnabled(true);
+  auto stream = srv.MakeStream();
+  const auto sensor_id = token_type(stream.token()).get_stream_id();
+  EXPECT_TRUE(srv.IsEnabledForROS(sensor_id));
+}
+
+// Independently of the startup default, the per-stream EnableForROS /
+// DisableForROS surface this feature relies on must round-trip.
+TEST(streaming, ros_topic_visibility_manual_toggle) {
+  using namespace carla::streaming;
+  using namespace carla::streaming::detail;
+
+  Server srv(TESTING_PORT);
+  constexpr stream_id_type sensor_id{1u};
+  srv.GetToken(sensor_id);
+  EXPECT_FALSE(srv.IsEnabledForROS(sensor_id));
+  srv.EnableForROS(sensor_id);
+  EXPECT_TRUE(srv.IsEnabledForROS(sensor_id));
+  srv.DisableForROS(sensor_id);
+  EXPECT_FALSE(srv.IsEnabledForROS(sensor_id));
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -209,6 +209,22 @@ public:
     TrafficManagerBase* tm_ptr = GetTM(_port);
     if(tm_ptr != nullptr){
       tm_ptr->SetGlobalLaneOffset(offset);
+    }
+  }
+
+  /// Method to enable/disable the wide-turn manoeuvre for a single large vehicle.
+  void SetLargeVehicleWideTurn(const ActorPtr &actor, const bool enable) {
+    TrafficManagerBase* tm_ptr = GetTM(_port);
+    if(tm_ptr != nullptr){
+      tm_ptr->SetLargeVehicleWideTurn(actor, enable);
+    }
+  }
+
+  /// Method to enable/disable the wide-turn manoeuvre globally for large vehicles.
+  void SetGlobalLargeVehicleWideTurn(const bool enable) {
+    TrafficManagerBase* tm_ptr = GetTM(_port);
+    if(tm_ptr != nullptr){
+      tm_ptr->SetGlobalLargeVehicleWideTurn(enable);
     }
   }
 

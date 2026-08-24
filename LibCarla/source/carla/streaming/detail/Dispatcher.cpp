@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -46,6 +46,9 @@ namespace detail {
       auto result = _stream_map.emplace(std::make_pair(_cached_token.get_stream_id(), ptr));
       if (!result.second) {
         throw_exception(std::runtime_error("failed to create stream!"));
+      }
+      if (_topic_visibility_default_enabled) {
+        ptr->EnableForROS();
       }
       log_debug("Stream created");
       return carla::streaming::Stream(ptr);
@@ -120,9 +123,14 @@ namespace detail {
       auto ptr = std::make_shared<MultiStreamState>(temp_token);
       auto result = _stream_map.emplace(std::make_pair(temp_token.get_stream_id(), ptr));
       ptr->ForceActive();
+
+      if (_topic_visibility_default_enabled) {
+        ptr->EnableForROS();
+      }
       if (!result.second) {
         log_debug("Failed to create multistream for stream ", sensor_id, " on port ", temp_token.get_port());
       }
+
       log_debug("Created token from stream ", sensor_id, " on port ", temp_token.get_port());
       return temp_token;
     }

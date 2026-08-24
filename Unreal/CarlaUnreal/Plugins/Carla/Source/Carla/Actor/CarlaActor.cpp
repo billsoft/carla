@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -662,6 +662,21 @@ ECarlaServerResponse FVehicleActor::GetPhysicsControl(FVehiclePhysicsControl& Ph
     }
     PhysicsControl = Vehicle->GetVehiclePhysicsControl();
   }
+  return ECarlaServerResponse::Success;
+}
+
+ECarlaServerResponse FVehicleActor::GetVehicleTelemetryData(FVehicleTelemetryData& TelemetryData)
+{
+  if (IsDormant())
+  {
+    return ECarlaServerResponse::FunctionNotAvailableWhenDormant;
+  }
+  auto Vehicle = Cast<ACarlaWheeledVehicle>(GetActor());
+  if (Vehicle == nullptr)
+  {
+    return ECarlaServerResponse::NotAVehicle;
+  }
+  TelemetryData = Vehicle->GetVehicleTelemetryData();
   return ECarlaServerResponse::Success;
 }
 

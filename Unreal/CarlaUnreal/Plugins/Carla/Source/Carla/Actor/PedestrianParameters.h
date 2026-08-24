@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -43,8 +43,10 @@ struct CARLA_API FPedestrianParameters
   UPROPERTY(EditAnywhere, BlueprintReadWrite)
   FString Id;
 
+  // Soft reference so catalog parsing does not force-load the class; resolution
+  // happens in MakePedestrianDefinition before the class is handed to the dispatcher.
   UPROPERTY(EditAnywhere, BlueprintReadWrite)
-  TSubclassOf<ACharacter> Class;
+  TSoftClassPtr<ACharacter> Class;
 
   UPROPERTY(EditAnywhere, BlueprintReadWrite)
   EPedestrianGender Gender = EPedestrianGender::Other;

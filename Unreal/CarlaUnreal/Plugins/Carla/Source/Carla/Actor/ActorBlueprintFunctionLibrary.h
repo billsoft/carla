@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -23,6 +23,10 @@ class AInertialMeasurementUnit;
 class ARadar;
 class ASceneCaptureSensor;
 class AShaderBasedSensor;
+class ASceneCaptureSensor_WideAngleLens;
+class AShaderBasedSensor_WideAngleLens;
+class AV2XSensor;
+class ACustomV2XSensor;
 struct FLidarDescription;
 struct FActorDescription;
 
@@ -74,6 +78,17 @@ public:
       bool &Success,
       FActorDefinition &Definition);
 
+  static FActorDefinition MakeWideAngleLensCameraDefinition(
+      const FString &Id,
+      bool bEnableModifyingPostProcessEffects = false);
+
+  UFUNCTION(Category = "Carla Actor", BlueprintCallable)
+  static void MakeWideAngleLensCameraDefinition(
+      const FString &Id,
+      bool bEnableModifyingPostProcessEffects,
+      bool &Success,
+      FActorDefinition &Definition);
+
   static FActorDefinition MakeNormalsCameraDefinition();
 
   UFUNCTION(Category = "Carla Actor", BlueprintCallable)
@@ -108,6 +123,20 @@ public:
 
   UFUNCTION(Category = "Carla Actor", BlueprintCallable)
   static void MakeRadarDefinition(
+      bool &Success,
+      FActorDefinition &Definition);
+
+  static FActorDefinition MakeV2XDefinition();
+
+  UFUNCTION(Category = "Carla Actor", BlueprintCallable)
+  static void MakeV2XDefinition(
+      bool &Success,
+      FActorDefinition &Definition);
+
+  static FActorDefinition MakeCustomV2XDefinition();
+
+  UFUNCTION(Category = "Carla Actor", BlueprintCallable)
+  static void MakeCustomV2XDefinition(
       bool &Success,
       FActorDefinition &Definition);
 
@@ -242,6 +271,9 @@ public:
   static void SetCamera(const FActorDescription &Description, ASceneCaptureSensor *Camera);
   static void SetCamera(const FActorDescription &Description, AShaderBasedSensor *Camera);
 
+  static void SetCamera(const FActorDescription &Description, ASceneCaptureSensor_WideAngleLens *Camera);
+  static void SetCamera(const FActorDescription &Description, AShaderBasedSensor_WideAngleLens *Camera);
+
   static void SetLidar(const FActorDescription &Description, FLidarDescription &Lidar);
 
   static void SetGnss(const FActorDescription &Description, AGnssSensor *Gnss);
@@ -249,4 +281,8 @@ public:
   static void SetIMU(const FActorDescription &Description, AInertialMeasurementUnit *IMU);
 
   static void SetRadar(const FActorDescription &Description, ARadar *Radar);
+
+  static void SetV2X(const FActorDescription &Description, AV2XSensor *V2X);
+
+  static void SetCustomV2X(const FActorDescription &Description, ACustomV2XSensor *V2X);
 };

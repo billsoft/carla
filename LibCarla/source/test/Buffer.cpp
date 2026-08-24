@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -14,13 +14,17 @@ namespace buffer {
   shared_buffer make_random(size_t size) {
     if (size == 0u)
       return make_empty();
+    // independent_bits_engine requires an unsigned result type wider than
+    // char ([rand.req.genl]/1.6); MSVC enforces this with a static_assert.
     using random_bytes_engine = std::independent_bits_engine<
         std::random_device,
         CHAR_BIT,
-        unsigned char>;
+        unsigned short>;
     random_bytes_engine rbe;
     auto buffer = make_empty(size);
-    std::generate(buffer->begin(), buffer->end(), std::ref(rbe));
+    std::generate(buffer->begin(), buffer->end(), [&rbe]() {
+      return static_cast<unsigned char>(rbe());
+    });
     return buffer;
   }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -51,7 +51,11 @@ USTRUCT()
 struct FFoliageBlueprint
 {
   GENERATED_BODY()
+
+  UPROPERTY()
   FString BPFullClassName {};
+
+  UPROPERTY()
   TSubclassOf<AActor> SpawnedClass { nullptr };
 
   bool IsValid() const;

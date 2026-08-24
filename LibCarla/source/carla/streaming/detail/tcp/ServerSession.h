@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -17,14 +17,15 @@
 #  pragma clang diagnostic push
 #  pragma clang diagnostic ignored "-Wshadow"
 #endif
-#include <boost/asio/deadline_timer.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #if defined(__clang__)
 #  pragma clang diagnostic pop
 #endif
 
+#include <atomic>
 #include <functional>
 #include <memory>
 
@@ -102,13 +103,14 @@ namespace tcp {
 
     time_duration _timeout;
 
-    boost::asio::deadline_timer _deadline;
+    boost::asio::steady_timer _deadline;
 
     boost::asio::io_context::strand _strand;
 
     callback_function_type _on_closed;
 
     bool _is_writing = false;
+    std::atomic_bool _is_closed{false};
   };
 
 } // namespace tcp

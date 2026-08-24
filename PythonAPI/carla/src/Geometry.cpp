@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -6,6 +6,15 @@
 
 #include <PythonAPI.h>
 
+#include <carla/geom/Acceleration.h>
+#include <carla/geom/AngularVelocity.h>
+#include <carla/geom/GeoProjectionsParams.h>
+#include <carla/geom/Quaternion.h>
+#include <carla/geom/Velocity.h>
+
+#include <limits>
+
+#include <boost/optional.hpp>
 #include <boost/python/implicit.hpp>
 #include <boost/python/suite/indexing/vector_indexing_suite.hpp>
 
@@ -64,6 +73,14 @@ static auto GetVectorAngle(const carla::geom::Vector3D &self, const carla::geom:
   return carla::geom::Math::GetVectorAngle(self, other);
 }
 
+template <typename T>
+static boost::python::object OptionalToPythonObject(const boost::optional<T>& opt) {
+  if (opt.has_value()) {
+    return boost::python::object(*opt);
+  }
+  return boost::python::object(); // None
+}
+
 void export_geom() {
   using namespace boost::python;
   namespace cg = carla::geom;
@@ -78,7 +95,8 @@ void export_geom() {
     .def_readwrite("y", &cg::Vector2D::y)
     .def("squared_length", &cg::Vector2D::SquaredLength)
     .def("length", &cg::Vector2D::Length)
-    .def("make_unit_vector", &cg::Vector2D::MakeUnitVector)
+    .def("make_unit_vector", &cg::Vector2D::MakeUnitVector,
+        (arg("epsilon") = 2.0f * std::numeric_limits<float>::epsilon()))
     .def("__eq__", &cg::Vector2D::operator==)
     .def("__ne__", &cg::Vector2D::operator!=)
     .def(self += self)
@@ -105,7 +123,8 @@ void export_geom() {
     .def_readwrite("z", &cg::Vector3D::z)
     .def("length", &cg::Vector3D::Length)
     .def("squared_length", &cg::Vector3D::SquaredLength)
-    .def("make_unit_vector", &cg::Vector3D::MakeUnitVector)
+    .def("make_unit_vector", &cg::Vector3D::MakeUnitVector,
+        (arg("epsilon") = 2.0f * std::numeric_limits<float>::epsilon()))
     .def("cross", &Cross, (arg("vector")))
     .def("dot", &Dot, (arg("vector")))
     .def("dot_2d", &Dot2D, (arg("vector")))
@@ -143,6 +162,24 @@ void export_geom() {
     .def(self_ns::str(self_ns::self))
   ;
 
+  class_<cg::Velocity, bases<cg::Vector3D>>("Velocity")
+    .def(init<float, float, float>((arg("x")=0.0f, arg("y")=0.0f, arg("z")=0.0f)))
+    .def(init<const cg::Vector3D &>((arg("rhs"))))
+    .def(self_ns::str(self_ns::self))
+  ;
+
+  class_<cg::AngularVelocity, bases<cg::Vector3D>>("AngularVelocity")
+    .def(init<float, float, float>((arg("x")=0.0f, arg("y")=0.0f, arg("z")=0.0f)))
+    .def(init<const cg::Vector3D &>((arg("rhs"))))
+    .def(self_ns::str(self_ns::self))
+  ;
+
+  class_<cg::Acceleration, bases<cg::Vector3D>>("Acceleration")
+    .def(init<float, float, float>((arg("x")=0.0f, arg("y")=0.0f, arg("z")=0.0f)))
+    .def(init<const cg::Vector3D &>((arg("rhs"))))
+    .def(self_ns::str(self_ns::self))
+  ;
+
   class_<cg::Rotation>("Rotation")
     .def(init<float, float, float>((arg("pitch")=0.0f, arg("yaw")=0.0f, arg("roll")=0.0f)))
     .def_readwrite("pitch", &cg::Rotation::pitch)
@@ -154,6 +191,27 @@ void export_geom() {
     .def("get_normalized", &cg::Rotation::Normalize)
     .def("__eq__", &cg::Rotation::operator==)
     .def("__ne__", &cg::Rotation::operator!=)
+    .def(self_ns::str(self_ns::self))
+  ;
+
+  class_<cg::Quaternion>("Quaternion")
+    .def(init<float, float, float, float>((arg("x")=0.0f, arg("y")=0.0f, arg("z")=0.0f, arg("w")=1.0f)))
+    .def(init<const cg::Rotation &>((arg("rotation"))))
+    .def_readwrite("x", &cg::Quaternion::x)
+    .def_readwrite("y", &cg::Quaternion::y)
+    .def_readwrite("z", &cg::Quaternion::z)
+    .def_readwrite("w", &cg::Quaternion::w)
+    .def("rotator", &cg::Quaternion::Rotator)
+    .def("get_forward_vector", &cg::Quaternion::GetForwardVector)
+    .def("get_right_vector", &cg::Quaternion::GetRightVector)
+    .def("get_up_vector", &cg::Quaternion::GetUpVector)
+    .def("conjugate", &cg::Quaternion::Conjugate)
+    .def("inverse", &cg::Quaternion::Inverse)
+    .def("length", &cg::Quaternion::Length)
+    .def("unit_quaternion", &cg::Quaternion::UnitQuaternion)
+    .def("__eq__", &cg::Quaternion::operator==)
+    .def("__ne__", &cg::Quaternion::operator!=)
+    .def(self * self)
     .def(self_ns::str(self_ns::self))
   ;
 
@@ -208,5 +266,85 @@ void export_geom() {
     .def("__eq__", &cg::GeoLocation::operator==)
     .def("__ne__", &cg::GeoLocation::operator!=)
     .def(self_ns::str(self_ns::self))
+  ;
+
+  class_<cg::Ellipsoid>("GeoEllipsoid")
+    .def(init<double, double>((arg("a")=6378137.0, arg("f_inv")=std::numeric_limits<double>::infinity())))
+    .def_readwrite("a", &cg::Ellipsoid::a)
+    .def_readwrite("f_inv", &cg::Ellipsoid::f_inv)
+    .def("__eq__", &cg::Ellipsoid::operator==)
+    .def("__ne__", &cg::Ellipsoid::operator!=)
+  ;
+
+  class_<cg::OffsetTransform>("GeoOffsetTransform")
+  .def(init<double, double, double, double>((arg("offset_x")=0.0, arg("offset_y")=0.0, arg("offset_z")=0.0, arg("offset_hdg")=0.0)))
+  .def_readwrite("offset_x", &cg::OffsetTransform::offset_x)
+  .def_readwrite("offset_y", &cg::OffsetTransform::offset_y)
+  .def_readwrite("offset_z", &cg::OffsetTransform::offset_z)
+  .def_readwrite("offset_cos_h", &cg::OffsetTransform::offset_cos_h)
+  .def_readwrite("offset_sin_h", &cg::OffsetTransform::offset_sin_h)
+  .def("ApplyTransformation", &cg::OffsetTransform::ApplyTransformation)
+  .def("__eq__", &cg::OffsetTransform::operator==)
+  ;
+
+  class_<cg::TransverseMercatorParams>("GeoProjectionTM")
+    .def(init<double, double, double, double, double, cg::Ellipsoid>(
+      (arg("lat_0")=0.0, arg("lon_0")=0.0, arg("k")=1.0, arg("x_0")=0.0, arg("y_0")=0.0, arg("ellps")=cg::Ellipsoid())))
+    .def_readwrite("lat_0", &cg::TransverseMercatorParams::lat_0)
+    .def_readwrite("lon_0", &cg::TransverseMercatorParams::lon_0)
+    .def_readwrite("k", &cg::TransverseMercatorParams::k)
+    .def_readwrite("x_0", &cg::TransverseMercatorParams::x_0)
+    .def_readwrite("y_0", &cg::TransverseMercatorParams::y_0)
+    .def("__eq__", &cg::TransverseMercatorParams::operator==)
+    .def("__ne__", &cg::TransverseMercatorParams::operator!=)
+  ;
+
+  class_<cg::UniversalTransverseMercatorParams>("GeoProjectionUTM")
+    .def(init<int, bool, cg::Ellipsoid>((arg("zone")=31, arg("north")=true, arg("ellps")=cg::Ellipsoid())))
+    .def_readwrite("zone", &cg::UniversalTransverseMercatorParams::zone)
+    .def_readwrite("north", &cg::UniversalTransverseMercatorParams::north)
+    .def_readwrite("ellps", &cg::UniversalTransverseMercatorParams::ellps)
+    .add_property("offset",
+        +[](const cg::UniversalTransverseMercatorParams &self) {
+          return OptionalToPythonObject(self.offset); //returns None or OffsetTransform
+        },
+         +[](cg::UniversalTransverseMercatorParams& self, object value) {
+            if (value.is_none()) {
+                self.offset = boost::none;
+            } else {
+                extract<cg::OffsetTransform> ex(value);
+                if (!ex.check()) {
+                    PyErr_SetString(
+                        PyExc_TypeError,
+                        "offset must be OffsetTransform or None"
+                    );
+                    throw_error_already_set();
+                }
+                self.offset = ex();
+            }
+        }
+    )
+    .def("__eq__", &cg::UniversalTransverseMercatorParams::operator==)
+    .def("__ne__", &cg::UniversalTransverseMercatorParams::operator!=)
+  ;
+
+  class_<cg::WebMercatorParams>("GeoProjectionWebMerc")
+    .def(init<cg::Ellipsoid>((arg("ellps")=cg::Ellipsoid())))
+    .def_readwrite("ellps", &cg::WebMercatorParams::ellps)
+    .def("__eq__", &cg::WebMercatorParams::operator==)
+    .def("__ne__", &cg::WebMercatorParams::operator!=)
+  ;
+
+  class_<cg::LambertConformalConicParams>("GeoProjectionLCC2SP")
+    .def(init<double, double, double, double, double, double, cg::Ellipsoid>(
+      (arg("lat_0")=0.0, arg("lat_1")=0.0, arg("lat_2")=0.0, arg("lon_0")=0.0, arg("x_0")=0.0, arg("y_0")=0.0, arg("ellps")=cg::Ellipsoid())))
+    .def_readwrite("lat_0", &cg::LambertConformalConicParams::lat_0)
+    .def_readwrite("lat_1", &cg::LambertConformalConicParams::lat_1)
+    .def_readwrite("lat_2", &cg::LambertConformalConicParams::lat_2)
+    .def_readwrite("lon_0", &cg::LambertConformalConicParams::lon_0)
+    .def_readwrite("x_0", &cg::LambertConformalConicParams::x_0)
+    .def_readwrite("y_0", &cg::LambertConformalConicParams::y_0)
+    .def("__eq__", &cg::LambertConformalConicParams::operator==)
+    .def("__ne__", &cg::LambertConformalConicParams::operator!=)
   ;
 }

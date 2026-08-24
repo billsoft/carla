@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 // Copyright (c) 2019 Intel Corporation
 //
@@ -101,7 +101,7 @@ namespace carla {
         return std::all_of(
           std::begin(cmp),
           std::end(cmp),
-          std::identity());
+          [](bool b) noexcept { return b; });
       }
 
       inline bool operator!=(const VehiclePhysicsControl& rhs) const {

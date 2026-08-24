@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -13,8 +13,11 @@
 
 #include <util/ue-header-guard-begin.h>
 #include "Async/ParallelFor.h"
+#include "Engine/AssetManager.h"
 #include "Engine/CollisionProfile.h"
 #include "Engine/StaticMeshActor.h"
+#include "Engine/StreamableManager.h"
+#include "UObject/SoftObjectPath.h"
 #include "StaticMeshResources.h"
 #include "CollisionQueryParams.h"
 #include "Landscape.h"
@@ -57,6 +60,7 @@
 // #include <carla/pytorch/pytorch.h>
 #include <util/enable-ue4-macros.h>
 
+#include <filesystem>
 #include <algorithm>
 #include <fstream>
 #include <thread>
@@ -64,18 +68,39 @@
 
 #undef CreateDirectory
 
-
+namespace fs = std::filesystem;
 
 constexpr float MToCM = 100.f;
 constexpr float CMToM = 0.01f;
- 
+
 const int CacheExtraRadius = 10;
 
+// Async heightmap streaming on tile cross. Default 1 = async via
+// FStreamableManager; 0 = legacy synchronous StaticLoadObject path (rollback).
+static TAutoConsoleVariable<int32> CVarAsyncHeightmapLoad(
+    TEXT("carla.Terrain.AsyncHeightmapLoad"),
+    1,
+    TEXT("When non-zero (default), CustomTerrainPhysicsComponent loads heightmap ")
+    TEXT("data assets asynchronously on tile crossings instead of issuing a ")
+    TEXT("blocking StaticLoadObject on the game thread. Set to 0 to force the ")
+    TEXT("legacy synchronous path (for rollback/debugging)."),
+    ECVF_Default);
+
+static std::string CachePath = [] {
+  constexpr char OverridePathEV[] = "CARLA_CACHE_DIR";
+  constexpr char HomePathEV[] =
 #ifdef _WIN32
-      std::string _filesBaseFolder = std::string(getenv("USERPROFILE")) + "/carlaCache/";
+      "USERPROFILE";
 #else
-      std::string _filesBaseFolder = std::string(getenv("HOME")) + "/carlaCache/";
+      "HOME";
 #endif
+  const char* override_path = std::getenv(OverridePathEV);
+  if (override_path != NULL)
+    return fs::path(override_path).string();
+  fs::path path = std::getenv(HomePathEV);
+  path /= "carlaCache";
+  return fs::absolute(path).string();
+}();
 
 FVector SIToUEFrame(const FVector& In)
 {
@@ -1298,7 +1323,7 @@ void UCustomTerrainPhysicsComponent::BeginPlay()
   FString LevelName = GetWorld()->GetMapName();
   LevelName.RemoveFromStart(GetWorld()->StreamingLevelsPrefix);
   
-  SavePath = FString(_filesBaseFolder.c_str()) + LevelName + "_Terrain/";
+  SavePath = FString(CachePath.c_str()) + LevelName + "_Terrain/";
   SparseMap.SavePath = SavePath;
   // Creating the FileManager
   IPlatformFile& FileManager = FPlatformFileManager::Get().GetPlatformFile();
@@ -1409,8 +1434,53 @@ void UCustomTerrainPhysicsComponent::EndPlay(const EEndPlayReason::Type EndPlayR
     TilesWorker = nullptr;
   }
 
+  if (PendingHeightMapHandle.IsValid())
+  {
+    PendingHeightMapHandle->CancelHandle();
+    PendingHeightMapHandle.Reset();
+  }
+
   TRACE_CPUPROFILER_EVENT_SCOPE(FSparseHighDetailMap::SaveMap);
   SparseMap.SaveMap();
+}
+
+void UCustomTerrainPhysicsComponent::OnHeightMapLoaded()
+{
+  if (!PendingHeightMapHandle.IsValid())
+  {
+    return;
+  }
+  UObject* LoadedObject = PendingHeightMapHandle->GetLoadedAsset();
+  const FIntVector TargetTileId = PendingHeightMapTileId;
+  PendingHeightMapHandle.Reset();
+
+  UHeightMapDataAsset* HeightMapDataAsset = Cast<UHeightMapDataAsset>(LoadedObject);
+  if (HeightMapDataAsset == nullptr || LargeMapManager == nullptr)
+  {
+    UE_LOG(LogCarla, Warning,
+        TEXT("UCustomTerrainPhysicsComponent::OnHeightMapLoaded: async load for tile %s resolved but asset is unusable"),
+        *TargetTileId.ToString());
+    return;
+  }
+
+  ActiveHeightMap = HeightMapDataAsset;
+  FVector TilePosition =
+      HeightMapOffset
+      + LargeMapManager->GetTileLocation(TargetTileId)
+      - 0.5f * FVector(LargeMapManager->GetTileSize(), -LargeMapManager->GetTileSize(), 0);
+  UE_LOG(LogCarla, Log,
+      TEXT("Async height map loaded for tile %s at location %s"),
+      *TargetTileId.ToString(), *TilePosition.ToString());
+  TilePosition.Z += UEFrameToSI(FloorHeight);
+  SparseMap.UpdateHeightMap(
+      HeightMapDataAsset,
+      UEFrameToSI(TilePosition),
+      UEFrameToSI(FVector(
+          LargeMapManager->GetTileSize(),
+          -LargeMapManager->GetTileSize(),
+          0)),
+      1.f,
+      HeightMapScaleFactor.Z);
 }
 
 void UCustomTerrainPhysicsComponent::TickComponent(float DeltaTime, 
@@ -1464,20 +1534,44 @@ void UCustomTerrainPhysicsComponent::TickComponent(float DeltaTime,
           UE_LOG(LogCarla, Log, TEXT("Enter tile %s, %s \n %s \n %s \n %s"), *CurrentTileId.ToString(), 
               *FullTileNamePath, *TileDirectory, *TileName, *Extension);
 
-          UObject* DataAssetObject = StaticLoadObject(UHeightMapDataAsset::StaticClass(), nullptr, *(AssetPath));
-          if(DataAssetObject)
+          if (CVarAsyncHeightmapLoad.GetValueOnGameThread() != 0)
           {
-            UHeightMapDataAsset* HeightMapDataAsset = Cast<UHeightMapDataAsset>(DataAssetObject);
-            if (HeightMapDataAsset != nullptr)
+            // Cancel any in-flight load for a previous tile — we are crossing
+            // into a different tile, so the previous heightmap is no longer
+            // the target. The callback is bound via CreateUObject, so even if
+            // it fires after cancellation it is a no-op on a reset handle.
+            if (PendingHeightMapHandle.IsValid())
             {
-              FVector TilePosition = HeightMapOffset + LargeMapManager->GetTileLocation(CurrentLargeMapTileId) - 0.5f*FVector(LargeMapManager->GetTileSize(), -LargeMapManager->GetTileSize(), 0);
-              UE_LOG(LogCarla, Log, TEXT("Updating height map to location %s in tile location %s"), 
-                  *TilePosition.ToString(), *LargeMapManager->GetTileLocation(CurrentLargeMapTileId).ToString());
-              TilePosition.Z += UEFrameToSI(FloorHeight) ;
-              SparseMap.UpdateHeightMap(
-                  HeightMapDataAsset, UEFrameToSI(TilePosition), UEFrameToSI(FVector(
-                    LargeMapManager->GetTileSize(),-LargeMapManager->GetTileSize(), 0)), 
-                  1.f, HeightMapScaleFactor.Z);
+              PendingHeightMapHandle->CancelHandle();
+              PendingHeightMapHandle.Reset();
+            }
+            PendingHeightMapTileId = CurrentTileId;
+            FSoftObjectPath HeightMapSoftPath(AssetPath);
+            FStreamableManager& Streamable = UAssetManager::GetStreamableManager();
+            PendingHeightMapHandle = Streamable.RequestAsyncLoad(
+                HeightMapSoftPath,
+                FStreamableDelegate::CreateUObject(
+                    this,
+                    &UCustomTerrainPhysicsComponent::OnHeightMapLoaded));
+          }
+          else
+          {
+            UObject* DataAssetObject = StaticLoadObject(UHeightMapDataAsset::StaticClass(), nullptr, *(AssetPath));
+            if(DataAssetObject)
+            {
+              UHeightMapDataAsset* HeightMapDataAsset = Cast<UHeightMapDataAsset>(DataAssetObject);
+              if (HeightMapDataAsset != nullptr)
+              {
+                FVector TilePosition = HeightMapOffset + LargeMapManager->GetTileLocation(CurrentLargeMapTileId) - 0.5f*FVector(LargeMapManager->GetTileSize(), -LargeMapManager->GetTileSize(), 0);
+                UE_LOG(LogCarla, Log, TEXT("Updating height map to location %s in tile location %s"),
+                    *TilePosition.ToString(), *LargeMapManager->GetTileLocation(CurrentLargeMapTileId).ToString());
+                TilePosition.Z += UEFrameToSI(FloorHeight) ;
+                ActiveHeightMap = HeightMapDataAsset;
+                SparseMap.UpdateHeightMap(
+                    HeightMapDataAsset, UEFrameToSI(TilePosition), UEFrameToSI(FVector(
+                      LargeMapManager->GetTileSize(),-LargeMapManager->GetTileSize(), 0)),
+                    1.f, HeightMapScaleFactor.Z);
+              }
             }
           }
         }

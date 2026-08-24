@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -45,6 +45,14 @@ static EQualityLevel QualityLevelFromString(
   if (SQualitySettingsLevel.Equals("Low"))
   {
     return EQualityLevel::Low;
+  }
+  if (SQualitySettingsLevel.Equals("Medium"))
+  {
+    return EQualityLevel::Medium;
+  }
+  if (SQualitySettingsLevel.Equals("High"))
+  {
+    return EQualityLevel::High;
   }
   if (SQualitySettingsLevel.Equals("Epic"))
   {

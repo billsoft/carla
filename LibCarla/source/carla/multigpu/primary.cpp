@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -17,6 +17,7 @@
 #include <boost/asio/post.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 namespace carla {
@@ -34,7 +35,7 @@ namespace multigpu {
       _session_id(SESSION_COUNTER++),
       _socket(io_context),
       _timeout(timeout),
-      _deadline(io_context),
+      _deadline(io_context, std::chrono::steady_clock::time_point::max()),
       _strand(io_context),
       _buffer_pool(std::make_shared<BufferPool>()) {}
 
@@ -76,18 +77,16 @@ namespace multigpu {
         return;
       }
 
-      auto handle_sent = [weak, message](const boost::system::error_code &ec, size_t DEBUG_ONLY(bytes)) {
+      auto handle_sent = [weak, message](const boost::system::error_code &ec, size_t) {
         auto self = weak.lock();
         if (!self) return;
         if (ec) {
           log_error("session ", self->_session_id, ": error sending data: ", ec.message());
           self->CloseNow(ec);
-        } else {
-          // DEBUG_ASSERT_EQ(bytes, sizeof(message_size_type) + message->size());
         }
       };
 
-      self->_deadline.expires_from_now(self->_timeout);
+      self->_deadline.expires_after(self->_timeout.to_chrono());
       boost::asio::async_write(
           self->_socket,
           message->GetBufferSequence(),
@@ -105,8 +104,8 @@ namespace multigpu {
       }
 
       // sent first size buffer
-      self->_deadline.expires_from_now(self->_timeout);
-      int this_size = text.size();
+      self->_deadline.expires_after(self->_timeout.to_chrono());
+      int this_size = static_cast<int>(text.size());
       boost::asio::async_write(
           self->_socket,
           boost::asio::buffer(&this_size, sizeof(this_size)),
@@ -146,7 +145,7 @@ namespace multigpu {
 
       auto handle_read_header = [weak, message, handle_read_data](
           boost::system::error_code ec,
-          size_t DEBUG_ONLY(bytes)) {
+          size_t) {
         auto self = weak.lock();
         if (!self) return;
         if (!ec && (message->size() > 0u)) {
@@ -183,7 +182,7 @@ namespace multigpu {
   }
 
   void Primary::StartTimer() {
-    if (_deadline.expires_at() <= boost::asio::deadline_timer::traits_type::now()) {
+    if (_deadline.expiry() <= std::chrono::steady_clock::now()) {
       log_debug("session ", _session_id, " time out");
       Close();
     } else {

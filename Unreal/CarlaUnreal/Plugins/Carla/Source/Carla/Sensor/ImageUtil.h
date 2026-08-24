@@ -1,10 +1,12 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT>.
 
 #pragma once
+
+#include "Carla/Sensor/RHIGPUReadbackPool.h"
 
 #include <util/ue-header-guard-begin.h>
 #include <CoreMinimal.h>
@@ -127,6 +129,16 @@ namespace ImageUtil
   bool ReadImageDataAsync(
     UTextureRenderTarget2D& RenderTarget,               // Render target to read from.
     ReadImageDataAsyncCallback&& Callback               // Callback to invoke when the image is available.
+  );
+
+
+
+  // Pool-aware variant: when Pool is non-null, the per-call FRHIGPUTextureReadback
+  // alloc is recycled through the per-sensor pool.
+  bool ReadImageDataAsync(
+    UTextureRenderTarget2D& RenderTarget,
+    FRHIGPUReadbackPoolPtr Pool,
+    ReadImageDataAsyncCallback&& Callback
   );
 
 

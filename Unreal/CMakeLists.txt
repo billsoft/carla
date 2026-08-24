@@ -72,7 +72,6 @@ set (
   carla-server
   libsqlite3
   Boost::asio
-  Boost::python
   Boost::geometry
   Boost::gil
   Eigen3::Eigen
@@ -80,6 +79,10 @@ set (
   png_static
   rpc
 )
+
+if (BUILD_PYTHON_API)
+  list (APPEND UE_DEPENDENCIES Boost::python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR})
+endif ()
 
 set (UE_DEPENDENCIES_ORDER_ONLY ${UE_DEPENDENCIES})
 
@@ -412,6 +415,12 @@ function (
   set (TARGET_NAME_SHORT package${TARGET_NAME_SUFFIX})
   set (TARGET_NAME carla-unreal-${TARGET_NAME_SHORT})
 
+  set (CARLA_PACKAGE_EXTRA_UAT_ARGS)
+  if (NOT "${CARLA_MAPS_TO_COOK}" STREQUAL "")
+    list (APPEND CARLA_PACKAGE_EXTRA_UAT_ARGS "-MapsToCook=${CARLA_MAPS_TO_COOK}")
+    carla_message ("package(${PACKAGE_CONFIGURATION}): cooking only ${CARLA_MAPS_TO_COOK}")
+  endif ()
+
   carla_add_custom_target (
     ${TARGET_NAME}
     "Create a CARLA package in ${PACKAGE_CONFIGURATION} mode."
@@ -441,6 +450,7 @@ function (
       -build
       -stagingdirectory=${CARLA_PACKAGE_STAGING_PATH}
       -archivedirectory=${CARLA_PACKAGE_ARCHIVE_PATH}
+      ${CARLA_PACKAGE_EXTRA_UAT_ARGS}
     USES_TERMINAL
     VERBATIM
   )
@@ -494,9 +504,12 @@ function (
 
   add_dependencies (
     ${TARGET_NAME}
-    carla-python-api
     carla-unreal-editor
   )
+
+  if (BUILD_PYTHON_API)
+    add_dependencies (${TARGET_NAME} carla-python-api)
+  endif ()
 
   carla_add_custom_target (
     ${TARGET_NAME_SHORT}

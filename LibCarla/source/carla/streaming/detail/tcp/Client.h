@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -12,9 +12,9 @@
 #include "carla/streaming/detail/Token.h"
 #include "carla/streaming/detail/Types.h"
 
-#include <boost/asio/deadline_timer.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 
 #include <atomic>
@@ -72,7 +72,7 @@ namespace tcp {
 
     boost::asio::io_context::strand _strand;
 
-    boost::asio::deadline_timer _connection_timer;
+    boost::asio::steady_timer _connection_timer;
 
     std::shared_ptr<BufferPool> _buffer_pool;
 

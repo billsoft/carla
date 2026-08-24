@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB). This work is licensed under the terms of the MIT license. For a copy, see <https://opensource.org/licenses/MIT>.
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB). This work is licensed under the terms of the MIT license. For a copy, see <https://opensource.org/licenses/MIT>.
 
 
 #include "ProceduralBuilding.h"
@@ -25,11 +25,11 @@ UHierarchicalInstancedStaticMeshComponent* AProceduralBuilding::GetHISMComp(
 
   FString SMName = SM->GetName();
 
-  UHierarchicalInstancedStaticMeshComponent** HISMCompPtr = HISMComps.Find(SMName);
+  TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* HISMCompPtr = HISMComps.Find(SMName);
 
   if(HISMCompPtr) return *HISMCompPtr;
 
-  UHierarchicalInstancedStaticMeshComponent* HISMComp = *HISMCompPtr;
+  UHierarchicalInstancedStaticMeshComponent* HISMComp = nullptr;
 
   // If it doesn't exist, create the component
   HISMComp = NewObject<UHierarchicalInstancedStaticMeshComponent>(this,

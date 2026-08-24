@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -90,6 +90,16 @@ namespace client {
 
   bool ServerSideSensor::IsEnabledForROS(){
     return GetEpisode().Lock()->IsEnabledForROS(*this);
+  }
+
+  void ServerSideSensor::Send(const rpc::CustomV2XBytes &data) {
+    log_debug("calling sensor Send() ", GetDisplayId());
+    if (GetActorDescription().description.id != "sensor.other.v2x_custom")
+    {
+      log_warning("Send methods are not supported on non-V2X sensors (sensor.other.v2x_custom).");
+      return;
+    }
+    GetEpisode().Lock()->Send(*this, data);
   }
 
   bool ServerSideSensor::Destroy() {

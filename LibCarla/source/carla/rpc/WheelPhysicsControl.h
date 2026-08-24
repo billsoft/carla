@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -10,7 +10,6 @@
 #include "carla/geom/Vector3D.h"
 #include "carla/geom/Location.h"
 #include "carla/MsgPack.h"
-
 
 
 namespace carla {
@@ -99,7 +98,7 @@ namespace carla {
           old_location == rhs.old_location,
           velocity == rhs.velocity
         };
-        return std::all_of(std::begin(cmp), std::end(cmp), std::identity());
+        return std::all_of(std::begin(cmp), std::end(cmp), [](bool b) noexcept { return b; });
       }
 
       inline bool operator!=(const WheelPhysicsControl& rhs) const {

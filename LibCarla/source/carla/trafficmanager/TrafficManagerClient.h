@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -106,6 +106,18 @@ public:
   void SetGlobalLaneOffset(const float offset) {
     DEBUG_ASSERT(_client != nullptr);
     _client->call("set_global_lane_offset", offset);
+  }
+
+  /// Method to enable/disable the wide-turn manoeuvre for a single large vehicle.
+  void SetLargeVehicleWideTurn(const carla::rpc::Actor &_actor, const bool enable) {
+    DEBUG_ASSERT(_client != nullptr);
+    _client->call("set_large_vehicle_wide_turn", std::move(_actor), enable);
+  }
+
+  /// Method to enable/disable the wide-turn manoeuvre globally for large vehicles.
+  void SetGlobalLargeVehicleWideTurn(const bool enable) {
+    DEBUG_ASSERT(_client != nullptr);
+    _client->call("set_global_large_vehicle_wide_turn", enable);
   }
 
   /// Method to set the automatic management of the vehicle lights

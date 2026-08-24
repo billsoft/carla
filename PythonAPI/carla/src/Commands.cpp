@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -50,7 +50,7 @@ void export_commands() {
 
   using ActorPtr = carla::SharedPtr<cc::Actor>;
 
-  object command_module(handle<>(borrowed(PyImport_AddModule("libcarla.command"))));
+  object command_module(handle<>(borrowed(PyImport_AddModule("carla.command"))));
   scope().attr("command") = command_module;
   scope submodule_scope = command_module;
 

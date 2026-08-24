@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -246,6 +246,11 @@ public:
     return ECarlaServerResponse::ActorTypeMismatch;
   }
 
+  virtual ECarlaServerResponse GetVehicleTelemetryData(FVehicleTelemetryData&)
+  {
+    return ECarlaServerResponse::ActorTypeMismatch;
+  }
+
   virtual ECarlaServerResponse GetFailureState(carla::rpc::VehicleFailureState&)
   {
     return ECarlaServerResponse::ActorTypeMismatch;
@@ -484,6 +489,8 @@ public:
   virtual ECarlaServerResponse DisableActorConstantVelocity() final;
 
   virtual ECarlaServerResponse GetPhysicsControl(FVehiclePhysicsControl& PhysicsControl) final;
+
+  virtual ECarlaServerResponse GetVehicleTelemetryData(FVehicleTelemetryData& TelemetryData) final;
 
   virtual ECarlaServerResponse GetFailureState(carla::rpc::VehicleFailureState&) final;
 

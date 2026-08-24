@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -75,7 +75,13 @@ namespace client {
         if (tics_correct >= 2)
           return id;
 
-        Tick(local_timeout);
+        if (settings.synchronous_mode) {
+          // only drive the simulation forward in synchronous mode; in
+          // asynchronous mode wait for the server to advance on its own
+          Tick(local_timeout);
+        } else {
+          WaitForTick(local_timeout);
+        }
       }
 
       log_warning("World::ApplySettings: After", number_of_attemps, " attemps, the settings were not correctly set. Please check that everything is consistent.");
@@ -89,6 +95,14 @@ namespace client {
 
   void World::SetWeather(const rpc::WeatherParameters &weather) {
     _episode.Lock()->SetWeatherParameters(weather);
+  }
+
+  float World::GetIMUSensorGravity() const {
+    return _episode.Lock()->GetIMUSensorGravity();
+  }
+
+  void World::SetIMUSensorGravity(float gravity) {
+    _episode.Lock()->SetIMUSensorGravity(gravity);
   }
 
   bool World::IsWeatherEnabled() const {

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -10,10 +10,14 @@
 #include "Carla/Sensor/GnssSensor.h"
 #include "Carla/Sensor/Radar.h"
 #include "Carla/Sensor/InertialMeasurementUnit.h"
+#include "Carla/Sensor/V2XSensor.h"
+#include "Carla/Sensor/CustomV2XSensor.h"
 #include "Carla/Sensor/LidarDescription.h"
 #include "Carla/Sensor/SceneCaptureSensor.h"
 #include "Carla/Sensor/SceneCaptureCamera.h" // Added
 #include "Carla/Sensor/ShaderBasedSensor.h"
+#include "Carla/Sensor/SceneCaptureSensor_WideAngleLens.h"
+#include "Carla/Sensor/ShaderBasedSensor_WideAngleLens.h"
 #include "Carla/Util/ScopedStack.h"
 #include "BlueprintLibary/PostProcessJsonUtils.h"
 #include "Engine/StaticMeshActor.h"
@@ -21,6 +25,14 @@
 #include <algorithm>
 #include <limits>
 #include <stack>
+
+static constexpr float DefaultKannalaBrandtCoefficients[] =
+{
+  0.08309221636708493f,
+  0.01112126630599195f,
+  0.008587261043925865f,
+  0.0008542188930970716f
+};
 
 /// Checks validity of FActorDefinition.
 class FActorDefinitionValidator
@@ -378,6 +390,17 @@ void UActorBlueprintFunctionLibrary::MakeCameraDefinition(
   LensYSize.RecommendedValues = {TEXT("0.08")};
   LensYSize.bRestrictToRecommended = false;
 
+  // Per-sensor hardware ray-tracing opt-out. Defaults to true so camera
+  // output matches the simulator viewport. Set to false to skip the ~700
+  // MiB-1 GiB VRAM cost of per-camera HW-RT for sensors that do not need
+  // it (depth, semantic, lidar). The global CVar carla.Camera.UseRayTracing
+  // forces on/off across every camera regardless of this attribute.
+  FActorVariation UseRayTracing;
+  UseRayTracing.Id = TEXT("use_ray_tracing");
+  UseRayTracing.Type = EActorAttributeType::Bool;
+  UseRayTracing.RecommendedValues = {TEXT("true")};
+  UseRayTracing.bRestrictToRecommended = false;
+
   Definition.Variations.Append({ResX,
                                 ResY,
                                 FOV,
@@ -386,7 +409,8 @@ void UActorBlueprintFunctionLibrary::MakeCameraDefinition(
                                 LensK,
                                 LensKcube,
                                 LensXSize,
-                                LensYSize});
+                                LensYSize,
+                                UseRayTracing});
 
   if (bEnableModifyingPostProcessEffects)
   {
@@ -400,11 +424,418 @@ void UActorBlueprintFunctionLibrary::MakeCameraDefinition(
     FActorVariation post_process_profile;
     post_process_profile.Id = TEXT("post_process_profile");
     post_process_profile.Type = EActorAttributeType::String;
-    post_process_profile.RecommendedValues = {TEXT("default")};
+    post_process_profile.RecommendedValues = {TEXT("Default")};
     post_process_profile.bRestrictToRecommended = false;
 
     Definition.Variations.Append({PostProccess, post_process_profile});
 
+  }
+
+  Success = CheckActorDefinition(Definition);
+}
+
+FActorDefinition UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
+    const FString &Id,
+    bool bEnableModifyingPostProcessEffects)
+{
+  FActorDefinition Definition;
+  bool Success;
+  MakeWideAngleLensCameraDefinition(Id, bEnableModifyingPostProcessEffects, Success, Definition);
+  check(Success);
+  return Definition;
+}
+
+void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
+    const FString &Id,
+    bool bEnableModifyingPostProcessEffects,
+    bool &Success,
+    FActorDefinition &Definition)
+{
+  FillIdAndTags(Definition, TEXT("sensor"), TEXT("camera"), Id + TEXT("_fisheye"));
+  AddRecommendedValuesForSensorRoleNames(Definition);
+  AddVariationsForSensor(Definition);
+
+  // Camera Model
+  FActorVariation CameraModel;
+  CameraModel.Id = TEXT("camera_model");
+  CameraModel.Type = EActorAttributeType::String;
+  CameraModel.RecommendedValues = {TEXT("perspective")};
+  CameraModel.bRestrictToRecommended = false;
+
+  // Coefficient #1
+  FActorVariation K0;
+  K0.Id = TEXT("k0");
+  K0.Type = EActorAttributeType::Float;
+  K0.RecommendedValues = {FString::SanitizeFloat(DefaultKannalaBrandtCoefficients[0])};
+  K0.bRestrictToRecommended = false;
+
+  // Coefficient #2
+  FActorVariation K1;
+  K1.Id = TEXT("k1");
+  K1.Type = EActorAttributeType::Float;
+  K1.RecommendedValues = {FString::SanitizeFloat(DefaultKannalaBrandtCoefficients[1])};
+  K1.bRestrictToRecommended = false;
+
+  // Coefficient #3
+  FActorVariation K2;
+  K2.Id = TEXT("k2");
+  K2.Type = EActorAttributeType::Float;
+  K2.RecommendedValues = {FString::SanitizeFloat(DefaultKannalaBrandtCoefficients[2])};
+  K2.bRestrictToRecommended = false;
+
+  // Coefficient #4
+  FActorVariation K3;
+  K3.Id = TEXT("k3");
+  K3.Type = EActorAttributeType::Float;
+  K3.RecommendedValues = {FString::SanitizeFloat(DefaultKannalaBrandtCoefficients[3])};
+  K3.bRestrictToRecommended = false;
+
+  // FOV
+  FActorVariation WAL_FOV;
+  WAL_FOV.Id = TEXT("fov");
+  WAL_FOV.Type = EActorAttributeType::Float;
+  WAL_FOV.RecommendedValues = {TEXT("90.0")};
+  WAL_FOV.bRestrictToRecommended = false;
+
+  // Focal Length
+  FActorVariation FocalLength;
+  FocalLength.Id = TEXT("focal_length");
+  FocalLength.Type = EActorAttributeType::Float;
+  FocalLength.RecommendedValues = {TEXT("0.0")};
+  FocalLength.bRestrictToRecommended = false;
+
+  FActorVariation WAL_Perspective;
+  WAL_Perspective.Id = TEXT("perspective");
+  WAL_Perspective.Type = EActorAttributeType::Bool;
+  WAL_Perspective.RecommendedValues = {TEXT("false")};
+  WAL_Perspective.bRestrictToRecommended = false;
+
+  FActorVariation Equirectangular;
+  Equirectangular.Id = TEXT("equirectangular");
+  Equirectangular.Type = EActorAttributeType::Bool;
+  Equirectangular.RecommendedValues = {TEXT("false")};
+  Equirectangular.bRestrictToRecommended = false;
+
+  FActorVariation FOVMask;
+  FOVMask.Id = TEXT("fov_mask");
+  FOVMask.Type = EActorAttributeType::Bool;
+  FOVMask.RecommendedValues = {TEXT("false")};
+  FOVMask.bRestrictToRecommended = false;
+
+  FActorVariation FOVFadeSize;
+  FOVFadeSize.Id = TEXT("fov_fade_size");
+  FOVFadeSize.Type = EActorAttributeType::Float;
+  FOVFadeSize.RecommendedValues = {TEXT("0.0")};
+  FOVFadeSize.bRestrictToRecommended = false;
+
+  FActorVariation LongitudeOffset;
+  LongitudeOffset.Id = TEXT("longitude_offset");
+  LongitudeOffset.Type = EActorAttributeType::Float;
+  LongitudeOffset.RecommendedValues = {TEXT("0.0")};
+  LongitudeOffset.bRestrictToRecommended = false;
+
+  // Resolution
+  FActorVariation WAL_ResX;
+  WAL_ResX.Id = TEXT("image_size_x");
+  WAL_ResX.Type = EActorAttributeType::Int;
+  WAL_ResX.RecommendedValues = {TEXT("800")};
+  WAL_ResX.bRestrictToRecommended = false;
+
+  FActorVariation WAL_ResY;
+  WAL_ResY.Id = TEXT("image_size_y");
+  WAL_ResY.Type = EActorAttributeType::Int;
+  WAL_ResY.RecommendedValues = {TEXT("600")};
+  WAL_ResY.bRestrictToRecommended = false;
+
+  // Lens parameters
+  FActorVariation WAL_LensCircleFalloff;
+  WAL_LensCircleFalloff.Id = TEXT("lens_circle_falloff");
+  WAL_LensCircleFalloff.Type = EActorAttributeType::Float;
+  WAL_LensCircleFalloff.RecommendedValues = {TEXT("5.0")};
+  WAL_LensCircleFalloff.bRestrictToRecommended = false;
+
+  FActorVariation WAL_LensCircleMultiplier;
+  WAL_LensCircleMultiplier.Id = TEXT("lens_circle_multiplier");
+  WAL_LensCircleMultiplier.Type = EActorAttributeType::Float;
+  WAL_LensCircleMultiplier.RecommendedValues = {TEXT("0.0")};
+  WAL_LensCircleMultiplier.bRestrictToRecommended = false;
+
+  FActorVariation WAL_LensK;
+  WAL_LensK.Id = TEXT("lens_k");
+  WAL_LensK.Type = EActorAttributeType::Float;
+  WAL_LensK.RecommendedValues = {TEXT("-1.0")};
+  WAL_LensK.bRestrictToRecommended = false;
+
+  FActorVariation WAL_LensKcube;
+  WAL_LensKcube.Id = TEXT("lens_kcube");
+  WAL_LensKcube.Type = EActorAttributeType::Float;
+  WAL_LensKcube.RecommendedValues = {TEXT("0.0")};
+  WAL_LensKcube.bRestrictToRecommended = false;
+
+  FActorVariation WAL_LensXSize;
+  WAL_LensXSize.Id = TEXT("lens_x_size");
+  WAL_LensXSize.Type = EActorAttributeType::Float;
+  WAL_LensXSize.RecommendedValues = {TEXT("0.08")};
+  WAL_LensXSize.bRestrictToRecommended = false;
+
+  FActorVariation WAL_LensYSize;
+  WAL_LensYSize.Id = TEXT("lens_y_size");
+  WAL_LensYSize.Type = EActorAttributeType::Float;
+  WAL_LensYSize.RecommendedValues = {TEXT("0.08")};
+  WAL_LensYSize.bRestrictToRecommended = false;
+
+  Definition.Variations.Append({
+      CameraModel,
+      K0, K1, K2, K3,
+      WAL_ResX,
+      WAL_ResY,
+      WAL_FOV,
+      FocalLength,
+      Equirectangular,
+      FOVMask,
+      FOVFadeSize,
+      LongitudeOffset,
+      WAL_Perspective,
+      WAL_LensCircleFalloff,
+      WAL_LensCircleMultiplier,
+      WAL_LensK,
+      WAL_LensKcube,
+      WAL_LensXSize,
+      WAL_LensYSize});
+
+  if (bEnableModifyingPostProcessEffects)
+  {
+    FActorVariation PostProccess;
+    PostProccess.Id = TEXT("enable_postprocess_effects");
+    PostProccess.Type = EActorAttributeType::Bool;
+    PostProccess.RecommendedValues = {TEXT("true")};
+    PostProccess.bRestrictToRecommended = false;
+
+    // Gamma
+    FActorVariation WAL_Gamma;
+    WAL_Gamma.Id = TEXT("gamma");
+    WAL_Gamma.Type = EActorAttributeType::Float;
+    WAL_Gamma.RecommendedValues = {TEXT("2.2")};
+    WAL_Gamma.bRestrictToRecommended = false;
+
+    // Motion Blur
+    FActorVariation MBIntesity;
+    MBIntesity.Id = TEXT("motion_blur_intensity");
+    MBIntesity.Type = EActorAttributeType::Float;
+    MBIntesity.RecommendedValues = {TEXT("0.45")};
+    MBIntesity.bRestrictToRecommended = false;
+
+    FActorVariation MBMaxDistortion;
+    MBMaxDistortion.Id = TEXT("motion_blur_max_distortion");
+    MBMaxDistortion.Type = EActorAttributeType::Float;
+    MBMaxDistortion.RecommendedValues = {TEXT("0.35")};
+    MBMaxDistortion.bRestrictToRecommended = false;
+
+    FActorVariation MBMinObjectScreenSize;
+    MBMinObjectScreenSize.Id = TEXT("motion_blur_min_object_screen_size");
+    MBMinObjectScreenSize.Type = EActorAttributeType::Float;
+    MBMinObjectScreenSize.RecommendedValues = {TEXT("0.1")};
+    MBMinObjectScreenSize.bRestrictToRecommended = false;
+
+    // Lens Flare
+    FActorVariation LensFlareIntensity;
+    LensFlareIntensity.Id = TEXT("lens_flare_intensity");
+    LensFlareIntensity.Type = EActorAttributeType::Float;
+    LensFlareIntensity.RecommendedValues = {TEXT("0.1")};
+    LensFlareIntensity.bRestrictToRecommended = false;
+
+    // Bloom
+    FActorVariation BloomIntensity;
+    BloomIntensity.Id = TEXT("bloom_intensity");
+    BloomIntensity.Type = EActorAttributeType::Float;
+    BloomIntensity.RecommendedValues = {TEXT("0.675")};
+    BloomIntensity.bRestrictToRecommended = false;
+
+    // Exposure
+    FActorVariation ExposureMode;
+    ExposureMode.Id = TEXT("exposure_mode");
+    ExposureMode.Type = EActorAttributeType::String;
+    ExposureMode.RecommendedValues = {TEXT("histogram"), TEXT("manual")};
+    ExposureMode.bRestrictToRecommended = true;
+
+    FActorVariation ExposureCompensation;
+    ExposureCompensation.Id = TEXT("exposure_compensation");
+    ExposureCompensation.Type = EActorAttributeType::Float;
+    ExposureCompensation.RecommendedValues = {TEXT("0.0")};
+    ExposureCompensation.bRestrictToRecommended = false;
+
+    // The camera shutter speed in seconds.
+    FActorVariation ShutterSpeed; // (1/t)
+    ShutterSpeed.Id = TEXT("shutter_speed");
+    ShutterSpeed.Type = EActorAttributeType::Float;
+    ShutterSpeed.RecommendedValues = {TEXT("200.0")};
+    ShutterSpeed.bRestrictToRecommended = false;
+
+    // The camera sensor sensitivity.
+    FActorVariation ISO; // S
+    ISO.Id = TEXT("iso");
+    ISO.Type = EActorAttributeType::Float;
+    ISO.RecommendedValues = {TEXT("100.0")};
+    ISO.bRestrictToRecommended = false;
+
+    // Defines the size of the opening for the camera lens.
+    FActorVariation Aperture; // N
+    Aperture.Id = TEXT("fstop");
+    Aperture.Type = EActorAttributeType::Float;
+    Aperture.RecommendedValues = {TEXT("1.4")};
+    Aperture.bRestrictToRecommended = false;
+
+    FActorVariation ExposureMinBright;
+    ExposureMinBright.Id = TEXT("exposure_min_bright");
+    ExposureMinBright.Type = EActorAttributeType::Float;
+    ExposureMinBright.RecommendedValues = {TEXT("10.0")};
+    ExposureMinBright.bRestrictToRecommended = false;
+
+    FActorVariation ExposureMaxBright;
+    ExposureMaxBright.Id = TEXT("exposure_max_bright");
+    ExposureMaxBright.Type = EActorAttributeType::Float;
+    ExposureMaxBright.RecommendedValues = {TEXT("12.0")};
+    ExposureMaxBright.bRestrictToRecommended = false;
+
+    FActorVariation ExposureSpeedUp;
+    ExposureSpeedUp.Id = TEXT("exposure_speed_up");
+    ExposureSpeedUp.Type = EActorAttributeType::Float;
+    ExposureSpeedUp.RecommendedValues = {TEXT("3.0")};
+    ExposureSpeedUp.bRestrictToRecommended = false;
+
+    FActorVariation ExposureSpeedDown;
+    ExposureSpeedDown.Id = TEXT("exposure_speed_down");
+    ExposureSpeedDown.Type = EActorAttributeType::Float;
+    ExposureSpeedDown.RecommendedValues = {TEXT("1.0")};
+    ExposureSpeedDown.bRestrictToRecommended = false;
+
+    // Calibration constant for 18% Albedo.
+    FActorVariation CalibrationConstant;
+    CalibrationConstant.Id = TEXT("calibration_constant");
+    CalibrationConstant.Type = EActorAttributeType::Float;
+    CalibrationConstant.RecommendedValues = {TEXT("16.0")};
+    CalibrationConstant.bRestrictToRecommended = false;
+
+    // Distance in which the Depth of Field effect should be sharp (cm).
+    FActorVariation FocalDistance;
+    FocalDistance.Id = TEXT("focal_distance");
+    FocalDistance.Type = EActorAttributeType::Float;
+    FocalDistance.RecommendedValues = {TEXT("1000.0")};
+    FocalDistance.bRestrictToRecommended = false;
+
+    // Depth blur km for 50%
+    FActorVariation DepthBlurAmount;
+    DepthBlurAmount.Id = TEXT("blur_amount");
+    DepthBlurAmount.Type = EActorAttributeType::Float;
+    DepthBlurAmount.RecommendedValues = {TEXT("1.0")};
+    DepthBlurAmount.bRestrictToRecommended = false;
+
+    // Depth blur radius in pixels at 1920x
+    FActorVariation DepthBlurRadius;
+    DepthBlurRadius.Id = TEXT("blur_radius");
+    DepthBlurRadius.Type = EActorAttributeType::Float;
+    DepthBlurRadius.RecommendedValues = {TEXT("0.0")};
+    DepthBlurRadius.bRestrictToRecommended = false;
+
+    FActorVariation MaxAperture;
+    MaxAperture.Id = TEXT("min_fstop");
+    MaxAperture.Type = EActorAttributeType::Float;
+    MaxAperture.RecommendedValues = {TEXT("1.2")};
+    MaxAperture.bRestrictToRecommended = false;
+
+    FActorVariation BladeCount;
+    BladeCount.Id = TEXT("blade_count");
+    BladeCount.Type = EActorAttributeType::Int;
+    BladeCount.RecommendedValues = {TEXT("5")};
+    BladeCount.bRestrictToRecommended = false;
+
+    FActorVariation FilmSlope;
+    FilmSlope.Id = TEXT("slope");
+    FilmSlope.Type = EActorAttributeType::Float;
+    FilmSlope.RecommendedValues = {TEXT("0.88")};
+    FilmSlope.bRestrictToRecommended = false;
+
+    FActorVariation FilmToe;
+    FilmToe.Id = TEXT("toe");
+    FilmToe.Type = EActorAttributeType::Float;
+    FilmToe.RecommendedValues = {TEXT("0.55")};
+    FilmToe.bRestrictToRecommended = false;
+
+    FActorVariation FilmShoulder;
+    FilmShoulder.Id = TEXT("shoulder");
+    FilmShoulder.Type = EActorAttributeType::Float;
+    FilmShoulder.RecommendedValues = {TEXT("0.26")};
+    FilmShoulder.bRestrictToRecommended = false;
+
+    FActorVariation FilmBlackClip;
+    FilmBlackClip.Id = TEXT("black_clip");
+    FilmBlackClip.Type = EActorAttributeType::Float;
+    FilmBlackClip.RecommendedValues = {TEXT("0.0")};
+    FilmBlackClip.bRestrictToRecommended = false;
+
+    FActorVariation FilmWhiteClip;
+    FilmWhiteClip.Id = TEXT("white_clip");
+    FilmWhiteClip.Type = EActorAttributeType::Float;
+    FilmWhiteClip.RecommendedValues = {TEXT("0.04")};
+    FilmWhiteClip.bRestrictToRecommended = false;
+
+    // Color
+    FActorVariation Temperature;
+    Temperature.Id = TEXT("temp");
+    Temperature.Type = EActorAttributeType::Float;
+    Temperature.RecommendedValues = {TEXT("6500.0")};
+    Temperature.bRestrictToRecommended = false;
+
+    FActorVariation Tint;
+    Tint.Id = TEXT("tint");
+    Tint.Type = EActorAttributeType::Float;
+    Tint.RecommendedValues = {TEXT("0.0")};
+    Tint.bRestrictToRecommended = false;
+
+    FActorVariation ChromaticIntensity;
+    ChromaticIntensity.Id = TEXT("chromatic_aberration_intensity");
+    ChromaticIntensity.Type = EActorAttributeType::Float;
+    ChromaticIntensity.RecommendedValues = {TEXT("0.0")};
+    ChromaticIntensity.bRestrictToRecommended = false;
+
+    FActorVariation ChromaticOffset;
+    ChromaticOffset.Id = TEXT("chromatic_aberration_offset");
+    ChromaticOffset.Type = EActorAttributeType::Float;
+    ChromaticOffset.RecommendedValues = {TEXT("0.0")};
+    ChromaticOffset.bRestrictToRecommended = false;
+
+    Definition.Variations.Append({
+      ExposureMode,
+      ExposureCompensation,
+      ShutterSpeed,
+      ISO,
+      Aperture,
+      PostProccess,
+      WAL_Gamma,
+      MBIntesity,
+      MBMaxDistortion,
+      LensFlareIntensity,
+      BloomIntensity,
+      MBMinObjectScreenSize,
+      ExposureMinBright,
+      ExposureMaxBright,
+      ExposureSpeedUp,
+      ExposureSpeedDown,
+      CalibrationConstant,
+      FocalDistance,
+      MaxAperture,
+      BladeCount,
+      DepthBlurAmount,
+      DepthBlurRadius,
+      FilmSlope,
+      FilmToe,
+      FilmShoulder,
+      FilmBlackClip,
+      FilmWhiteClip,
+      Temperature,
+      Tint,
+      ChromaticIntensity,
+      ChromaticOffset});
   }
 
   Success = CheckActorDefinition(Definition);
@@ -482,6 +913,16 @@ void UActorBlueprintFunctionLibrary::MakeNormalsCameraDefinition(bool &Success, 
   LensYSize.RecommendedValues = {TEXT("0.08")};
   LensYSize.bRestrictToRecommended = false;
 
+  // Per-sensor hardware ray-tracing opt-out. See MakeCameraDefinition for the
+  // full rationale; the normals pipeline does not need RT, so leaving the
+  // default at "true" still costs ~700 MiB-1 GiB of GPU memory until the
+  // attribute is set false.
+  FActorVariation UseRayTracing;
+  UseRayTracing.Id = TEXT("use_ray_tracing");
+  UseRayTracing.Type = EActorAttributeType::Bool;
+  UseRayTracing.RecommendedValues = {TEXT("true")};
+  UseRayTracing.bRestrictToRecommended = false;
+
   Definition.Variations.Append({ResX,
                                 ResY,
                                 FOV,
@@ -490,7 +931,8 @@ void UActorBlueprintFunctionLibrary::MakeNormalsCameraDefinition(bool &Success, 
                                 LensK,
                                 LensKcube,
                                 LensXSize,
-                                LensYSize});
+                                LensYSize,
+                                UseRayTracing});
 
   Success = CheckActorDefinition(Definition);
 }
@@ -749,6 +1191,35 @@ void UActorBlueprintFunctionLibrary::MakeLidarDefinition(
                                   StdDevLidar,
                                   HorizontalFOV});
   }
+  else if (Id == "hss_lidar")
+  {
+    FActorVariation HorizontalResolution;
+    HorizontalResolution.Id = TEXT("horizontal_resolution");
+    HorizontalResolution.Type = EActorAttributeType::Float;
+    HorizontalResolution.RecommendedValues = { TEXT("0.1") };
+
+    Channels.RecommendedValues = { TEXT("128") };
+    Range.RecommendedValues = { TEXT("200") };
+    Frequency.RecommendedValues = { TEXT("20") };
+    UpperFOV.RecommendedValues = { TEXT("12.9") };
+    LowerFOV.RecommendedValues = { TEXT("-12.5") };
+    HorizontalFOV.RecommendedValues = { TEXT("120.0") };
+
+    Definition.Variations.Append({
+        Channels,
+        Range,
+        Frequency,
+        UpperFOV,
+        LowerFOV,
+        AtmospAttenRate,
+        NoiseSeed,
+        DropOffGenRate,
+        DropOffIntensityLimit,
+        DropOffAtZeroIntensity,
+        StdDevLidar,
+        HorizontalFOV,
+        HorizontalResolution});
+  }
   else if (Id == "ray_cast_semantic")
   {
     Definition.Variations.Append({Channels,
@@ -846,7 +1317,10 @@ void UActorBlueprintFunctionLibrary::MakeVehicleDefinition(
   FillIdAndTags(Definition, TEXT("vehicle"), Parameters.Make, Parameters.Model);
   AddRecommendedValuesForActorRoleName(Definition,
                                        {TEXT("autopilot"), TEXT("scenario"), TEXT("ego_vehicle")});
-  Definition.Class = Parameters.Class;
+  // Resolve the soft class at definition time. The catalog stores
+  // TSoftClassPtr so JSON parsing does not force-load; the UClass is needed
+  // here to hand the dispatcher a concrete spawn target.
+  Definition.Class = Parameters.Class.LoadSynchronous();
 
   if (Parameters.RecommendedColors.Num() > 0)
   {
@@ -887,6 +1361,16 @@ void UActorBlueprintFunctionLibrary::MakeVehicleDefinition(
   TerramechanicsAttribute.bRestrictToRecommended = false;
   TerramechanicsAttribute.RecommendedValues.Emplace(TEXT("false"));
   Definition.Variations.Emplace(TerramechanicsAttribute);
+
+  // Opt-in to the ROS 2 Ackermann control topic. When true the vehicle subscribes to
+  // the Ackermann control command instead of the direct VehicleControl command; the two
+  // are mutually exclusive so they cannot fight over the actor frame to frame.
+  FActorVariation ROS2AckermannControl;
+  ROS2AckermannControl.Id = TEXT("ros2_ackermann_control");
+  ROS2AckermannControl.Type = EActorAttributeType::Bool;
+  ROS2AckermannControl.bRestrictToRecommended = false;
+  ROS2AckermannControl.RecommendedValues.Emplace(TEXT("false"));
+  Definition.Variations.Emplace(ROS2AckermannControl);
 
   Definition.Attributes.Emplace(FActorAttribute{
       TEXT("object_type"),
@@ -963,7 +1447,8 @@ void UActorBlueprintFunctionLibrary::MakePedestrianDefinition(
   /// @todo We need to validate here the params.
   FillIdAndTags(Definition, TEXT("walker"), TEXT("pedestrian"), Parameters.Id);
   AddRecommendedValuesForActorRoleName(Definition, {TEXT("pedestrian")});
-  Definition.Class = Parameters.Class;
+  // Resolve the soft class at definition time (see MakeVehicleDefinition).
+  Definition.Class = Parameters.Class.LoadSynchronous();
 
   auto GetGender = [](EPedestrianGender Value)
   {
@@ -1066,12 +1551,12 @@ void UActorBlueprintFunctionLibrary::MakePropDefinition(
   AddRecommendedValuesForActorRoleName(Definition, {TEXT("prop")});
 
   Definition.Class = AStaticMeshActor::StaticClass();
-  if (Parameters.Mesh != nullptr)
+  if (!Parameters.Mesh.IsNull())
   {
     Definition.Variations.Emplace(FActorVariation{
         TEXT("mesh_path"),
         EActorAttributeType::String,
-        {Parameters.Mesh->GetPathName()},
+        {Parameters.Mesh.ToSoftObjectPath().ToString()},
         false});
   }
 
@@ -1367,7 +1852,6 @@ void UActorBlueprintFunctionLibrary::SetCamera(
       RetrieveActorAttributeToInt("image_size_y", Description.Variations, 600));
   Camera->SetFOVAngle(
       RetrieveActorAttributeToFloat("fov", Description.Variations, 90.0f));
-
   // ========== 新增: 设置 RawType ==========
   if (Description.Variations.Contains("raw_type"))
   {
@@ -1378,6 +1862,13 @@ void UActorBlueprintFunctionLibrary::SetCamera(
     }
   }
 
+  if (Description.Variations.Contains("use_ray_tracing"))
+  {
+    Camera->SetUseRayTracing(
+        ActorAttributeToBool(
+            Description.Variations["use_ray_tracing"],
+            true));
+  }
   if (Description.Variations.Contains("enable_postprocess_effects"))
   {
     Camera->EnablePostProcessingEffects(
@@ -1385,11 +1876,35 @@ void UActorBlueprintFunctionLibrary::SetCamera(
             Description.Variations["enable_postprocess_effects"],
             true));
 
-    FString PostProcessDefaultName = RetrieveActorAttributeToString("post_process_profile",
-        Description.Variations, TEXT("default"));
+    FString PostProcessProfileName = RetrieveActorAttributeToString(
+        "post_process_profile",
+        Description.Variations,
+        TEXT(""));
+
+    // Empty or the legacy lowercase "default" sentinel means "no preference":
+    // load the profile named after the active map. Case-sensitive so an
+    // explicit "Default" still force-loads Default.json.
+    if (PostProcessProfileName.IsEmpty() || PostProcessProfileName == TEXT("default"))
+    {
+      const UWorld *World = Camera->GetWorld();
+      FString MapName{};
+      if (World != nullptr)
+      {
+        MapName = World->GetMapName();
+        MapName.RemoveFromStart(World->StreamingLevelsPrefix);
+      }
+      else
+      {
+        UE_LOG(LogCarla, Warning,
+            TEXT("SetCamera: camera has no UWorld; falling back to Default post-process profile."));
+      }
+      const FString MapJsonPath = UPostProcessJsonUtils::GetPostProcessConfigPath(MapName);
+      PostProcessProfileName = FPaths::FileExists(MapJsonPath) ? MapName : TEXT("Default");
+    }
+
     UPostProcessJsonUtils::LoadAllPostProcessFromJsonToSceneCapture(
         Camera->GetCaptureComponent(),
-        PostProcessDefaultName);
+        PostProcessProfileName);
   }
 }
 
@@ -1410,6 +1925,114 @@ void UActorBlueprintFunctionLibrary::SetCamera(
                                   RetrieveActorAttributeToFloat("lens_x_size", Description.Variations, 0.08f));
   Camera->SetFloatShaderParameter(0, TEXT("YSize_NState"),
                                   RetrieveActorAttributeToFloat("lens_y_size", Description.Variations, 0.08f));
+}
+
+void UActorBlueprintFunctionLibrary::SetCamera(
+    const FActorDescription &Desc,
+    ASceneCaptureSensor_WideAngleLens *Camera)
+{
+  CARLA_ABFL_CHECK_ACTOR(Camera);
+
+  const auto &Variations = Desc.Variations;
+
+  const auto CameraModelName = RetrieveActorAttributeToString(
+      "camera_model", Variations, "perspective");
+
+  static const FString Lookup[] =
+  {
+    TEXT("perspective"),
+    TEXT("stereographic"),
+    TEXT("equidistant"),
+    TEXT("equisolid"),
+    TEXT("orthographic"),
+    TEXT("kannala-brandt")
+  };
+
+  using I = std::underlying_type_t<ECameraModel>;
+
+  static_assert(
+      sizeof(Lookup) / sizeof(Lookup[0]) == (I)ECameraModel::MaxEnum,
+      "CameraModel string lookup size mismatch.");
+
+  I CameraModelID = 0;
+
+  while (CameraModelID < (I)ECameraModel::MaxEnum && CameraModelName != Lookup[CameraModelID])
+    ++CameraModelID;
+
+  const auto CameraModel =
+      CameraModelID != (I)ECameraModel::MaxEnum ?
+      (ECameraModel)CameraModelID :
+      ECameraModel::Default;
+
+  Camera->SetImageSize(
+      RetrieveActorAttributeToInt("image_size_x", Variations, 800),
+      RetrieveActorAttributeToInt("image_size_y", Variations, 600));
+
+  Camera->SetCameraModel(CameraModel);
+
+  if (CameraModel == ECameraModel::KannalaBrandt)
+  {
+    const float Coefficients[] =
+    {
+      RetrieveActorAttributeToFloat("k0", Variations, 0.08309221636708493f),
+      RetrieveActorAttributeToFloat("k1", Variations, 0.01112126630599195f),
+      RetrieveActorAttributeToFloat("k2", Variations, 0.008587261043925865f),
+      RetrieveActorAttributeToFloat("k3", Variations, 0.0008542188930970716f)
+    };
+
+    Camera->SetCameraCoefficients(
+        TArrayView<const float>(Coefficients, 4));
+  }
+
+  const auto FOV = RetrieveActorAttributeToFloat("fov", Variations, 90.0f);
+  const auto FocalLength = RetrieveActorAttributeToFloat("focal_length", Variations, 0.0f);
+
+  if (FOV != 0.0f)
+    Camera->SetFOVAngle(FOV);
+
+  if (FocalLength != 0.0f)
+    Camera->SetFocalLength(FocalLength);
+
+  Camera->SetRenderPerspective(RetrieveActorAttributeToBool("perspective", Variations, false));
+  Camera->SetRenderEquirectangular(RetrieveActorAttributeToBool("equirectangular", Variations, false));
+  Camera->SetFOVMaskEnable(RetrieveActorAttributeToBool("fov_mask", Variations, false));
+
+  if (Camera->GetRenderEquirectangular())
+    Camera->SetRenderEquirectangularLongitudeOffset(
+        RetrieveActorAttributeToFloat("longitude_offset", Variations, 0.0f));
+
+  if (Camera->GetFOVMaskEnable())
+    Camera->SetFOVFadeSize(RetrieveActorAttributeToFloat("fov_fade_size", Variations, 0.0f));
+
+  // Apply the post-processing attributes only when advertised (the RGB
+  // fisheye camera adds them); leaving them untouched preserves the
+  // post-processing state each derived sensor sets in its constructor.
+  if (Variations.Contains("enable_postprocess_effects"))
+    Camera->EnablePostProcessingEffects(
+        ActorAttributeToBool(Variations["enable_postprocess_effects"], true));
+
+  if (Variations.Contains("gamma"))
+    Camera->SetTargetGamma(
+        RetrieveActorAttributeToFloat("gamma", Variations, 2.2f));
+}
+
+void UActorBlueprintFunctionLibrary::SetCamera(
+    const FActorDescription &Description,
+    AShaderBasedSensor_WideAngleLens *Camera)
+{
+  CARLA_ABFL_CHECK_ACTOR(Camera);
+  Camera->SetFloatShaderParameter(0, TEXT("CircleFalloff_NState"),
+      RetrieveActorAttributeToFloat("lens_circle_falloff", Description.Variations, 5.0f));
+  Camera->SetFloatShaderParameter(0, TEXT("CircleMultiplier_NState"),
+      RetrieveActorAttributeToFloat("lens_circle_multiplier", Description.Variations, 0.0f));
+  Camera->SetFloatShaderParameter(0, TEXT("K_NState"),
+      RetrieveActorAttributeToFloat("lens_k", Description.Variations, -1.0f));
+  Camera->SetFloatShaderParameter(0, TEXT("kcube"),
+      RetrieveActorAttributeToFloat("lens_kcube", Description.Variations, 0.0f));
+  Camera->SetFloatShaderParameter(0, TEXT("XSize_NState"),
+      RetrieveActorAttributeToFloat("lens_x_size", Description.Variations, 0.08f));
+  Camera->SetFloatShaderParameter(0, TEXT("YSize_NState"),
+      RetrieveActorAttributeToFloat("lens_y_size", Description.Variations, 0.08f));
 }
 
 void UActorBlueprintFunctionLibrary::SetLidar(
@@ -1443,6 +2066,8 @@ void UActorBlueprintFunctionLibrary::SetLidar(
       RetrieveActorAttributeToFloat("dropoff_zero_intensity", Description.Variations, Lidar.DropOffAtZeroIntensity);
   Lidar.NoiseStdDev =
       RetrieveActorAttributeToFloat("noise_stddev", Description.Variations, Lidar.NoiseStdDev);
+  Lidar.HorizontalResolution =
+      RetrieveActorAttributeToFloat("horizontal_resolution", Description.Variations, Lidar.HorizontalResolution);
 }
 
 void UActorBlueprintFunctionLibrary::SetGnss(
@@ -1527,6 +2152,502 @@ void UActorBlueprintFunctionLibrary::SetRadar(
       RetrieveActorAttributeToFloat("range", Description.Variations, 100.0f) * TO_CENTIMETERS);
   Radar->SetPointsPerSecond(
       RetrieveActorAttributeToInt("points_per_second", Description.Variations, 1500));
+}
+
+// ===========================================================================
+// -- V2X sensors ------------------------------------------------------------
+// ===========================================================================
+
+FActorDefinition UActorBlueprintFunctionLibrary::MakeV2XDefinition()
+{
+  FActorDefinition Definition;
+  bool Success;
+  MakeV2XDefinition(Success, Definition);
+  check(Success);
+  return Definition;
+}
+
+void UActorBlueprintFunctionLibrary::MakeV2XDefinition(
+    bool &Success,
+    FActorDefinition &Definition)
+{
+  FillIdAndTags(Definition, TEXT("sensor"), TEXT("other"), TEXT("v2x"));
+  AddVariationsForSensor(Definition);
+
+  // - Channel id --------------------------------
+  FActorVariation ChannelId;
+  ChannelId.Id = TEXT("channel_id");
+  ChannelId.Type = EActorAttributeType::String;
+  ChannelId.RecommendedValues = { TEXT("Default") };
+  ChannelId.bRestrictToRecommended = false;  
+
+  // - Noise seed --------------------------------
+  FActorVariation NoiseSeed;
+  NoiseSeed.Id = TEXT("noise_seed");
+  NoiseSeed.Type = EActorAttributeType::Int;
+  NoiseSeed.RecommendedValues = { TEXT("0") };
+  NoiseSeed.bRestrictToRecommended = false;  
+
+  //Frequency
+  FActorVariation Frequency;
+  Frequency.Id = TEXT("frequency_ghz");
+  Frequency.Type = EActorAttributeType::Float;
+  Frequency.RecommendedValues = { TEXT("5.9")};
+
+  //TransmitPower
+  FActorVariation TransmitPower;
+  TransmitPower.Id = TEXT("transmit_power");
+  TransmitPower.Type = EActorAttributeType::Float;
+  TransmitPower.RecommendedValues = { TEXT("21.5")};
+
+  //ReceiveSensitivity
+  FActorVariation ReceiverSensitivity;
+  ReceiverSensitivity.Id = TEXT("receiver_sensitivity");
+  ReceiverSensitivity.Type = EActorAttributeType::Float;
+  ReceiverSensitivity.RecommendedValues = { TEXT("-99.0")};
+
+  //Combined Antenna Gain in dBi
+  FActorVariation CombinedAntennaGain;
+  CombinedAntennaGain.Id = TEXT("combined_antenna_gain");
+  CombinedAntennaGain.Type = EActorAttributeType::Float;
+  CombinedAntennaGain.RecommendedValues = { TEXT("10.0")};  
+
+  //Scenario
+  FActorVariation Scenario;
+  Scenario.Id = TEXT("scenario");
+  Scenario.Type = EActorAttributeType::String;
+  Scenario.RecommendedValues = { TEXT("highway"), TEXT("rural"), TEXT("urban")};
+  Scenario.bRestrictToRecommended = true;
+
+  //Path loss exponent
+  FActorVariation PLE;
+  PLE.Id = TEXT("path_loss_exponent");
+  PLE.Type = EActorAttributeType::Float;
+  PLE.RecommendedValues = { TEXT("2.7")};
+  
+
+  //FSPL reference distance for LDPL calculation
+  FActorVariation FSPL_RefDistance;
+  FSPL_RefDistance.Id = TEXT("d_ref");
+  FSPL_RefDistance.Type = EActorAttributeType::Float;
+  FSPL_RefDistance.RecommendedValues = { TEXT("1.0")};
+
+  //filter distance to speed up calculation
+  FActorVariation FilterDistance;
+  FilterDistance.Id = TEXT("filter_distance");
+  FilterDistance.Type = EActorAttributeType::Float;
+  FilterDistance.RecommendedValues = { TEXT("500.0")};
+
+  //etsi fading
+  FActorVariation EtsiFading;
+  EtsiFading.Id = TEXT("use_etsi_fading");
+  EtsiFading.Type = EActorAttributeType::Bool;
+  EtsiFading.RecommendedValues = { TEXT("true")};
+
+  //custom fading std deviation
+  FActorVariation CustomFadingStddev;
+  CustomFadingStddev.Id = TEXT("custom_fading_stddev");
+  CustomFadingStddev.Type = EActorAttributeType::Float;
+  CustomFadingStddev.RecommendedValues = { TEXT("0.0")};
+
+  // Min Cam Generation
+  FActorVariation GenCamMin;
+  GenCamMin.Id = TEXT("gen_cam_min");
+  GenCamMin.Type = EActorAttributeType::Float;
+  GenCamMin.RecommendedValues = { TEXT("0.1")};
+
+  // Max Cam Generation
+  FActorVariation GenCamMax;
+  GenCamMax.Id = TEXT("gen_cam_max");
+  GenCamMax.Type = EActorAttributeType::Float;
+  GenCamMax.RecommendedValues = { TEXT("1.0")};
+
+  //Fixed Rate
+  FActorVariation FixedRate;
+  FixedRate.Id = TEXT("fixed_rate");
+  FixedRate.Type = EActorAttributeType::Bool;
+  FixedRate.RecommendedValues = { TEXT("false")};
+
+  //path loss model
+  FActorVariation PLModel;
+  PLModel.Id = TEXT("path_loss_model");
+  PLModel.Type = EActorAttributeType::String;
+  PLModel.RecommendedValues = { TEXT("winner"), TEXT("geometric")};
+  PLModel.bRestrictToRecommended = true;
+
+  //V2x Sensor sends GNSS position in CAM messages
+  // - Latitude ----------------------------------
+  FActorVariation StdDevLat;
+  StdDevLat.Id = TEXT("noise_lat_stddev");
+  StdDevLat.Type = EActorAttributeType::Float;
+  StdDevLat.RecommendedValues = { TEXT("0.0") };
+  StdDevLat.bRestrictToRecommended = false;
+  FActorVariation BiasLat;
+  BiasLat.Id = TEXT("noise_lat_bias");
+  BiasLat.Type = EActorAttributeType::Float;
+  BiasLat.RecommendedValues = { TEXT("0.0") };
+  BiasLat.bRestrictToRecommended = false;
+
+  // - Longitude ---------------------------------
+  FActorVariation StdDevLong;
+  StdDevLong.Id = TEXT("noise_lon_stddev");
+  StdDevLong.Type = EActorAttributeType::Float;
+  StdDevLong.RecommendedValues = { TEXT("0.0") };
+  StdDevLong.bRestrictToRecommended = false;
+  FActorVariation BiasLong;
+  BiasLong.Id = TEXT("noise_lon_bias");
+  BiasLong.Type = EActorAttributeType::Float;
+  BiasLong.RecommendedValues = { TEXT("0.0") };
+  BiasLong.bRestrictToRecommended = false;
+
+  // - Altitude ----------------------------------
+  FActorVariation StdDevAlt;
+  StdDevAlt.Id = TEXT("noise_alt_stddev");
+  StdDevAlt.Type = EActorAttributeType::Float;
+  StdDevAlt.RecommendedValues = { TEXT("0.0") };
+  StdDevAlt.bRestrictToRecommended = false;
+  FActorVariation BiasAlt;
+  BiasAlt.Id = TEXT("noise_alt_bias");
+  BiasAlt.Type = EActorAttributeType::Float;
+  BiasAlt.RecommendedValues = { TEXT("0.0") };
+  BiasAlt.bRestrictToRecommended = false;
+
+    // - Heading ----------------------------------
+  FActorVariation StdDevHeading;
+  StdDevHeading.Id = TEXT("noise_head_stddev");
+  StdDevHeading.Type = EActorAttributeType::Float;
+  StdDevHeading.RecommendedValues = { TEXT("0.0") };
+  StdDevHeading.bRestrictToRecommended = false;
+  FActorVariation BiasHeading;
+  BiasHeading.Id = TEXT("noise_head_bias");
+  BiasHeading.Type = EActorAttributeType::Float;
+  BiasHeading.RecommendedValues = { TEXT("0.0") };
+  BiasHeading.bRestrictToRecommended = false;
+  
+  //V2x Sensor sends acceleration in CAM messages
+  // - Accelerometer Standard Deviation ----------
+  // X Component
+  FActorVariation StdDevAccelX;
+  StdDevAccelX.Id = TEXT("noise_accel_stddev_x");
+  StdDevAccelX.Type = EActorAttributeType::Float;
+  StdDevAccelX.RecommendedValues = { TEXT("0.0") };
+  StdDevAccelX.bRestrictToRecommended = false;
+  // Y Component
+  FActorVariation StdDevAccelY;
+  StdDevAccelY.Id = TEXT("noise_accel_stddev_y");
+  StdDevAccelY.Type = EActorAttributeType::Float;
+  StdDevAccelY.RecommendedValues = { TEXT("0.0") };
+  StdDevAccelY.bRestrictToRecommended = false;
+  // Z Component
+  FActorVariation StdDevAccelZ;
+  StdDevAccelZ.Id = TEXT("noise_accel_stddev_z");
+  StdDevAccelZ.Type = EActorAttributeType::Float;
+  StdDevAccelZ.RecommendedValues = { TEXT("0.0") };
+  StdDevAccelZ.bRestrictToRecommended = false;
+
+  // Yaw rate
+  FActorVariation StdDevYawrate;
+  StdDevYawrate.Id = TEXT("noise_yawrate_stddev");
+  StdDevYawrate.Type = EActorAttributeType::Float;
+  StdDevYawrate.RecommendedValues = { TEXT("0.0") };
+  StdDevYawrate.bRestrictToRecommended = false;
+  FActorVariation BiasYawrate;
+  BiasYawrate.Id = TEXT("noise_yawrate_bias");
+  BiasYawrate.Type = EActorAttributeType::Float;
+  BiasYawrate.RecommendedValues = { TEXT("0.0") };
+  BiasYawrate.bRestrictToRecommended = false; 
+
+  //V2x Sensor sends speed in CAM messages
+  // X Component
+  FActorVariation StdDevVelX;
+  StdDevVelX.Id = TEXT("noise_vel_stddev_x");
+  StdDevVelX.Type = EActorAttributeType::Float;
+  StdDevVelX.RecommendedValues = { TEXT("0.0") };
+  StdDevVelX.bRestrictToRecommended = false;
+
+  Definition.Variations.Append({
+    ChannelId,
+    NoiseSeed,
+    TransmitPower,
+    ReceiverSensitivity,
+    Frequency,
+    CombinedAntennaGain,
+    Scenario,
+    PLModel,
+    PLE,
+    FSPL_RefDistance,
+    FilterDistance,
+    EtsiFading,
+    CustomFadingStddev,
+    GenCamMin,
+    GenCamMax,
+    FixedRate,
+    StdDevLat,
+    BiasLat,
+    StdDevLong,
+    BiasLong,
+    StdDevAlt,
+    BiasAlt,
+    StdDevHeading,
+    BiasHeading,
+    StdDevAccelX,
+    StdDevAccelY,
+    StdDevAccelZ,
+    StdDevYawrate,
+    BiasYawrate,
+    StdDevVelX});
+  Success = CheckActorDefinition(Definition);
+}    
+
+FActorDefinition UActorBlueprintFunctionLibrary::MakeCustomV2XDefinition()
+{
+  FActorDefinition Definition;
+  bool Success;
+  MakeCustomV2XDefinition(Success, Definition);
+  check(Success);
+  return Definition;
+}
+
+void UActorBlueprintFunctionLibrary::MakeCustomV2XDefinition(
+    bool &Success,
+    FActorDefinition &Definition)
+{
+  FillIdAndTags(Definition, TEXT("sensor"), TEXT("other"), TEXT("v2x_custom"));
+  AddVariationsForSensor(Definition);
+
+  // - Channel id --------------------------------
+  FActorVariation ChannelId;
+  ChannelId.Id = TEXT("channel_id");
+  ChannelId.Type = EActorAttributeType::String;
+  ChannelId.RecommendedValues = { TEXT("Default") };
+  ChannelId.bRestrictToRecommended = false;  
+
+  // - Noise seed --------------------------------
+  FActorVariation NoiseSeed;
+  NoiseSeed.Id = TEXT("noise_seed");
+  NoiseSeed.Type = EActorAttributeType::Int;
+  NoiseSeed.RecommendedValues = { TEXT("0") };
+  NoiseSeed.bRestrictToRecommended = false;  
+
+  //TransmitPower
+  FActorVariation TransmitPower;
+  TransmitPower.Id = TEXT("transmit_power");
+  TransmitPower.Type = EActorAttributeType::Float;
+  TransmitPower.RecommendedValues = { TEXT("21.5")};
+
+  //ReceiveSensitivity
+  FActorVariation ReceiverSensitivity;
+  ReceiverSensitivity.Id = TEXT("receiver_sensitivity");
+  ReceiverSensitivity.Type = EActorAttributeType::Float;
+  ReceiverSensitivity.RecommendedValues = { TEXT("-99.0")};
+
+  //Frequency
+  FActorVariation Frequency;
+  Frequency.Id = TEXT("frequency_ghz");
+  Frequency.Type = EActorAttributeType::Float;
+  Frequency.RecommendedValues = { TEXT("5.9")};
+
+  //Combined Antenna Gain in dBi
+  FActorVariation CombinedAntennaGain;
+  CombinedAntennaGain.Id = TEXT("combined_antenna_gain");
+  CombinedAntennaGain.Type = EActorAttributeType::Float;
+  CombinedAntennaGain.RecommendedValues = { TEXT("10.0")};
+
+  //Scenario
+  FActorVariation Scenario;
+  Scenario.Id = TEXT("scenario");
+  Scenario.Type = EActorAttributeType::String;
+  Scenario.RecommendedValues = { TEXT("highway"), TEXT("rural"), TEXT("urban")};
+  Scenario.bRestrictToRecommended = true;
+
+  //Path loss exponent
+  FActorVariation PLE;
+  PLE.Id = TEXT("path_loss_exponent");
+  PLE.Type = EActorAttributeType::Float;
+  PLE.RecommendedValues = { TEXT("2.7")};
+  
+
+  //FSPL reference distance for LDPL calculation
+  FActorVariation FSPL_RefDistance;
+  FSPL_RefDistance.Id = TEXT("d_ref");
+  FSPL_RefDistance.Type = EActorAttributeType::Float;
+  FSPL_RefDistance.RecommendedValues = { TEXT("1.0")};
+
+  //filter distance to speed up calculation
+  FActorVariation FilterDistance;
+  FilterDistance.Id = TEXT("filter_distance");
+  FilterDistance.Type = EActorAttributeType::Float;
+  FilterDistance.RecommendedValues = { TEXT("500.0")};
+
+  //etsi fading
+  FActorVariation EtsiFading;
+  EtsiFading.Id = TEXT("use_etsi_fading");
+  EtsiFading.Type = EActorAttributeType::Bool;
+  EtsiFading.RecommendedValues = { TEXT("true")};
+
+  //custom fading std deviation
+  FActorVariation CustomFadingStddev;
+  CustomFadingStddev.Id = TEXT("custom_fading_stddev");
+  CustomFadingStddev.Type = EActorAttributeType::Float;
+  CustomFadingStddev.RecommendedValues = { TEXT("0.0")};
+
+  //path loss model
+  FActorVariation PLModel;
+  PLModel.Id = TEXT("path_loss_model");
+  PLModel.Type = EActorAttributeType::String;
+  PLModel.RecommendedValues = { TEXT("winner"), TEXT("geometric")};
+  PLModel.bRestrictToRecommended = true;
+  
+  
+  Definition.Variations.Append({
+    ChannelId,
+    NoiseSeed,
+    TransmitPower,
+    ReceiverSensitivity,
+    Frequency,
+    CombinedAntennaGain,
+    Scenario,
+    PLModel,
+    PLE,
+    FSPL_RefDistance,
+    FilterDistance,
+    EtsiFading,
+    CustomFadingStddev
+});
+
+  Success = CheckActorDefinition(Definition);
+}
+
+
+void UActorBlueprintFunctionLibrary::SetV2X(
+    const FActorDescription &Description,
+    AV2XSensor* V2X)
+{
+  CARLA_ABFL_CHECK_ACTOR(V2X);
+  if (Description.Variations.Contains("noise_seed"))
+  {
+    V2X->SetSeed(
+      RetrieveActorAttributeToInt("noise_seed", Description.Variations, 0));
+  }
+  else
+  {
+    V2X->SetSeed(V2X->GetRandomEngine()->GenerateRandomSeed());
+  }
+
+  V2X->SetPropagationParams(
+    RetrieveActorAttributeToFloat("transmit_power", Description.Variations, 21.5),
+    RetrieveActorAttributeToFloat("receiver_sensitivity", Description.Variations, -99.0),
+    RetrieveActorAttributeToFloat("frequency_ghz", Description.Variations, 5.9),
+    RetrieveActorAttributeToFloat("combined_antenna_gain", Description.Variations, 10.0),
+    RetrieveActorAttributeToFloat("path_loss_exponent", Description.Variations, 2.7),
+    RetrieveActorAttributeToFloat("d_ref", Description.Variations, 1.0),
+    RetrieveActorAttributeToFloat("filter_distance", Description.Variations, 500.0),
+    RetrieveActorAttributeToBool("use_etsi_fading", Description.Variations, true),
+    RetrieveActorAttributeToFloat("custom_fading_stddev", Description.Variations, 0.0f)
+    );
+
+    if (RetrieveActorAttributeToString("scenario", Description.Variations, "urban") == "urban")
+    {
+        V2X->SetScenario(EScenario::Urban);
+    }
+    else if (RetrieveActorAttributeToString("scenario", Description.Variations, "urban") == "rural")
+    {
+        V2X->SetScenario(EScenario::Rural);
+    }
+    else
+    {
+      V2X->SetScenario(EScenario::Highway);
+    }    
+
+    V2X->SetCaServiceParams(
+        RetrieveActorAttributeToFloat("gen_cam_min", Description.Variations, 0.1), 
+        RetrieveActorAttributeToFloat("gen_cam_max", Description.Variations, 1.0),
+        RetrieveActorAttributeToBool("fixed_rate", Description.Variations, false));
+
+    V2X->SetAccelerationStandardDeviation({
+        RetrieveActorAttributeToFloat("noise_accel_stddev_x", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_accel_stddev_y", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_accel_stddev_z", Description.Variations, 0.0f)});    
+
+    V2X->SetGNSSDeviation(
+        RetrieveActorAttributeToFloat("noise_lat_stddev", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_lon_stddev", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_alt_stddev", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_head_stddev", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_lat_bias", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_lon_bias", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_alt_bias", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_head_bias", Description.Variations, 0.0f)); 
+
+    V2X->SetVelDeviation(
+        RetrieveActorAttributeToFloat("noise_vel_stddev_x", Description.Variations, 0.0f)
+    );
+    V2X->SetYawrateDeviation(
+        RetrieveActorAttributeToFloat("noise_yawrate_stddev", Description.Variations, 0.0f),
+        RetrieveActorAttributeToFloat("noise_yawrate_bias", Description.Variations, 0.0f)
+    );
+
+    if (RetrieveActorAttributeToString("path_loss_model", Description.Variations, "geometric") == "winner")
+    {
+        V2X->SetPathLossModel(EPathLossModel::Winner);
+    }
+    else if(RetrieveActorAttributeToString("path_loss_model", Description.Variations, "geometric") == "geometric")
+    {
+        V2X->SetPathLossModel(EPathLossModel::Geometric);
+    }
+
+
+}
+
+void UActorBlueprintFunctionLibrary::SetCustomV2X(
+    const FActorDescription &Description,
+    ACustomV2XSensor* V2X)
+{
+  CARLA_ABFL_CHECK_ACTOR(V2X);
+  if (Description.Variations.Contains("noise_seed"))
+  {
+    V2X->SetSeed(
+      RetrieveActorAttributeToInt("noise_seed", Description.Variations, 0));
+  }
+  else
+  {
+    V2X->SetSeed(V2X->GetRandomEngine()->GenerateRandomSeed());
+  }
+
+  V2X->SetPropagationParams(
+    RetrieveActorAttributeToFloat("transmit_power", Description.Variations, 21.5),
+    RetrieveActorAttributeToFloat("receiver_sensitivity", Description.Variations, -99.0),
+    RetrieveActorAttributeToFloat("frequency_ghz", Description.Variations, 5.9),
+    RetrieveActorAttributeToFloat("combined_antenna_gain", Description.Variations, 10.0),
+    RetrieveActorAttributeToFloat("path_loss_exponent", Description.Variations, 2.7),
+    RetrieveActorAttributeToFloat("d_ref", Description.Variations, 1.0),
+    RetrieveActorAttributeToFloat("filter_distance", Description.Variations, 500.0),
+    RetrieveActorAttributeToBool("use_etsi_fading", Description.Variations, true),
+    RetrieveActorAttributeToFloat("custom_fading_stddev", Description.Variations, 0.0f)
+    );
+
+    if (RetrieveActorAttributeToString("scenario", Description.Variations, "urban") == "urban")
+    {
+        V2X->SetScenario(EScenario::Urban);
+    }
+    else if (RetrieveActorAttributeToString("scenario", Description.Variations, "urban") == "rural")
+    {
+        V2X->SetScenario(EScenario::Rural);
+    }
+    else
+    {
+      V2X->SetScenario(EScenario::Highway);
+    }    
+
+
+    if (RetrieveActorAttributeToString("path_loss_model", Description.Variations, "geometric") == "winner")
+    {
+        V2X->SetPathLossModel(EPathLossModel::Winner);
+    }
+    else if(RetrieveActorAttributeToString("path_loss_model", Description.Variations, "geometric") == "geometric")
+    {
+        V2X->SetPathLossModel(EPathLossModel::Geometric);
+    }
 }
 
 #undef CARLA_ABFL_CHECK_ACTOR

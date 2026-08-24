@@ -1,7 +1,10 @@
 # Building CARLA in Linux with Unreal Engine 5.5
 
 !!! note
-    The Unreal Engine 5 version of CARLA requires Ubuntu version 22.04 at minimum. It has not been configured to build on older Ubuntu versions.
+    The Unreal Engine 5 version of CARLA supports Ubuntu 22.04 and 24.04. It has not been configured to build on older Ubuntu versions.
+
+!!! note
+    If you are using an Ubuntu version other than 22.04 or 24.04, or experiencing compilation issues, you can use the Docker-based development environment to build CARLA inside an Ubuntu 22.04 container. See [CARLA Docker Dev Environment (UE5)](build_devcontainer.md) for instructions.
 
 * __[Set up the environment](#set-up-the-environment)__  
 * __[Build and run CARLA UE5](#build-and-run-carla-ue5)__  
@@ -30,27 +33,21 @@ The setup script will prompt you for your sudo password, in order to install the
 
 __Building in Linux unattended__:
 
-If you want to run the setup script unattended, your git credentials need to be stored in an environment variable. Add your github credentials to your `.bashrc` file:
+If you want to run the setup script unattended, store your sudo password and your git credentials in an environment variable.
 
 ```sh
-export GIT_LOCAL_CREDENTIALS=username@github_token
+sudo -v   # Used to cache the password for 15 minutes
+export GIT_LOCAL_CREDENTIALS=github_username@github_token 
 ```
 
-Then run the setup script using the following command:
+Then run the setup script without the interactive flag:
 
 ```sh
 cd CarlaUE5
-sudo -E ./CarlaSetup.sh
+./CarlaSetup.sh
 ```
 
 This will download and install Unreal Engine 5.5, install the prerequisites and build CARLA. It may take some time to complete and use a significant amount of disk space.
-
-If you prefer to add the git credentials in the terminal, use the following command:
-
-```sh
-cd CarlaUE5
-sudo -E env GIT_LOCAL_CREDENTIALS=github_username@github_token ./CarlaSetup.sh 
-```
 
 !!! note
     The setup script will install by default Python 3 using apt. If you want to target an existing Python installation, you should use the `--python-root=PATH_TO_PYTHON` argument with the relevant Python installation path. You can use whereis python3 in your chosen environment and strip the `/python3` suffix from the path.
@@ -116,6 +113,25 @@ cmake --build Build --target package
 The package will be generated in the directory `$CARLA_PATH/Build/Package`
 
 To build a development package, use the `package-development` target. This will build a package that outputs logs for debugging. 
+
+### Select which maps to cook
+
+By default a package cooks every map listed in `DefaultGame.ini` (`Town10HD_Opt`, `Mine_01`, `Town15`, `Town_C`), which produces a package of around 28 GB. If you only need a subset of the maps, set the `CARLA_MAPS_TO_COOK` option when you configure the build to a `+`-separated list of map package paths. The package then cooks only those maps and is correspondingly smaller (a Town10-only package is around 16 GB).
+
+```sh
+# Cook a single map
+cmake -G Ninja -S . -B Build --toolchain=$PWD/CMake/Toolchain.cmake -DCMAKE_BUILD_TYPE=Release \
+    -DCARLA_MAPS_TO_COOK="/Game/Carla/Maps/Town10HD_Opt"
+
+# Cook several maps
+cmake -G Ninja -S . -B Build --toolchain=$PWD/CMake/Toolchain.cmake -DCMAKE_BUILD_TYPE=Release \
+    -DCARLA_MAPS_TO_COOK="/Game/Carla/Maps/Town10HD_Opt+/Game/Carla/Maps/Mine_01"
+```
+
+Use the full map package path (`/Game/Carla/Maps/<MapName>`), not a filesystem path. Leaving `CARLA_MAPS_TO_COOK` empty (the default) cooks the full map list from `DefaultGame.ini`, so the standard build is unchanged.
+
+!!! Note
+    `Town10HD_Opt` is the default map a package boots into. If your selection excludes it, set a different default map in `DefaultEngine.ini` before packaging, otherwise the packaged server starts with a missing-map error.
 
 ### Run the package
 

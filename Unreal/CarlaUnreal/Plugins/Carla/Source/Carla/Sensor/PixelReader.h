@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Carla/Game/CarlaEngine.h"
+#include "Carla/Sensor/RHIGPUReadbackPool.h"
 
 #include <util/disable-ue4-macros.h>
 #include <carla/Logging.h>
@@ -84,11 +85,14 @@ public:
   /// Copy the pixels in @a RenderTarget into @a Buffer.
   ///
   /// @pre To be called from render-thread.
+  /// @param Pool Optional per-sensor readback pool; when null falls back to a
+  ///        per-call alloc.
   static void WritePixelsToBuffer(
       UTextureRenderTarget2D &RenderTarget,
       uint32 Offset,
       FRHICommandListImmediate &InRHICmdList,
-      FPixelReader::Payload FuncForSending);
+      FPixelReader::Payload FuncForSending,
+      FRHIGPUReadbackPoolPtr Pool = nullptr);
 
 };
 
@@ -102,7 +106,7 @@ void FPixelReader::SendPixelsInRenderThread(TSensor &Sensor, bool use16BitFormat
   TRACE_CPUPROFILER_EVENT_SCOPE(FPixelReader::SendPixelsInRenderThread);
   check(Sensor.CaptureRenderTarget != nullptr);
 
-  if (!Sensor.HasActorBegunPlay() || IsValidChecked(&Sensor))
+  if (!Sensor.HasActorBegunPlay() || !IsValidChecked(&Sensor))
   {
     return;
   }
@@ -111,11 +115,13 @@ void FPixelReader::SendPixelsInRenderThread(TSensor &Sensor, bool use16BitFormat
   Sensor.EnqueueRenderSceneImmediate();
 
   // Enqueue a command in the render-thread that will write the image buffer to
-  // the data stream. The stream is created in the capture thus executed in the
-  // game-thread.
+  // the data stream. We need to get frame, timestamp and the sensor transform in the capture
+  // (thus executed in the game-thread), so that they reflect the current point in time.
+  // Otherwise the asynchronous execution could send a future header to the client.
   ENQUEUE_RENDER_COMMAND(FWritePixels_SendPixelsInRenderThread)
   (
-    [&Sensor, use16BitFormat, Conversor = std::move(Conversor)](auto &InRHICmdList) mutable
+    [&Sensor, use16BitFormat, Conversor = std::move(Conversor), Frame = FCarlaEngine::GetFrameCounter(),
+     Timestamp = Sensor.GetEpisode().GetElapsedGameTime(), Transform = Sensor.GetActorTransform()](auto &InRHICmdList) mutable
     {
       TRACE_CPUPROFILER_EVENT_SCOPE_STR("FWritePixels_SendPixelsInRenderThread");
 
@@ -123,7 +129,7 @@ void FPixelReader::SendPixelsInRenderThread(TSensor &Sensor, bool use16BitFormat
       if (IsValidChecked(&Sensor))
       {
         FPixelReader::Payload FuncForSending =
-          [&Sensor, Frame = FCarlaEngine::GetFrameCounter(), Conversor = std::move(Conversor)]
+          [&Sensor, Frame, Timestamp, Transform, Conversor = std::move(Conversor)]
           (void *LockedData, uint32 Size, uint32 Offset, uint32 ExpectedRowBytes)
           {
             if (!IsValidChecked(&Sensor))
@@ -142,6 +148,8 @@ void FPixelReader::SendPixelsInRenderThread(TSensor &Sensor, bool use16BitFormat
 
             auto Stream = Sensor.GetDataStream(Sensor);
             Stream.SetFrameNumber(Frame);
+            Stream.SetTimestamp(Timestamp);
+            Stream.SetTransform(Transform);
             auto Buffer = Stream.PopBufferFromPool();
 
             uint32 CurrentRowBytes = ExpectedRowBytes;
@@ -237,7 +245,8 @@ void FPixelReader::SendPixelsInRenderThread(TSensor &Sensor, bool use16BitFormat
               *Sensor.CaptureRenderTarget,
               carla::sensor::SensorRegistry::get<TSensor *>::type::header_offset,
               InRHICmdList,
-              std::move(FuncForSending));
+              std::move(FuncForSending),
+              Sensor.GetReadbackPool());
           
         }
       }

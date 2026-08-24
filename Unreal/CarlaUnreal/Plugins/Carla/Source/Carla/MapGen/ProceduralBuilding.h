@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB). This work is licensed under the terms of the MIT license. For a copy, see <https://opensource.org/licenses/MIT>.
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB). This work is licensed under the terms of the MIT license. For a copy, see <https://opensource.org/licenses/MIT>.
 
 #pragma once
 
@@ -101,14 +101,14 @@ protected:
   // TODO: AdvancedDisplay
   // Map containing the pair with the name of the mesh and the component that uses it
   UPROPERTY(BlueprintReadOnly, EditAnywhere, Category="Procedural Building|Debug")
-  TMap<FString, UHierarchicalInstancedStaticMeshComponent*> HISMComps;
+  TMap<FString, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> HISMComps;
 
   // Contains all the ChildActorComps spawned for this Actor
   UPROPERTY(BlueprintReadOnly, EditAnywhere, Category="Procedural Building|Debug")
-  TArray<UChildActorComponent*> ChildActorComps;
+  TArray<TObjectPtr<UChildActorComponent>> ChildActorComps;
 
   UPROPERTY(BlueprintReadOnly, EditAnywhere, Category="Procedural Building")
-  UStaticMeshComponent* RootSMComp = nullptr;
+  TObjectPtr<UStaticMeshComponent> RootSMComp = nullptr;
 
   /**
    *  Base Parameters

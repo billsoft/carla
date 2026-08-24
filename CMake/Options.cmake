@@ -1,6 +1,6 @@
 #[[
 
-  Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+  Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
   de Barcelona (UAB).
   
   This work is licensed under the terms of the MIT license.
@@ -31,6 +31,7 @@ carla_option (
   "Build CARLA examples."
   ON
 )
+
 
 carla_option (
   BUILD_LIBCARLA_TESTS
@@ -257,6 +258,15 @@ carla_option (
   ${CARLA_UNREAL_PACKAGE_NO_COMPRESSION_DEFAULT}
 )
 
+set (
+  CARLA_MAPS_TO_COOK
+  ""
+  CACHE STRING
+  "Override the cooked map list ('+'-separated full package paths, e.g. \
+\"/Game/Carla/Maps/Town10HD_Opt+/Game/Carla/Maps/Mine_01\"). \
+Empty means use the +MapsToCook list from DefaultGame.ini (cook all maps)."
+)
+
 
 
 # ================================
@@ -268,7 +278,7 @@ carla_option (
 carla_string_option (
   CARLA_BOOST_VERSION
   "Target boost version."
-  1.84.0
+  1.90.0
 )
 
 carla_string_option (

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB). This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT>.
 
@@ -73,7 +73,8 @@ public:
   float Friction = 0.0f;
 
   UPROPERTY(EditAnywhere)
-  UBoxComponent *TriggerVolume;
+  TObjectPtr<UBoxComponent> TriggerVolume;
 
-  const UCarlaEpisode *Episode = nullptr;
+  UPROPERTY()
+  TObjectPtr<const UCarlaEpisode> Episode = nullptr;
 };

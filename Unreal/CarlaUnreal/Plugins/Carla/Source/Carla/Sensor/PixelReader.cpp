@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -15,15 +15,30 @@
 #include "RHIGPUReadback.h"
 #include <util/ue-header-guard-end.h>
 
+#include <chrono>
+#include <thread>
+
 // =============================================================================
 // -- FPixelReader -------------------------------------------------------------
 // =============================================================================
+
+static TAutoConsoleVariable<int32> CVarPixelReaderLegacyVulkanFenceFlush(
+    TEXT("carla.PixelReader.LegacyVulkanFenceFlush"),
+    0,
+    TEXT("UE4-era Vulkan fence-flush workaround inside FPixelReader::WritePixelsToBuffer.\n")
+    TEXT("Creates an RQT_AbsoluteTime render query, flushes the RHI thread, and\n")
+    TEXT("synchronously waits for the result after every EnqueueCopy. UE 5.5 Vulkan\n")
+    TEXT("rewrote fence handling; the workaround is believed unnecessary.\n")
+    TEXT("  0: Skip the workaround (default).\n")
+    TEXT("  1: Run the legacy fence-flush block (rollback)."),
+    ECVF_Default);
 
 void FPixelReader::WritePixelsToBuffer(
     UTextureRenderTarget2D &RenderTarget,
     uint32 Offset,
     FRHICommandListImmediate &RHICmdList,
-    FPixelReader::Payload FuncForSending)
+    FPixelReader::Payload FuncForSending,
+    FRHIGPUReadbackPoolPtr Pool)
 {
   TRACE_CPUPROFILER_EVENT_SCOPE_STR("WritePixelsToBuffer");
   check(IsInRenderingThread());
@@ -36,18 +51,33 @@ void FPixelReader::WritePixelsToBuffer(
     return;
   }
 
-  auto BackBufferReadback = std::make_unique<FRHIGPUTextureReadback>(TEXT("CameraBufferReadback"));
+  // Acquire from per-sensor pool when available; fall back to per-call alloc
+  // if the pool is missing or every slot is in use.
+  FRHIGPUTextureReadback *Readback = nullptr;
+  int32 SlotIndex = INDEX_NONE;
+  TUniquePtr<FRHIGPUTextureReadback> FallbackReadback;
+  if (Pool)
+  {
+    Readback = Pool->Acquire(SlotIndex);
+  }
+  if (Readback == nullptr)
+  {
+    FallbackReadback = MakeUnique<FRHIGPUTextureReadback>(TEXT("CameraBufferReadback"));
+    Readback = FallbackReadback.Get();
+  }
+
   FIntPoint BackBufferSize = Texture->GetSizeXY();
   EPixelFormat BackBufferPixelFormat = Texture->GetFormat();
   {
     TRACE_CPUPROFILER_EVENT_SCOPE_STR("EnqueueCopy");
-    BackBufferReadback->EnqueueCopy(RHICmdList,
-                                    Texture,
-                                    FResolveRect(0, 0, BackBufferSize.X, BackBufferSize.Y));
+    Readback->EnqueueCopy(RHICmdList,
+                          Texture,
+                          FResolveRect(0, 0, BackBufferSize.X, BackBufferSize.Y));
   }
 
-  // workaround to force RHI with Vulkan to refresh the fences state in the middle of frame
+  if (CVarPixelReaderLegacyVulkanFenceFlush.GetValueOnRenderThread() != 0)
   {
+    // workaround to force RHI with Vulkan to refresh the fences state in the middle of frame
     FRenderQueryRHIRef Query = RHICreateRenderQuery(RQT_AbsoluteTime);
     TRACE_CPUPROFILER_EVENT_SCOPE_STR("create query");
     RHICmdList.EndRenderQuery(Query);
@@ -58,12 +88,18 @@ void FPixelReader::WritePixelsToBuffer(
     RHIGetRenderQueryResult(Query, OldAbsTime, true);
   }
 
-  AsyncTask(ENamedThreads::HighTaskPriority, [=, Readback=std::move(BackBufferReadback)]() mutable {
+  // Must stay off the render-pipeline named threads: the task busy-waits
+  // on FRHIGPUTextureReadback::IsReady(), which the RHI thread itself has
+  // to drive — dispatching there deadlocks. AnyBackgroundHiPriTask keeps
+  // the original high-priority intent.
+  AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
+    [=, FuncForSending = std::move(FuncForSending), Pool = std::move(Pool),
+        Fallback = std::move(FallbackReadback)]() mutable {
     {
       TRACE_CPUPROFILER_EVENT_SCOPE_STR("Wait GPU transfer");
       while (!Readback->IsReady())
       {
-        std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
     }
 
@@ -72,14 +108,23 @@ void FPixelReader::WritePixelsToBuffer(
       FPixelFormatInfo PixelFormat = GPixelFormats[BackBufferPixelFormat];
       uint32 ExpectedRowBytes = BackBufferSize.X * PixelFormat.BlockBytes;
       int32 Size = (BackBufferSize.Y * (PixelFormat.BlockBytes * BackBufferSize.X));
-      void* LockedData = Readback->Lock(Size);
+      // FRHIGPUTextureReadback::Lock takes its argument by reference and writes
+      // the row stride (in pixels) back into it. It must not alias `Size`, or
+      // the payload length collapses to a single row's pixel count.
+      int32 RowPitchInPixels = 0;
+      void* LockedData = Readback->Lock(RowPitchInPixels);
       if (LockedData)
       {
         FuncForSending(LockedData, Size, Offset, ExpectedRowBytes);
       }
       Readback->Unlock();
-      Readback.reset();
     }
+
+    if (Pool && SlotIndex != INDEX_NONE)
+    {
+      Pool->Release(SlotIndex);
+    }
+    // Fallback (if any) destructs here, freeing its staging buffer.
   });
 }
 

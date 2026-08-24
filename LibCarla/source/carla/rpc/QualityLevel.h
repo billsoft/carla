@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -15,8 +15,8 @@ namespace rpc {
 
   enum class QualityLevel : uint8_t {
     Low,
-    // Medium,
-    // High,
+    Medium,
+    High,
     Epic,
 
     SIZE,

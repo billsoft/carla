@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -129,6 +129,16 @@ void TrafficManagerRemote::SetLaneOffset(const ActorPtr &_actor, const float off
 
 void TrafficManagerRemote::SetGlobalLaneOffset(const float offset) {
   client.SetGlobalLaneOffset(offset);
+}
+
+void TrafficManagerRemote::SetLargeVehicleWideTurn(const ActorPtr &_actor, const bool enable) {
+  carla::rpc::Actor actor(_actor->Serialize());
+
+  client.SetLargeVehicleWideTurn(actor, enable);
+}
+
+void TrafficManagerRemote::SetGlobalLargeVehicleWideTurn(const bool enable) {
+  client.SetGlobalLargeVehicleWideTurn(enable);
 }
 
 void TrafficManagerRemote::SetUpdateVehicleLights(const ActorPtr &_actor, const bool do_update) {

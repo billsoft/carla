@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -97,6 +97,10 @@ namespace client {
 
   Vehicle::PhysicsControl Vehicle::GetPhysicsControl() const {
     return GetEpisode().Lock()->GetVehiclePhysicsControl(*this);
+  }
+
+  Vehicle::TelemetryData Vehicle::GetTelemetryData() const {
+    return GetEpisode().Lock()->GetVehicleTelemetryData(*this);
   }
 
   Vehicle::LightState Vehicle::GetLightState() const {

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -6,10 +6,11 @@
 
 #include "Carla/Util/BoundingBoxCalculator.h"
 #include "Carla.h"
+#include "Carla/Actor/CarlaActor.h"
+#include "Carla/Game/CarlaEpisode.h"
 #include "Carla/Game/Tagger.h"
 #include "Carla/Traffic/TrafficSignBase.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
-#include "Carla/Game/Tagger.h"
 #include "Carla/Traffic/TrafficLightBase.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/Character.h"
@@ -51,30 +52,67 @@ FBoundingBox UBoundingBoxCalculator::GetActorBoundingBox(const AActor *Actor, ui
     auto Character = Cast<ACharacter>(Actor);
     if (Character != nullptr)
     {
-      auto Capsule = Character->GetCapsuleComponent();
-      if (Capsule != nullptr)
+      UActorComponent *ActorComp = Character->GetComponentByClass(USkeletalMeshComponent::StaticClass());
+      USkeletalMeshComponent* ParentComp = Cast<USkeletalMeshComponent>(ActorComp);
+
+      if (ParentComp != nullptr)
       {
-        const auto Radius = Capsule->GetScaledCapsuleRadius();
-        const auto HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
-        // Characters have the pivot point centered.
-        FVector Origin = {0.0f, 0.0f, 0.0f};
-        FVector Extent = {Radius, Radius, HalfHeight};
-        return {Origin, Extent};
+        FBoundingBox Box = GetSkeletalMeshBoundingBoxFromComponent(ParentComp);
+
+        // Lift the mesh-component-space bounds into actor-local space. The
+        // skeletal mesh component on ACharacter is offset from the actor root
+        // (typically -Z by the capsule half-height so the feet line up with
+        // the capsule bottom) and rotated relative to the actor frame, so a
+        // full transform on origin + rotation + scale is required for the box
+        // to remain consistent with GetCharacterBoundingBox.
+        const FTransform &MeshRelative = ParentComp->GetRelativeTransform();
+        Box = ApplyTransformToBB(Box, MeshRelative);
+
+        if (Character->GetName().Contains("_AB001_G3")
+          || Character->GetName().Contains("_AG001_G3"))
+        {
+          // Hack to center the bbox of Gen3 kids
+          Box.Origin.Z -= Box.Extent.Z * (1.0f / 0.65f - 1.0f);
+        }
+
+        return Box;
       }
     }
     // Traffic sign.
     auto TrafficSign = Cast<ATrafficSignBase>(Actor);
     if (TrafficSign != nullptr)
     {
-      // first return a merge of the generated trigger boxes, if any
+      // Return the first generated trigger box (OpenDRIVE-based signals)
+      // Newer traffic signs may have multiple trigger volumes (EffectBox, CheckBox, etc.)
+      // but for the Python API we return only the first one to preserve its rotation
       auto TriggerVolumes = TrafficSign->GetTriggerVolumes();
-      if (TriggerVolumes.Num() > 0)
+      // GetTriggerVolumes() may return null entries (e.g. when the
+      // Blueprint GetTriggerVolume() event is not implemented), so pick
+      // the first valid one and fall back to GetTriggerVolume() otherwise.
+      UBoxComponent* FirstTriggerVolume = nullptr;
+      for (UBoxComponent* Volume : TriggerVolumes)
       {
-        FBoundingBox Box = UBoundingBoxCalculator::CombineBoxes(TriggerVolumes);
+        if (Volume != nullptr)
+        {
+          FirstTriggerVolume = Volume;
+          break;
+        }
+      }
+      if (FirstTriggerVolume != nullptr)
+      {
         FTransform Transform = Actor->GetActorTransform();
-        Box.Origin = Transform.InverseTransformPosition(Box.Origin);
-        Box.Rotation = Transform.InverseTransformRotation(Box.Rotation.Quaternion()).Rotator();
-        return Box;
+
+        FBoundingBox TVWorld;
+        TVWorld.Origin = FirstTriggerVolume->GetComponentLocation();
+        TVWorld.Extent = FirstTriggerVolume->GetScaledBoxExtent();
+        TVWorld.Rotation = FirstTriggerVolume->GetComponentRotation();
+
+        FBoundingBox TVLocal;
+        TVLocal.Origin = Transform.InverseTransformPosition(TVWorld.Origin);
+        TVLocal.Extent = TVWorld.Extent;
+        TVLocal.Rotation = Transform.InverseTransformRotation(TVWorld.Rotation.Quaternion()).Rotator();
+
+        return TVLocal;
       }
       // try to return the original bounding box
       auto TriggerVolume = TrafficSign->GetTriggerVolume();
@@ -196,19 +234,15 @@ FBoundingBox UBoundingBoxCalculator::GetCharacterBoundingBox(
   bool FilterByTag = TagQueried == crp::CityObjectLabel::Any ||
                      TagQueried == crp::CityObjectLabel::Pedestrians;
 
-  UCapsuleComponent* Capsule = Character->GetCapsuleComponent();
+  UActorComponent *ActorComp = Character->GetComponentByClass(USkeletalMeshComponent::StaticClass());
+  USkeletalMeshComponent* ParentComp = Cast<USkeletalMeshComponent>(ActorComp);
 
-
-  if (Capsule && FilterByTag)
+  if (ParentComp && FilterByTag)
   {
-    const float Radius = Capsule->GetScaledCapsuleRadius();
-    const float HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
-    FBoundingBox BoundingBox;
-    // Characters have the pivot point centered.
-    BoundingBox.Origin = {0.0f, 0.0f, 0.0f};
-    BoundingBox.Extent = {Radius, Radius, HalfHeight};
-    // Component-to-world transform for this component
-    auto CompToWorldTransform = Capsule->GetComponentTransform();
+    FBoundingBox BoundingBox = GetSkeletalMeshBoundingBoxFromComponent(ParentComp);
+
+    auto& CompToWorldTransform = ParentComp->GetComponentTransform();
+
     BoundingBox = ApplyTransformToBB(BoundingBox, CompToWorldTransform);
 
     return BoundingBox;
@@ -250,6 +284,29 @@ void UBoundingBoxCalculator::GetTrafficLightBoundingBox(
     OutBB.Emplace(BB);
     OutTag.Emplace(Tag);
   }
+}
+
+FBoundingBox UBoundingBoxCalculator::GetSkeletalMeshBoundingBoxFromComponent(
+  const USkeletalMeshComponent* SkeletalMeshComp
+)
+{
+  if (!SkeletalMeshComp || !SkeletalMeshComp->GetSkeletalMeshAsset())
+  {
+    UE_LOG(
+        LogCarla,
+        Error,
+        TEXT("GetSkeletalMeshBoundingBoxFromComponent: missing SkeletalMeshComponent or SkeletalMesh"));
+    return {};
+  }
+
+  // Bounds in mesh-component space: passing an identity transform yields a
+  // local AABB that already reflects the current animation pose, so the
+  // returned Origin is the actual mesh centre relative to its component (not
+  // the component's world position).
+  const FBoxSphereBounds LocalBounds =
+      SkeletalMeshComp->CalcBounds(FTransform::Identity);
+
+  return {LocalBounds.Origin, LocalBounds.BoxExtent};
 }
 
 // TODO: update to calculate current animation pose

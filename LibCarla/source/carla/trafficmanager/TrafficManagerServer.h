@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -120,6 +120,16 @@ public:
       /// Positive values imply a right offset while negative ones mean a left one.
       server->bind("set_global_lane_offset", [=](const float offset) {
         tm->SetGlobalLaneOffset(offset);
+      });
+
+      /// Method to enable/disable the wide-turn manoeuvre for a single large vehicle.
+      server->bind("set_large_vehicle_wide_turn", [=](carla::rpc::Actor actor, const bool enable) {
+        tm->SetLargeVehicleWideTurn(carla::client::detail::ActorVariant(actor).Get(tm->GetEpisodeProxy()), enable);
+      });
+
+      /// Method to enable/disable the wide-turn manoeuvre globally for large vehicles.
+      server->bind("set_global_large_vehicle_wide_turn", [=](const bool enable) {
+        tm->SetGlobalLargeVehicleWideTurn(enable);
       });
 
 

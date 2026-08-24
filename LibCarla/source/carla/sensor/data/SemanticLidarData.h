@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -116,7 +116,7 @@ namespace data {
     }
 
     virtual void ResetMemory(std::vector<uint32_t> points_per_channel) {
-      DEBUG_ASSERT(GetChannelCount() > points_per_channel.size());
+      DEBUG_ASSERT(GetChannelCount() >= points_per_channel.size());
       std::memset(_header.data() + Index::SIZE, 0, sizeof(uint32_t) * GetChannelCount());
 
       uint32_t total_points = static_cast<uint32_t>(

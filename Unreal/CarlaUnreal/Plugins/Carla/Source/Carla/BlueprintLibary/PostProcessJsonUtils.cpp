@@ -1,14 +1,17 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT>.
 
-#pragma once
-
-
 #include "BlueprintLibary/PostProcessJsonUtils.h"
+
 #include "Components/PostProcessComponent.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "HAL/FileManager.h"
+#include "JsonObjectConverter.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 bool UPostProcessJsonUtils::SaveAllPostProcessToJson(APostProcessVolume* Volume, const FString& FileName)
 {

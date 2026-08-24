@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -48,7 +48,7 @@ namespace multigpu {
       _connection_timer(_pool.io_context()),
       _buffer_pool(std::make_shared<BufferPool>()) {
 
-    boost::asio::ip::address ip_address = boost::asio::ip::address::from_string(ip);
+    boost::asio::ip::address ip_address = boost::asio::ip::make_address(ip);
     _endpoint = boost::asio::ip::tcp::endpoint(ip_address, port);
     _commander.set_callback(callback);
   }
@@ -117,7 +117,7 @@ namespace multigpu {
 
   void Secondary::Reconnect() {
     std::weak_ptr<Secondary> weak = shared_from_this();
-    _connection_timer.expires_from_now(time_duration::seconds(1u));
+    _connection_timer.expires_after(time_duration::seconds(1u).to_chrono());
     _connection_timer.async_wait([weak](boost::system::error_code ec) {
       auto self = weak.lock();
       if (!self) return;
@@ -142,7 +142,7 @@ namespace multigpu {
         return;
       }
 
-      auto handle_sent = [weak, message](const boost::system::error_code &ec, size_t DEBUG_ONLY(bytes)) {
+      auto handle_sent = [weak, message](const boost::system::error_code &ec, size_t) {
         auto self = weak.lock();
         if (!self) return;
         if (ec) {
@@ -150,7 +150,7 @@ namespace multigpu {
         }
       };
 
-      // _deadline.expires_from_now(_timeout);
+      // _deadline.expires_after(_timeout.to_chrono());
       boost::asio::async_write(
           self->_socket,
           message->GetBufferSequence(),
@@ -172,7 +172,7 @@ namespace multigpu {
         return;
       }
 
-      auto handle_sent = [weak, message](const boost::system::error_code &ec, size_t DEBUG_ONLY(bytes)) {
+      auto handle_sent = [weak, message](const boost::system::error_code &ec, size_t) {
         auto self = weak.lock();
         if (!self) return;
         if (ec) {
@@ -180,7 +180,7 @@ namespace multigpu {
         }
       };
 
-      // _deadline.expires_from_now(_timeout);
+      // _deadline.expires_after(_timeout.to_chrono());
       boost::asio::async_write(
           self->_socket,
           message->GetBufferSequence(),
@@ -197,7 +197,7 @@ namespace multigpu {
         return;
       }
 
-      auto handle_sent = [weak](const boost::system::error_code &ec, size_t DEBUG_ONLY(bytes)) {
+      auto handle_sent = [weak](const boost::system::error_code &ec, size_t) {
         auto self = weak.lock();
         if (!self) return;
         if (ec) {
@@ -205,9 +205,9 @@ namespace multigpu {
         }
       };
 
-      // _deadline.expires_from_now(_timeout);
+      // _deadline.expires_after(_timeout.to_chrono());
       // sent first size buffer
-      int this_size = text.size();
+      uint32_t this_size = static_cast<uint32_t>(text.size());
       boost::asio::async_write(
           self->_socket,
           boost::asio::buffer(&this_size, sizeof(this_size)),

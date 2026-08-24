@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -25,8 +25,7 @@ public:
   // Sets default values for this actor's properties
   ATrafficLightGroup();
 
-  UFUNCTION(Category = "Traffic Group", BlueprintPure)
-  TArray<UTrafficLightController*>& GetControllers()
+  TArray<TObjectPtr<UTrafficLightController>>& GetControllers()
   {
     return Controllers;
   }
@@ -55,10 +54,10 @@ private:
   friend ATrafficLightManager;
 
   UPROPERTY(Category = "Traffic Group", VisibleDefaultsOnly, BlueprintReadOnly, meta = (AllowPrivateAccess = "true"))
-  USceneComponent *SceneComponent;
+  TObjectPtr<USceneComponent> SceneComponent;
 
   UPROPERTY(Category = "Traffic Group", EditAnywhere)
-  TArray<UTrafficLightController*> Controllers;
+  TArray<TObjectPtr<UTrafficLightController>> Controllers;
 
   UPROPERTY(Category = "Traffic Group", VisibleAnywhere)
   int CurrentController = 0;

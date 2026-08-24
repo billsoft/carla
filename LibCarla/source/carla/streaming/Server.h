@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -73,6 +73,10 @@ namespace streaming {
 
     token_type GetToken(stream_id sensor_id) {
       return _server.GetToken(sensor_id);
+    }
+
+    void SetROS2TopicVisibilityDefaultEnabled(bool enabled) {
+      _server.SetROS2TopicVisibilityDefaultEnabled(enabled);
     }
 
     void EnableForROS(stream_id sensor_id) {

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -16,6 +16,7 @@
 #include <boost/asio/post.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 namespace carla {
@@ -35,7 +36,7 @@ namespace tcp {
       _session_id(SESSION_COUNTER++),
       _socket(io_context),
       _timeout(timeout),
-      _deadline(io_context),
+      _deadline(io_context, std::chrono::steady_clock::time_point::max()),
       _strand(io_context) {}
 
   void ServerSession::Open(
@@ -67,7 +68,7 @@ namespace tcp {
       };
 
       // Read the stream id.
-      _deadline.expires_from_now(_timeout);
+      _deadline.expires_after(_timeout.to_chrono());
       boost::asio::async_read(
           _socket,
           boost::asio::buffer(&_stream_id, sizeof(_stream_id)),
@@ -86,7 +87,7 @@ namespace tcp {
       if (_server.IsSynchronousMode()) {
         // wait until previous message has been sent
         while (_is_writing) {
-          std::this_thread::yield();
+          std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
       } else {
         // ignore this message
@@ -109,7 +110,7 @@ namespace tcp {
 
     log_debug("session", _session_id, ": sending message of", message->size(), "bytes");
 
-    _deadline.expires_from_now(_timeout);
+    _deadline.expires_after(_timeout.to_chrono());
     boost::asio::async_write(_socket, message->GetBufferSequence(), 
       boost::asio::bind_executor(_strand, handle_sent));
   }
@@ -119,7 +120,7 @@ namespace tcp {
   }
 
   void ServerSession::StartTimer() {
-    if (_deadline.expires_at() <= boost::asio::deadline_timer::traits_type::now()) {
+    if (_deadline.expiry() <= std::chrono::steady_clock::now()) {
       log_debug("session", _session_id, "timed out");
       Close();
     } else {
@@ -134,6 +135,7 @@ namespace tcp {
   }
 
   void ServerSession::CloseNow(boost::system::error_code ec) {
+    if (_is_closed.exchange(true)) return;
     _deadline.cancel();
     if (!ec)
     {

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -71,6 +71,12 @@ public:
   /// Method to set a global lane offset displacement from the center line.
   /// Positive values imply a right offset while negative ones mean a left one.
   void SetGlobalLaneOffset(float const offset);
+
+  /// Method to enable/disable the wide-turn manoeuvre for a single large vehicle.
+  void SetLargeVehicleWideTurn(const ActorPtr &actor, const bool enable);
+
+  /// Method to enable/disable the wide-turn manoeuvre globally for large vehicles.
+  void SetGlobalLargeVehicleWideTurn(const bool enable);
 
   /// Method to set the automatic management of the vehicle lights
   void SetUpdateVehicleLights(const ActorPtr &actor, const bool do_update);
