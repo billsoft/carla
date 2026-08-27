@@ -152,7 +152,16 @@ CARLA 引擎侧（`Unreal/.../Util/CameraModelUtil.h/.cpp`、
 `fov_horizontal` 四个键（具体格式见该文件模块docstring），`sensors/camera_manager.py`
 只在配置了对应键时才会设置这些蓝图属性、`get_intrinsics()` 也只在这种情况下才会返回
 非理想值。**目前 8 个 Tesla 相机都没有配置任何一个键**——还没有真实实验室标定数据，
-现在只是把接口打通，实际采集行为和这一层加入之前完全一致。
+现在只是把接口打通。
+
+**2026-08-27 修复的一处严重回归**：`cx`/`cy`/`fov_horizontal` 这一层刚加上时，
+CARLA 引擎侧（`ActorBlueprintFunctionLibrary.cpp`）判断"该属性是否被显式设置"的
+方式是错的，导致**不管上面 4 个键有没有配置，8 个相机的水平 FOV 和光心都被静默
+覆盖成错误的默认值**，画面表现为从图像中心硬切到不相关场景内容（肉眼像是"相机
+装的方向和实际拍到的方向不一致"）——即"现在只是把接口打通，实际采集行为完全一致"
+这句话曾经并不成立，直到这处引擎 bug 被修好为止。根因、诊断过程、修复方式见
+[`CARLA_BUILD_NOTES.md` §4.11](../CARLA_BUILD_NOTES.md#411-variationscontainsid-恒真陷阱8-相机画面全部看向错误方向)。
+现在确认已恢复"不配置=行为不变"的正确语义（诊断日志 + 8 相机实拍图像双重验证）。
 
 以后拿到某个物理相机模组的标定数据后，接入步骤：
 1. 在对应相机的字典里加 `'lens_model': 'kannala-brandt'`、`'distortion_coeffs':

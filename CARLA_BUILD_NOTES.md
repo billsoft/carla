@@ -114,7 +114,16 @@ configure，ninja 的对象文件缓存是独立保留的，实测大约 5-15 �
 
 用 Bash 工具直接 `cmd.exe /c "BUILD_FINAL.bat > log 2>&1"` 只会打印 Windows 的
 版权 banner，命令根本没跑（`log` 文件是空的），但也不报错，非常容易被误判为"编译
-瞬间完成"。**必须用 PowerShell 工具，在里面套一层 `& cmd.exe /c "..."`。**
+瞬间完成"。
+
+**根因**：这是 MSYS/Git Bash 的路径转换机制——单斜杠开头的参数（`/c`）会被当成
+Unix 风格路径自动转换成 Windows 路径，cmd.exe 收到的根本不是 `/c` 这个开关，于是
+退化成不带参数的交互式 cmd.exe，在无 stdin 的后台环境下读到 EOF 立刻退出，只留下
+启动时打印的版权 banner。**修复（两种都可行）**：要么用 PowerShell 工具执行
+`& cmd.exe /c "..."`（PowerShell 不做这个转换）；要么留在 Bash 工具里，把 `/c` 换成
+双斜杠 `cmd.exe //c "..."` 显式绕过转换——`taskkill //PID <pid> //F` 也是同一个
+根因、同一个转义方式，这个坑不止影响 `cmd.exe`，任何单斜杠开头的原生 Windows 程序
+参数（`/c`、`/PID`、`/F`……）在 Bash 工具里都要用双斜杠。
 
 ### 4.2 UBA（Unreal Build Accelerator）内存压力假死
 
@@ -301,6 +310,48 @@ bug 存在于加这次改动之前，只是原来没人会去读 `XFocalLength`�
 第 3.3 节和 `verify_network.py` 有完整记录。**k1-k4（Kannala-Brandt 畸变）依然
 没有接入网络**——目前没有任何相机配置了真实畸变系数，没有数据驱动，留到真的需要
 时再做，见 `occnetv3_data_generator/README.md` 对应小节。
+
+### 4.11 `Variations.Contains(id)` 恒真陷阱：8 相机画面全部"看向错误方向"
+
+4.10 加的 `cx`/`cy`/`fov_horizontal` 覆盖开关用 `if (Variations.Contains("fov_horizontal"))`
+判断"用户是否显式设置了这个属性"，这个判断方式是错的，而且错得很隐蔽：**默认
+不设置任何一个新属性时也会触发**，导致这次 4.10 加的功能一上线，全部 8 个鱼眼相机
+的画面立刻全部错乱——表现是画面从图像中心硬切到不相关的场景内容，肉眼看像是
+"相机装的是这个朝向，拍到的却是另一个朝向的画面"，且诡异的是 roll/pitch 看着都对，
+只有水平方向不对，一度怀疑是外参 yaw 或坐标系公式的问题，排查了一圈无关目标
+（`Rotation.h` 的 pitch/roll 符号、`ComputeCubemapRenderMask` 的面选择逻辑、
+`WideAngleLens.usf`/`CameraModelCommon.ush` 跟已知良好的 commit `167cbff51`
+逐字节 diff——shader 和数学公式完全没有回归）才定位到真正根因。
+
+**根因**：`LibCarla/source/carla/client/ActorBlueprint.cpp::MakeActorDescription()`
+会把蓝图**全部已注册属性**序列化进发给 server 的 `ActorDescription`，不管 Python
+调用方有没有显式 `set_attribute()`——没显式设置的属性会带着它注册时的
+`RecommendedValues[0]` 默认值一起发过去。于是服务端 `Variations.Contains(id)`
+对任何已注册属性永远是 `true`，根本无法区分"用户显式设置"和"用的是默认值"。
+`fov_horizontal` 注册的 `RecommendedValues` 是 `"90.0"`，`cx`/`cy` 是 `"0.0"`——
+这两个值恰好都不是"什么都不做"的哨兵值（90° 不等于按宽高比推导的正确水平 FOV，
+`(0,0)` 是图像左上角不是几何中心），所以**没有任何相机配置这些属性时，每一帧都被
+无条件 `SetFOVAngleX(90.0)` + `SetPrincipalPoint(0,0)`，把 `SetFOVAngle()`/
+`SetImageSize()` 刚算好的正确水平 FOV 和图像中心覆盖掉**，cubemap 因此按错误的
+（偏大的）水平 FOV 采样，采到了 Front 以外的 Left/Right 面内容拼接进同一张图。
+
+用诊断日志（临时加在 `SceneCaptureSensor_WideAngleLens.cpp::CaptureSceneExtended()`
+里的 `UE_LOG`，验证完已移除）实锤：修复前任意相机配置下 `XFOV` 都固定打印
+`90.00deg`、`PP` 都固定 `(0.0,0.0)`，和 Python 端传的 `fov`/`image_size` 完全无关。
+
+**修复**：`ActorBlueprintFunctionLibrary.cpp` 里比照同一个函数中 `focal_length`
+属性早就在用的正确写法——`focal_length` 的 `RecommendedValues` 是哨兵值 `"0.0"`，
+判断用的是 `if (FocalLength != 0.0f)`（先取值，再判断是否等于哨兵），根本不用
+`Contains()`。把 `fov_horizontal`/`cx`/`cy` 的判断改成同样的模式，并把
+`fov_horizontal` 的 `RecommendedValues` 也从 `"90.0"` 改成语义正确的哨兵值
+`"0.0"`（`cx`/`cy` 本来就是 `"0.0"`，不用改）。
+
+**教训**：CARLA 的 `FActorVariation`/`Variations` 机制里，`Contains(id)` **不能**
+用来判断"调用方是否显式设置了这个可选属性"——只要属性注册过，它就永远在
+`Variations` 里，区别只是"用户的值"还是"注册时的默认值"。任何"不设置=保持某个
+已有行为不变"语义的可选属性覆盖开关，必须选一个和"已有行为"不冲突的哨兵值，用
+取值后比较哨兵的方式判断，不能用 `Contains()`——这是这次 4.10 新加功能自己引入的
+回归，不是本来就有的坑，加新的可选属性覆盖开关时要按这个模式检查一遍。
 
 ## 5. 相关文档
 
