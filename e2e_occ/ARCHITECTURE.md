@@ -104,17 +104,24 @@ stem 前 3 层(2×2×2) = 16×，对应 `config.feat_size = image_size // 16 = (
 （`Unreal/.../Util/CameraModelUtil.cpp::ComputeDistance` 的 Equidistant 分支：
 `f = (Height/2) / (FOV/2)`，`r = f·θ`），网络这两处必须用完全相同的公式。
 
-**焦距换算**（`rescale_focal_to_feature_map`，两处共用）：`intrinsics` 是按原始图像
-分辨率（1280×960）标定的，但射线编码/参考点投影都在下采样后的特征图分辨率（如
-60×80）上逐像素运算。直接用原图焦距会让特征图尺度的像素偏移（几十）除以原图尺度的焦距
-（几百上千），把入射角压缩到几乎全部指向正前方。用 `intrinsics` 自带的主点
-`(cx_orig, cy_orig)` 和目标 `(H, W)` 推出降采样比例，把焦距换算到特征图像素单位。
+**焦距/主点换算**（`rescale_focal_to_feature_map`，两处共用）：`intrinsics` 是按
+`_CALIBRATED_IMAGE_SIZE = (960, 1280)`（项目里唯一实际用到的原始标定分辨率，和
+`E2EOccConfig.image_size` 默认值一致）标定的，但射线编码/参考点投影都在下采样后的
+特征图分辨率（如 60×80）上逐像素运算，需要把 `fx/fy/cx/cy` 一起按 `(H/H_orig,
+W/W_orig)` 的比例换算到特征图像素单位。**2026-08-27 之前这里是从 `intrinsics` 的
+`cx_orig` 反推降采样比例（隐含假设主点恰好在原图正中心），且 `get_rays_from_params`/
+`get_reference_points` 拿到换算后的 `f` 之后又各自把主点硬编码成 `W/2, H/2`——两个
+问题叠加导致函数签名上"支持任意 cx/cy"，实际上主点数值从未真正参与过投影计算，
+且一旦真实标定的主点不在正中心，连焦距换算比例都会跟着算错。现在改成用固定的
+标定分辨率算比例、`cx/cy` 换算后原样返回并在两处投影公式里真正使用**，为
+CARLA 引擎侧新增的 `cx/cy` 物理镜头仿真参数（见
+`occnetv3_data_generator/README.md`"物理镜头仿真层"一节）打通了末端消费者。
 
 **反投影**（`RayDirectionEncoding.get_rays_from_params`，像素 → 世界系射线方向）：
 
 ```python
-dx, dy = x - W/2, y - H/2                  # 特征图像素坐标，以主点为原点
-f = rescale_focal_to_feature_map(intrinsics, H, W)
+f, cx, cy = rescale_focal_to_feature_map(intrinsics, H, W)   # 换算到特征图像素单位
+dx, dy = x - cx, y - cy                     # 特征图像素坐标，以真实主点为原点
 r = sqrt(dx**2 + dy**2); phi = atan2(dy, dx)
 theta = r / f                               # 等距投影核心公式
 cam_dir = [sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta)]   # 相机系，已是单位向量
@@ -129,14 +136,25 @@ world_dir = R @ cam_dir                     # R = extrinsics[:3,:3]（Camera→W
 cam_point = inv(extrinsics) @ world_point   # 世界系 → 相机系
 theta = acos(cam_point.z / |cam_point|)     # 与光轴夹角
 phi = atan2(cam_point.y, cam_point.x)
-f = rescale_focal_to_feature_map(intrinsics, H, W)
+f, cx, cy = rescale_focal_to_feature_map(intrinsics, H, W)
 r_img = f * theta
-u, v = W/2 + r_img*cos(phi), H/2 + r_img*sin(phi)
+u, v = cx + r_img*cos(phi), cy + r_img*sin(phi)
+u_norm = 2*(u+0.5)/W - 1; v_norm = 2*(v+0.5)/H - 1   # align_corners=False 约定，
+                                                       # 必须和下面 grid_sample 的
+                                                       # align_corners=False 一致
+                                                       # （之前用的是 /(W-1) 的
+                                                       # align_corners=True 公式，
+                                                       # 和实际采样约定不匹配，带来
+                                                       # 约1~2%的系统性径向误差）
 ```
 
 两者的自洽性由 `verify_network.py::verify_equidistant_geometry` 做往返一致性检查
-（3D 点正投影到像素，再从该像素反查射线方向，应基本指回原方向），round-trip 误差
-< 2°（实测约 0.19°）。**修改任一处投影公式时都要同步改另一处，并重新跑这个检查。**
+（3D 点正投影到像素，再从该像素反查射线方向，应基本指回原方向），居中主点场景
+round-trip 误差 < 2°（实测约 0.19°）；`verify_principal_point_offset` 额外验证了
+偏心主点场景（cx 偏右 100px、cy 偏上 60px）：光轴射线正确落在偏移后的主点像素而不是
+几何中心（实测夹角 0.53°，几何中心处夹角变成 10.93°，证明 cx/cy 确实生效），
+偏心场景 round-trip 误差实测约 0.34°。**修改任一处投影公式时都要同步改另一处，
+并重新跑这两个检查。**
 
 ### 3.4 OccupancyDecoder — Coarse 阶段（`occ_decoder.py`）
 

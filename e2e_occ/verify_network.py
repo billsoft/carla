@@ -156,8 +156,10 @@ def verify_equidistant_geometry(device):
         ref_points = cross_attn.get_reference_points(query_coords_01, intrinsics, extrinsics, H_feat, W_feat)
 
     u_norm, v_norm = ref_points[0, 0, 0].tolist()
-    u = (u_norm + 1.0) * (W_feat - 1) / 2.0
-    v = (v_norm + 1.0) * (H_feat - 1) / 2.0
+    # align_corners=False 的反归一化（像素中心在 (i+0.5)/size），要和 get_reference_points
+    # 内部实际使用的约定保持一致，否则这个往返检查测的是错误的像素位置。
+    u = (u_norm + 1.0) * W_feat / 2.0 - 0.5
+    v = (v_norm + 1.0) * H_feat / 2.0 - 0.5
     iu = max(0, min(W_feat - 1, int(round(u))))
     iv = max(0, min(H_feat - 1, int(round(v))))
 
@@ -174,6 +176,82 @@ def verify_equidistant_geometry(device):
     # 离散像素量化 + H/W 取整会带来一点误差，2° 容差足够宽松同时能抓住系统性不一致
     roundtrip_ok = roundtrip_angle_deg < 2.0
     print(f"  {'✅' if roundtrip_ok else '❌'} 参考点投影↔射线编码往返夹角误差: {roundtrip_angle_deg:.2f}°（期望 <2°）")
+    all_ok = all_ok and roundtrip_ok
+
+    return all_ok
+
+
+def verify_principal_point_offset(device):
+    """
+    验证主点 (cx, cy) 修复：偏心主点标定下，光轴射线应该指向偏移后的像素位置，
+    而不是固定在几何中心；get_reference_points 与 get_rays_from_params 在偏心
+    主点下的往返一致性也要继续成立。这两点合起来证明 cx/cy 真正参与了投影计算，
+    而不是像修复前那样被硬编码的 W/2, H/2 悄悄忽略掉。
+    """
+    print_section("主点 (cx, cy) 偏移修复验证")
+    all_ok = True
+
+    fov_vertical_deg = 90.0
+    W_orig, H_orig = 1280, 960
+    W_feat, H_feat = 160, 120
+
+    focal = (H_orig / 2.0) / math.radians(fov_vertical_deg / 2.0)
+    # 主点刻意偏离几何中心：cx 偏右 100px，cy 偏上 60px，量级接近真实标定误差
+    cx_orig, cy_orig = W_orig / 2.0 + 100.0, H_orig / 2.0 - 60.0
+    intrinsics = torch.tensor(
+        [[focal, 0.0, cx_orig], [0.0, focal, cy_orig], [0.0, 0.0, 1.0]],
+        dtype=torch.float32, device=device
+    ).view(1, 1, 3, 3)
+    extrinsics = torch.eye(4, dtype=torch.float32, device=device).view(1, 1, 4, 4)
+
+    ray_encoder = RayDirectionEncoding(dim=64, image_size=(H_feat, W_feat), num_cameras=1).to(device)
+    with torch.no_grad():
+        world_dirs = ray_encoder.get_rays_from_params(intrinsics, extrinsics, H_feat, W_feat)
+
+    scale_x, scale_y = W_feat / W_orig, H_feat / H_orig
+    cx_feat = int(round(cx_orig * scale_x))
+    cy_feat = int(round(cy_orig * scale_y))
+
+    # 修复后：光轴射线应该落在偏移后的主点像素上，不再是几何中心
+    axis_dir = world_dirs[0, 0, cy_feat, cx_feat]
+    axis_angle_deg = math.degrees(torch.acos(axis_dir[2].clamp(-1, 1)).item())
+    axis_ok = axis_angle_deg < 1.0
+    print(f"  {'✅' if axis_ok else '❌'} 偏移主点像素 ({cx_feat},{cy_feat}) 处射线与光轴夹角: "
+          f"{axis_angle_deg:.3f}°（期望 ≈0°，证明 cx/cy 真正生效而非硬编码几何中心）")
+    all_ok = all_ok and axis_ok
+
+    # 几何中心像素这时不应该再指向光轴，否则说明 cx/cy 被忽略，退化回了修复前的行为
+    center_dir = world_dirs[0, 0, H_feat // 2, W_feat // 2]
+    center_angle_deg = math.degrees(torch.acos(center_dir[2].clamp(-1, 1)).item())
+    center_off_axis_ok = center_angle_deg > 1.0
+    print(f"  {'✅' if center_off_axis_ok else '❌'} 几何中心像素与光轴夹角: {center_angle_deg:.3f}°"
+          f"（期望明显 >0°，证明光轴已随 cx/cy 偏移，不再固定在几何中心）")
+    all_ok = all_ok and center_off_axis_ok
+
+    # get_reference_points 往返一致性（偏心主点场景）
+    cross_attn = DeformableCrossAttention(dim=64, num_heads=1, num_cameras=1, num_points=1).to(device)
+    query_coords_01 = torch.tensor([[[0.53, 0.47, 0.95]]], dtype=torch.float32, device=device)
+    with torch.no_grad():
+        ref_points = cross_attn.get_reference_points(query_coords_01, intrinsics, extrinsics, H_feat, W_feat)
+
+    u_norm, v_norm = ref_points[0, 0, 0].tolist()
+    u = (u_norm + 1.0) * W_feat / 2.0 - 0.5
+    v = (v_norm + 1.0) * H_feat / 2.0 - 0.5
+    iu = max(0, min(W_feat - 1, int(round(u))))
+    iv = max(0, min(H_feat - 1, int(round(v))))
+
+    projected_pixel_dir = world_dirs[0, 0, iv, iu]
+
+    real_x = query_coords_01[0, 0, 0].item() * 80.0 - 40.0
+    real_y = query_coords_01[0, 0, 1].item() * 80.0 - 40.0
+    real_z = query_coords_01[0, 0, 2].item() * 6.4 - 1.0
+    point_dir = torch.tensor([real_x, real_y, real_z], dtype=torch.float32, device=device)
+    point_dir = point_dir / point_dir.norm()
+
+    cos_sim = torch.dot(point_dir, projected_pixel_dir).clamp(-1.0, 1.0).item()
+    roundtrip_angle_deg = math.degrees(math.acos(cos_sim))
+    roundtrip_ok = roundtrip_angle_deg < 2.0
+    print(f"  {'✅' if roundtrip_ok else '❌'} 偏心主点场景下往返夹角误差: {roundtrip_angle_deg:.2f}°（期望 <2°）")
     all_ok = all_ok and roundtrip_ok
 
     return all_ok
@@ -200,6 +278,9 @@ def run_verification():
 
         # 2b. 等距投影几何检查
         geometry_ok = verify_equidistant_geometry(device)
+
+        # 2c. 主点 (cx, cy) 偏移修复验证
+        principal_point_ok = verify_principal_point_offset(device)
 
         # 3. 完整模型构建
         print_section("3. 完整模型构建")
@@ -268,7 +349,7 @@ def run_verification():
             print(f"  推理峰值显存: {peak_gb:.2f} GB")
 
         # 汇总
-        all_pass = head_ok and geometry_ok and seq_ok
+        all_pass = head_ok and geometry_ok and principal_point_ok and seq_ok
         if all_pass:
             print_header("✅ 全部验证通过")
         else:

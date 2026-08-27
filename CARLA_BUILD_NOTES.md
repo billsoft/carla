@@ -289,8 +289,18 @@ bug 存在于加这次改动之前，只是原来没人会去读 `XFocalLength`�
 这一层默认不生效——`cx`/`cy`/`fov_horizontal`/`k0-k3` 都不设置时和加这些属性之前
 行为完全一致（已实测验证零回归）。数据采集侧怎么用见
 [`occnetv3_data_generator/README.md`](./occnetv3_data_generator/README.md)
-的"物理镜头仿真层"一节；**e2e_occ 网络这边故意没有跟着改**——相机内外参只通过射线
-编码这一处表达给网络是刻意的职责边界，网络要不要支持这些新参数是单独要评估的任务。
+的"物理镜头仿真层"一节。
+
+**2026-08-27 补充**：评估后发现 `e2e_occ` 网络的射线编码/可变形注意力投影
+（`position_encoding.py`/`deformable_attention.py`）里其实一直在悄悄忽略 `cx/cy`——
+两处投影公式把光心硬编码成了特征图几何中心 `W/2, H/2`，`intrinsics` 里的真实
+`cx/cy` 只在焦距降采样比例的（错误）反推里用了一下，从没真正参与过投影。这是个
+潜伏 bug：当时所有相机的标定 `cx/cy` 都精确等于几何中心，所以看不出问题，一旦以后
+真的接入非居中的物理标定数据就会静默出错。已经修好（两处投影公式改用真实 cx/cy，
+顺带修了一处不相关的 `align_corners` 归一化不一致），`e2e_occ/ARCHITECTURE.md`
+第 3.3 节和 `verify_network.py` 有完整记录。**k1-k4（Kannala-Brandt 畸变）依然
+没有接入网络**——目前没有任何相机配置了真实畸变系数，没有数据驱动，留到真的需要
+时再做，见 `occnetv3_data_generator/README.md` 对应小节。
 
 ## 5. 相关文档
 

@@ -159,11 +159,17 @@ CARLA 引擎侧（`Unreal/.../Util/CameraModelUtil.h/.cpp`、
    (k0,k1,k2,k3)`、`'principal_point': (cx,cy)`（`fov_horizontal` 视标定报告是否
    给了独立的水平/垂直 FOV 再决定要不要加）。
 2. 不需要改 `camera_manager.py`——这些键已经支持了。
-3. **e2e_occ 网络目前还不消费这些参数**：网络的射线编码（`e2e_occ/position_encoding.py`）
-   假设各向同性等距投影（`fx=fy`、光心精确居中），这是刻意的职责边界——相机内外参只
-   通过射线编码这一处表达给网络，接入非理想参数前需要先检查/升级那部分算法是否需要
-   支持 Kannala-Brandt 多项式和非对称光心，这是单独的任务，不要顺手把网络其他结构也
-   一起改了。
+3. **e2e_occ 网络消费进度（2026-08-27 更新）**：网络的射线编码/可变形注意力投影
+   （`e2e_occ/position_encoding.py`、`e2e_occ/deformable_attention.py`）现在会
+   真正读取 `intrinsics` 里的 `cx/cy` 参与投影计算（原来这两处都把光心硬编码成
+   `W/2, H/2`，`cx/cy` 传了但从没被用过，是修完才发现的一处潜伏 bug），所以
+   `principal_point` 这一项接入后网络端不需要额外改动，直接就能吃。**仍然不消费的
+   只有 `distortion_coeffs`（Kannala-Brandt k0-k3 非等距畸变）**：网络的正/逆投影
+   公式仍然是纯等距 `theta=r/f`、`r=f·theta`，没有畸变多项式项，这是刻意维持的
+   职责边界——相机内外参只通过射线编码这一处表达给网络，接入 k1-k4 需要给正投影
+   加畸变多项式、给反投影加牛顿迭代求逆（两处必须严格互逆，成本和风险都明显高于
+   `cx/cy`），等真的有物理镜头标定出的 k1-k4 数据要接入时再做，不要在没有真实
+   标定数据驱动的情况下现在就加。
 
 ### 深度相机
 

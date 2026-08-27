@@ -61,15 +61,21 @@ class DeformableCrossAttention(nn.Module):
         theta = torch.acos(cos_theta)  # 与光轴 (Z) 夹角
         phi = torch.atan2(cam_points_3d[..., 1], cam_points_3d[..., 0])
 
-        f = rescale_focal_to_feature_map(intrinsics, H, W).unsqueeze(-1)  # [B, N, 1]
+        f, cx, cy = rescale_focal_to_feature_map(intrinsics, H, W)  # 各 [B, N]
+        f = f.unsqueeze(-1)   # [B, N, 1]
+        cx = cx.unsqueeze(-1)  # [B, N, 1]
+        cy = cy.unsqueeze(-1)  # [B, N, 1]
         r_img = f * theta  # [B, N, Q]，等距投影下的像素半径
 
-        u = W / 2.0 + r_img * torch.cos(phi)
-        v = H / 2.0 + r_img * torch.sin(phi)
+        u = cx + r_img * torch.cos(phi)
+        v = cy + r_img * torch.sin(phi)
 
-        # Normalize to [-1, 1]
-        u_norm = 2.0 * u / (W - 1) - 1.0
-        v_norm = 2.0 * v / (H - 1) - 1.0
+        # Normalize to [-1, 1]，align_corners=False 约定（像素中心在 (i+0.5)/size），
+        # 必须和下面 forward() 里 F.grid_sample(..., align_corners=False) 保持一致——
+        # 之前这里用的是 align_corners=True 的 /(W-1) 公式，和实际采样时的 False 约定
+        # 对不上，会带来系统性的径向缩放/偏移误差。
+        u_norm = 2.0 * (u + 0.5) / W - 1.0
+        v_norm = 2.0 * (v + 0.5) / H - 1.0
 
         ref_points = torch.stack([u_norm, v_norm], dim=-1) # [B, N, Q, 2]
 

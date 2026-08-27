@@ -30,30 +30,41 @@ class SineCosinePositionEncoding3D(nn.Module):
             pe = F.pad(pe, (0, self.dim - pe.shape[-1]))
         return pe.view(-1, self.dim)
 
+# 原始标定分辨率：目前项目里唯一实际使用的 image_size（E2EOccConfig.image_size 默认值，
+# dataset.py::_get_default_camera_params 也硬编码同一个值）。rescale_focal_to_feature_map
+# 用它把 intrinsics 里按原图标定的 fx/cx/cy 换算到调用方实际传入的目标 H,W（特征图分辨率，
+# 可能小于原图，也可能是 verify_network.py 里测试用的任意合成分辨率）。如果以后
+# E2EOccConfig.image_size 真的改了默认值，这里要同步改。
+_CALIBRATED_IMAGE_SIZE = (960, 1280)  # (H_orig, W_orig)
+
+
 def rescale_focal_to_feature_map(intrinsics, H, W):
     """
-    intrinsics: [B, N, 3, 3]，等距投影相机的内参（各向同性，fx=fy=f），按"原始图像分辨率"标定
+    intrinsics: [B, N, 3, 3]，等距投影相机的内参（各向同性，fx=fy=f；cx,cy 为主点像素坐标，
+                不假设居中），按 _CALIBRATED_IMAGE_SIZE 标定
                 (对应 occnetv3_data_generator camera_manager.py::get_intrinsics 的等距分支：
                 f = (height/2) / (vertical_fov_rad/2)，与 CARLA CameraModelUtil::ComputeDistance
                 的 Equidistant 分支一致)
     H, W: 本次调用对应的（可能降采样的）特征图高宽
 
     等距/针孔都需要这一步：intrinsics 是按原图分辨率标定的，但射线编码 / 可变形注意力的
-    参考点投影都在下采样后的特征图分辨率上做逐像素运算，直接用原图焦距会让像素偏移量
-    (特征图尺度，量级几十) 除以原图焦距 (原图尺度，量级几百上千)，把入射角压缩到几乎全部
-    指向正前方。这里用 intrinsics 自带的主点 (cx_orig, cy_orig) 和实际的 (H, W) 推出降采样
-    比例，把焦距换算到特征图像素单位。
+    参考点投影都在下采样后的特征图分辨率上做逐像素运算，直接用原图焦距/主点会让像素坐标
+    量纲对不上。之前的写法从 cx_orig 反推降采样比例（隐含假设 cx_orig 恰好等于原图宽度
+    一半），主点非居中的真实标定数据会让这个假设失效、连降采样比例都跟着算错；现在直接用
+    已知的原始标定分辨率算比例，cx/cy 按各自轴的比例换算后原样返回（不再假设居中）。
 
-    返回 f: [B, N]（无额外的尾随单位维度，调用方按自己的广播需求 unsqueeze）。
+    返回 (f, cx, cy)，均已换算到目标 H,W 的像素单位，形状 [B, N]（无额外的尾随单位维度，
+    调用方按自己的广播需求 unsqueeze）。
     """
-    cx_orig = intrinsics[..., 0, 2]  # [B, N]
-    cy_orig = intrinsics[..., 1, 2]  # [B, N]
-    scale_x = (W / 2.0) / cx_orig.clamp_min(1e-6)
-    scale_y = (H / 2.0) / cy_orig.clamp_min(1e-6)
+    H_orig, W_orig = _CALIBRATED_IMAGE_SIZE
+    scale_x = W / W_orig
+    scale_y = H / H_orig
     # 等距投影各向同性，scale_x 理论上等于 scale_y；取平均以稳健应对 H/W 取整带来的误差
     scale = (scale_x + scale_y) * 0.5
-    f = intrinsics[..., 0, 0] * scale  # [B, N]
-    return f
+    f = intrinsics[..., 0, 0] * scale        # [B, N]
+    cx = intrinsics[..., 0, 2] * scale_x     # [B, N]
+    cy = intrinsics[..., 1, 2] * scale_y     # [B, N]
+    return f, cx, cy
 
 
 class RayDirectionEncoding(nn.Module):
@@ -108,23 +119,27 @@ class RayDirectionEncoding(nn.Module):
         """
         device = intrinsics.device
 
-        # 1. 特征图像素坐标（以主点为原点）
+        # 1. 特征图像素坐标（尚未减去主点，主点随相机/batch变化，下面按真实 cx/cy 广播减）
         y, x = torch.meshgrid(
             torch.linspace(0, H-1, H, device=device),
             torch.linspace(0, W-1, W, device=device),
             indexing='ij'
         )
-        cx = W / 2.0
-        cy = H / 2.0
-        dx = x - cx
-        dy = y - cy
+        x = x.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        y = y.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
 
-        # 2. 焦距换算到特征图像素单位（原图→特征图，见函数说明）
-        f = rescale_focal_to_feature_map(intrinsics, H, W).unsqueeze(-1).unsqueeze(-1)  # [B, N, 1, 1]
+        # 2. 焦距/主点换算到特征图像素单位（原图→特征图，见函数说明）
+        f, cx, cy = rescale_focal_to_feature_map(intrinsics, H, W)  # 各 [B, N]
+        f = f.unsqueeze(-1).unsqueeze(-1)    # [B, N, 1, 1]
+        cx = cx.unsqueeze(-1).unsqueeze(-1)  # [B, N, 1, 1]
+        cy = cy.unsqueeze(-1).unsqueeze(-1)  # [B, N, 1, 1]
+
+        dx = x - cx  # [B, N, H, W]
+        dy = y - cy  # [B, N, H, W]
 
         # 3. 等距投影反投影：theta = r/f
-        r = torch.sqrt(dx ** 2 + dy ** 2).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-        phi = torch.atan2(dy, dx).unsqueeze(0).unsqueeze(0)
+        r = torch.sqrt(dx ** 2 + dy ** 2)
+        phi = torch.atan2(dy, dx)
 
         theta = r / f  # [B, N, H, W]
 
