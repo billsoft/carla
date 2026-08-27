@@ -197,14 +197,16 @@ static auto CreateDistortionParameters(
     FRDGTextureRef CubeTextures[6],
     FRHISamplerState* Sampler,
     float YFOVAngle,
-    float FocalDistance,
+    float XFocalDistance,
+    float YFocalDistance,
+    FVector2D PrincipalPointOffset,
     FIntPoint Size,
     float LongitudeOffset,
     float FOVFadeSize,
     bool RenderEquirectangular,
     bool FovMaskEnable)
 {
-    const auto Center = Size / 2;
+    const auto Center = FVector2D(Size) * 0.5 + PrincipalPointOffset;
     auto Parameters = GraphBuilder.AllocParameters<typename FShaderType::FParameters>();
     Parameters->OutImage = GraphBuilder.CreateUAV(Destination);
     Parameters->CubeFront = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(CubeTextures[0]));
@@ -214,7 +216,7 @@ static auto CreateDistortionParameters(
     Parameters->CubeTop = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(CubeTextures[4]));
     Parameters->CubeBottom = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(CubeTextures[5]));
     Parameters->FaceSampler = Sampler;
-    Parameters->CameraParams = FVector4f(FocalDistance, FocalDistance, Center.X, Center.Y);
+    Parameters->CameraParams = FVector4f(XFocalDistance, YFocalDistance, static_cast<float>(Center.X), static_cast<float>(Center.Y));
     Parameters->YFOVAngle = YFOVAngle;
     Parameters->LongitudeOffset = LongitudeOffset;
     Parameters->FOVFadeSize = FOVFadeSize;
@@ -233,7 +235,9 @@ static void ApplyDistortion(
     FRDGTextureRef CubeTextures[6],
     FRHISamplerState* Sampler,
     float YFOVAngle,
-    float FocalDistance,
+    float XFocalDistance,
+    float YFocalDistance,
+    FVector2D PrincipalPointOffset,
     FIntPoint Size,
     float LongitudeOffset,
     float FOVFadeSize,
@@ -246,7 +250,9 @@ static void ApplyDistortion(
         CubeTextures,
         Sampler,
         YFOVAngle,
-        FocalDistance,
+        XFocalDistance,
+        YFocalDistance,
+        PrincipalPointOffset,
         Size,
         LongitudeOffset,
         FOVFadeSize,
@@ -278,7 +284,9 @@ static void ApplyDistortion(
     FRDGTextureRef CubeTextures[6],
     FRHISamplerState* Sampler,
     float YFOVAngle,
-    float FocalDistance,
+    float XFocalDistance,
+    float YFocalDistance,
+    FVector2D PrincipalPointOffset,
     FIntPoint Size,
     float LongitudeOffset,
     float FOVFadeSize,
@@ -294,7 +302,9 @@ static void ApplyDistortion(
         CubeTextures,
         Sampler,
         YFOVAngle,
-        FocalDistance,
+        XFocalDistance,
+        YFocalDistance,
+        PrincipalPointOffset,
         Size,
         LongitudeOffset,
         FOVFadeSize,
@@ -557,7 +567,9 @@ namespace CameraModelUtil
                 CubeTextures,
                 Sampler,
                 Options.YFOVAngle,
+                Options.XFocalLength,
                 Options.YFocalLength,
+                Options.PrincipalPointOffset,
                 Size,
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
@@ -571,7 +583,9 @@ namespace CameraModelUtil
                 CubeTextures,
                 Sampler,
                 Options.YFOVAngle,
+                Options.XFocalLength,
                 Options.YFocalLength,
+                Options.PrincipalPointOffset,
                 Size,
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
@@ -585,7 +599,9 @@ namespace CameraModelUtil
                 CubeTextures,
                 Sampler,
                 Options.YFOVAngle,
+                Options.XFocalLength,
                 Options.YFocalLength,
+                Options.PrincipalPointOffset,
                 Size,
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
@@ -599,7 +615,9 @@ namespace CameraModelUtil
                 CubeTextures,
                 Sampler,
                 Options.YFOVAngle,
+                Options.XFocalLength,
                 Options.YFocalLength,
+                Options.PrincipalPointOffset,
                 Size,
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
@@ -613,7 +631,9 @@ namespace CameraModelUtil
                 CubeTextures,
                 Sampler,
                 Options.YFOVAngle,
+                Options.XFocalLength,
                 Options.YFocalLength,
+                Options.PrincipalPointOffset,
                 Size,
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
@@ -627,7 +647,9 @@ namespace CameraModelUtil
                 CubeTextures,
                 Sampler,
                 Options.YFOVAngle,
+                Options.XFocalLength,
                 Options.YFocalLength,
+                Options.PrincipalPointOffset,
                 Size,
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,

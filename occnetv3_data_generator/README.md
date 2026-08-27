@@ -129,6 +129,42 @@ Python 侧解析（`camera_manager.py::convert_to_bayer`）现在就是读取引
 的位深记录在 `calibration/intrinsics.json` 的顶层 `raw_bit_depth` 字段里，
 `e2e_occ/dataset.py` 加载 DNG 时从这里读取，不是硬编码。
 
+### 物理镜头仿真层（默认关闭，基础设施）
+
+采集用的等距投影相机默认是"完美"的虚拟镜头：各向同性焦距（水平/垂直 FOV 严格按宽高比
+换算）、光心精确在几何中心、无径向畸变。真实物理镜头在光学实验室标定出来的参数从来不会
+这么理想——这一层的目的是把实验室标定出的非理想参数加到虚拟相机的渲染画面上，让训练数据
+物理上匹配真实传感器，而不是反过来"去畸变"虚拟画面（这个方向经常被搞反：虚拟镜头的完美
+输出才是"原始信号"，真实镜头的畸变/光心偏移是要叠加上去的物理效应，不是要被校正掉的误差）。
+
+CARLA 引擎侧（`Unreal/.../Util/CameraModelUtil.h/.cpp`、
+`Unreal/.../Sensor/SceneCaptureSensor_WideAngleLens.h/.cpp`）已经支持：
+- `camera_model=kannala-brandt` + `k0/k1/k2/k3`：径向畸变多项式
+  `r = θ·(1 + k0·θ² + k1·θ⁴ + k2·θ⁶ + k3·θ⁸)`，和 OpenCV fisheye/Kannala-Brandt
+  标定的 k1-k4 是同一套公式（0-indexed），实验室标定出来的系数可以原样填入。这部分
+  蓝图属性一直就有，只是数据采集这边过去只用过 `equidistant`。
+- `cx`/`cy`：像素单位的真实光心，不设置时精确等于 `(width/2, height/2)`。
+- `fov_horizontal`：独立于 `fov`（垂直 FOV）的水平 FOV，不设置时保持"按宽高比从垂直
+  FOV 线性推导"的默认行为（各向同性）。
+
+`occnetv3_data_generator` 这边，每个相机在 `config/camera_config.py` 的
+`TESLA_CAMERAS` 字典里可以选配 `lens_model`/`distortion_coeffs`/`principal_point`/
+`fov_horizontal` 四个键（具体格式见该文件模块docstring），`sensors/camera_manager.py`
+只在配置了对应键时才会设置这些蓝图属性、`get_intrinsics()` 也只在这种情况下才会返回
+非理想值。**目前 8 个 Tesla 相机都没有配置任何一个键**——还没有真实实验室标定数据，
+现在只是把接口打通，实际采集行为和这一层加入之前完全一致。
+
+以后拿到某个物理相机模组的标定数据后，接入步骤：
+1. 在对应相机的字典里加 `'lens_model': 'kannala-brandt'`、`'distortion_coeffs':
+   (k0,k1,k2,k3)`、`'principal_point': (cx,cy)`（`fov_horizontal` 视标定报告是否
+   给了独立的水平/垂直 FOV 再决定要不要加）。
+2. 不需要改 `camera_manager.py`——这些键已经支持了。
+3. **e2e_occ 网络目前还不消费这些参数**：网络的射线编码（`e2e_occ/position_encoding.py`）
+   假设各向同性等距投影（`fx=fy`、光心精确居中），这是刻意的职责边界——相机内外参只
+   通过射线编码这一处表达给网络，接入非理想参数前需要先检查/升级那部分算法是否需要
+   支持 Kannala-Brandt 多项式和非对称光心，这是单独的任务，不要顺手把网络其他结构也
+   一起改了。
+
 ### 深度相机
 
 与 RGB 相机完全重合（相同位置、FOV，标准 `sensor.camera.depth`，针孔投影，UE5

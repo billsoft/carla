@@ -7,6 +7,19 @@ Tesla 8相机配置 - 用于OccNetV3
 的 'fov' 字段沿用的是历史上的水平 FOV 语义，'fov_vertical' 才是实际传给传感器/用于计算
 intrinsics 的值。两者换算关系(各向同性等距投影下精确成立): fov_vertical = fov * (image_size_y / image_size_x)
 = fov * 0.75 (960/1280)。
+
+物理镜头仿真（默认不生效，基础设施）：每个相机字典可以选配以下键，模拟真实镜头标定出的
+非理想特性（不设置=当前的"完美"虚拟等距镜头行为，不设置任何一个都不影响现有数据集）：
+    'lens_model': 'kannala-brandt'         # 默认 'equidistant'
+    'distortion_coeffs': (k0, k1, k2, k3)  # 只有 lens_model='kannala-brandt' 时生效，
+                                            # 与 OpenCV fisheye/Kannala-Brandt 标定的
+                                            # k1-k4 是同一套公式(0-indexed)，原样填入
+    'principal_point': (cx, cy)            # 像素单位真实光心，默认 (width/2, height/2)
+    'fov_horizontal': 90.0                 # 独立于 fov_vertical 的水平 FOV(度)，默认按
+                                            # 宽高比从 fov_vertical 线性推导（各向同性）
+目前没有任何相机配这些键——还没有真实实验室标定数据。e2e_occ 网络的射线编码目前假设
+fx=fy 各向同性，真用上 'fov_horizontal' 之前需要先检查/升级那部分算法（不要自己改，
+按用户要求这一层的职责边界很明确：镜头内外参数只应该通过射线编码这一处表达给网络）。
 """
 
 # ========== Tesla 8相机布局 ==========

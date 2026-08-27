@@ -517,6 +517,30 @@ void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
   FocalLength.RecommendedValues = {TEXT("0.0")};
   FocalLength.bRestrictToRecommended = false;
 
+  // Independent horizontal FOV override. Unset (not just "0.0") means: keep
+  // the pre-existing aspect-ratio-derived behavior (XFOVAngle tracks fov *
+  // width/height) — see SetCamera(..., ASceneCaptureSensor_WideAngleLens*).
+  FActorVariation WAL_FOVHorizontal;
+  WAL_FOVHorizontal.Id = TEXT("fov_horizontal");
+  WAL_FOVHorizontal.Type = EActorAttributeType::Float;
+  WAL_FOVHorizontal.RecommendedValues = {TEXT("90.0")};
+  WAL_FOVHorizontal.bRestrictToRecommended = false;
+
+  // Principal point (optical center), in pixels. Unset means: exact
+  // geometric center (ImageWidth/2, ImageHeight/2), i.e. the pre-existing
+  // behavior before these attributes existed.
+  FActorVariation WAL_Cx;
+  WAL_Cx.Id = TEXT("cx");
+  WAL_Cx.Type = EActorAttributeType::Float;
+  WAL_Cx.RecommendedValues = {TEXT("0.0")};
+  WAL_Cx.bRestrictToRecommended = false;
+
+  FActorVariation WAL_Cy;
+  WAL_Cy.Id = TEXT("cy");
+  WAL_Cy.Type = EActorAttributeType::Float;
+  WAL_Cy.RecommendedValues = {TEXT("0.0")};
+  WAL_Cy.bRestrictToRecommended = false;
+
   FActorVariation WAL_Perspective;
   WAL_Perspective.Id = TEXT("perspective");
   WAL_Perspective.Type = EActorAttributeType::Bool;
@@ -614,6 +638,9 @@ void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
       WAL_ResX,
       WAL_ResY,
       WAL_FOV,
+      WAL_FOVHorizontal,
+      WAL_Cx,
+      WAL_Cy,
       FocalLength,
       Equirectangular,
       FOVMask,
@@ -2025,6 +2052,21 @@ void UActorBlueprintFunctionLibrary::SetCamera(
 
   if (FocalLength != 0.0f)
     Camera->SetFocalLength(FocalLength);
+
+  // Independent horizontal FOV override — must run after SetFOVAngle(): that
+  // call also resets XFOVAngle to the aspect-ratio-derived default, so this
+  // has to happen afterwards to actually take effect. Omitting the attribute
+  // keeps the pre-existing aspect-ratio-derived behavior exactly as it was.
+  if (Variations.Contains("fov_horizontal"))
+    Camera->SetFOVAngleX(RetrieveActorAttributeToFloat("fov_horizontal", Variations, FOV));
+
+  // Principal point (optical center) override, in pixels — a real physical
+  // lens's calibrated optical center rarely lands exactly on the geometric
+  // center SetImageSize() defaults to. Omitting both cx/cy keeps that default.
+  if (Variations.Contains("cx") || Variations.Contains("cy"))
+    Camera->SetPrincipalPoint(
+        RetrieveActorAttributeToFloat("cx", Variations, Camera->GetPrincipalPointX()),
+        RetrieveActorAttributeToFloat("cy", Variations, Camera->GetPrincipalPointY()));
 
   Camera->SetRenderPerspective(RetrieveActorAttributeToBool("perspective", Variations, false));
   Camera->SetRenderEquirectangular(RetrieveActorAttributeToBool("equirectangular", Variations, false));

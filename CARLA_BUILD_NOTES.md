@@ -267,6 +267,31 @@ Start-Process -FilePath $exe -ArgumentList "`"$proj`" -CarlaAutoPlay -log -stdou
 （本次会话里同样的重启操作，有时 2-3 分钟进 PIE，有时接近 20 分钟，原因未完全查明，
 但 CPU 占用持续增长说明不是卡死，只是慢，继续轮询即可）。
 
+### 4.10 光心偏移 (cx,cy) + 独立水平/垂直 FOV：物理镜头仿真基础设施
+
+CARLA 的等距/Kannala-Brandt 鱼眼相机（`CameraModelUtil`/
+`SceneCaptureSensor_WideAngleLens`）原本假设"完美"虚拟镜头：光心精确在图像几何中心
+（`Center = Size/2` 硬编码），水平/垂直 FOV 靠一个共享的各向同性焦距按宽高比互相推导
+（`XFOVAngle = YFOVAngle * Width/Height`）。Distort compute shader
+（`WideAngleLens.usf`）其实早就把光心/焦距当 `float2` 运行时参数用了
+（`CameraParams.xy`=焦距, `.zw`=光心），只是 C++ 端从来没把这两个分量分开传过。
+
+加了 `FDistortCubemapToImageOptions::PrincipalPointOffset`（光心相对几何中心的像素
+偏移）和 `XFocalLength`（独立于 `YFocalLength` 的水平焦距），C++ 端穿透到所有
+6 个相机模型分支 + Kannala-Brandt 分支，**不用改 shader**。蓝图属性新增
+`cx`/`cy`（绝对像素坐标）和 `fov_horizontal`（独立水平 FOV，度）。
+
+修的时候顺带发现一个真实 bug：`SetFOVAngle()` 只更新了 `XFOVAngle`（推导值）却没有
+同步重算 `XFocalLength`，导致后者一直停留在构造函数算出来的默认分辨率下的值——这个
+bug 存在于加这次改动之前，只是原来没人会去读 `XFocalLength`（shader 一直只用同一个
+标量），所以从来没暴露出来。
+
+这一层默认不生效——`cx`/`cy`/`fov_horizontal`/`k0-k3` 都不设置时和加这些属性之前
+行为完全一致（已实测验证零回归）。数据采集侧怎么用见
+[`occnetv3_data_generator/README.md`](./occnetv3_data_generator/README.md)
+的"物理镜头仿真层"一节；**e2e_occ 网络这边故意没有跟着改**——相机内外参只通过射线
+编码这一处表达给网络是刻意的职责边界，网络要不要支持这些新参数是单独要评估的任务。
+
 ## 5. 相关文档
 
 - 构建命令、目录结构速览：根目录 [`CLAUDE.md`](./CLAUDE.md)

@@ -93,11 +93,32 @@ public:
   UFUNCTION(BlueprintCallable)
   void SetFOVAngle(float NewFOV);
 
+  /// Independently overrides the horizontal FOV (and derived horizontal focal
+  /// length), which otherwise tracks SetFOVAngle's vertical value scaled by
+  /// the image aspect ratio (see VerticalToHorizontal). Call after
+  /// SetFOVAngle to simulate a physical lens whose horizontal/vertical FOV
+  /// don't share a single isotropic focal length.
+  UFUNCTION(BlueprintCallable)
+  void SetFOVAngleX(float NewFOV);
+
   UFUNCTION(BlueprintCallable, BlueprintPure)
   float GetFocalLength() const;
 
   UFUNCTION(BlueprintCallable)
   void SetFocalLength(float NewFocalLength);
+
+  /// Sets the lens's calibrated principal point (optical center), in pixels,
+  /// relative to the image's top-left corner. Defaults to the exact
+  /// geometric center (ImageWidth/2, ImageHeight/2) — a real physical lens's
+  /// calibrated optical center is rarely exactly there.
+  UFUNCTION(BlueprintCallable)
+  void SetPrincipalPoint(float Cx, float Cy);
+
+  UFUNCTION(BlueprintCallable, BlueprintPure)
+  float GetPrincipalPointX() const;
+
+  UFUNCTION(BlueprintCallable, BlueprintPure)
+  float GetPrincipalPointY() const;
 
   void SetCameraCoefficients(TArrayView<const float> Coefficients);
 
@@ -236,6 +257,20 @@ protected:
 
   UPROPERTY(EditAnywhere)
   float YFocalLength;
+
+  /// Horizontal focal length, independent from YFocalLength. Defaults to
+  /// tracking YFocalLength (via XFOVAngle's aspect-ratio derivation) until
+  /// SetFOVAngleX is called explicitly.
+  UPROPERTY(EditAnywhere)
+  float XFocalLength;
+
+  /// Principal point (optical center), in pixels from the image's top-left
+  /// corner. Defaults to the exact geometric center.
+  UPROPERTY(EditAnywhere)
+  float PrincipalPointX;
+
+  UPROPERTY(EditAnywhere)
+  float PrincipalPointY;
 
   UPROPERTY(EditAnywhere)
   float LongitudeOffset;

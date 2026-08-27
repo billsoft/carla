@@ -45,6 +45,16 @@ namespace CameraModelUtil
         TArrayView<const float> KannalaBrandtCoefficients;
         float YFOVAngle;
         float YFocalLength;
+        // Horizontal focal length. Defaults to YFocalLength (isotropic, matches the
+        // behavior before this field existed) — set independently to support a
+        // physical lens with different horizontal/vertical FOV rather than one
+        // derived from the other via the image aspect ratio.
+        float XFocalLength;
+        // Principal point offset from the exact geometric image center, in pixels.
+        // (0,0) (the default) reproduces the pre-existing behavior of always
+        // sampling around the image center; a real lens's calibrated optical
+        // center rarely lands exactly there.
+        FVector2D PrincipalPointOffset;
         float LongitudeOffset;
         float FOVFadeSize;
         ECameraModel CameraModel;

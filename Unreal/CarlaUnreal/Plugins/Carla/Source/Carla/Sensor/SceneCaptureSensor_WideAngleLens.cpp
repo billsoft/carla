@@ -89,6 +89,14 @@ ASceneCaptureSensor_WideAngleLens::ASceneCaptureSensor_WideAngleLens(const FObje
             YFOVAngle,
             ImageHeight,
             KannalaBrandtCameraCoefficients)),
+    XFocalLength(
+        CameraModelUtil::ComputeDistance(
+            CameraModel,
+            XFOVAngle,
+            ImageWidth,
+            KannalaBrandtCameraCoefficients)),
+    PrincipalPointX(ImageWidth * 0.5F),
+    PrincipalPointY(ImageHeight * 0.5F),
     LongitudeOffset(),
     FOVFadeSize(),
     CubemapRenderMask(0),
@@ -206,6 +214,14 @@ void ASceneCaptureSensor_WideAngleLens::SetImageSize(uint32 InWidth, uint32 InHe
     ImageWidth = InWidth;
     ImageHeight = InHeight;
 
+    // Reset the principal point to the new size's exact geometric center.
+    // Mirrors how YFocalLength/XFocalLength only get refreshed for the new
+    // size once SetFOVAngle/SetFOVAngleX runs again — callers that need a
+    // real calibrated (non-centered) principal point must call
+    // SetPrincipalPoint() after SetImageSize(), same ordering requirement.
+    PrincipalPointX = ImageWidth * 0.5F;
+    PrincipalPointY = ImageHeight * 0.5F;
+
     if (UpdateRenderMask)
         CubemapRenderMask = ComputeCubemapRenderMask();
 }
@@ -267,8 +283,51 @@ void ASceneCaptureSensor_WideAngleLens::SetFOVAngle(float NewFOV)
         ImageHeight,
         KannalaBrandtCameraCoefficients);
 
+    // Keep XFocalLength tracking the aspect-ratio-derived XFOVAngle by
+    // default (isotropic fx=fy, the pre-existing behavior). A later explicit
+    // SetFOVAngleX() call overrides both again — see its own comment.
+    XFocalLength = CameraModelUtil::ComputeDistance(
+        CameraModel,
+        XFOVAngle,
+        ImageWidth,
+        KannalaBrandtCameraCoefficients);
+
     if (UpdateRenderMask)
         CubemapRenderMask = ComputeCubemapRenderMask();
+}
+
+void ASceneCaptureSensor_WideAngleLens::SetFOVAngleX(float NewFOV)
+{
+    NewFOV *= DegToRad;
+
+    bool UpdateRenderMask = NewFOV != XFOVAngle;
+
+    XFOVAngle = NewFOV;
+
+    XFocalLength = CameraModelUtil::ComputeDistance(
+        CameraModel,
+        NewFOV,
+        ImageWidth,
+        KannalaBrandtCameraCoefficients);
+
+    if (UpdateRenderMask)
+        CubemapRenderMask = ComputeCubemapRenderMask();
+}
+
+void ASceneCaptureSensor_WideAngleLens::SetPrincipalPoint(float Cx, float Cy)
+{
+    PrincipalPointX = Cx;
+    PrincipalPointY = Cy;
+}
+
+float ASceneCaptureSensor_WideAngleLens::GetPrincipalPointX() const
+{
+    return PrincipalPointX;
+}
+
+float ASceneCaptureSensor_WideAngleLens::GetPrincipalPointY() const
+{
+    return PrincipalPointY;
 }
 
 void ASceneCaptureSensor_WideAngleLens::SetTargetGamma(float Gamma)
@@ -521,6 +580,10 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
     DistortedOptions.KannalaBrandtCoefficients = KannalaBrandtCameraCoefficients;
     DistortedOptions.YFOVAngle = YFOVAngle;
     DistortedOptions.YFocalLength = YFocalLength;
+    DistortedOptions.XFocalLength = XFocalLength;
+    DistortedOptions.PrincipalPointOffset = FVector2D(
+        PrincipalPointX - ImageWidth * 0.5F,
+        PrincipalPointY - ImageHeight * 0.5F);
     DistortedOptions.LongitudeOffset = LongitudeOffset;
     DistortedOptions.FOVFadeSize = FOVFadeSize;
     DistortedOptions.CameraModel = CameraModel;

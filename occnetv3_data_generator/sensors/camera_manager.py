@@ -46,10 +46,9 @@ class CameraManager:
         camera_bp.set_attribute('image_size_y', str(CAMERA_SENSOR_CONFIG['image_size_y']))
         camera_bp.set_attribute('sensor_tick', str(CAMERA_SENSOR_CONFIG['sensor_tick']))
 
-        # 等距投影相机模型: camera_model=equidistant，保留原生鱼眼畸变输出
-        # (perspective=False 表示不再额外做一次转透视的 shader pass；equirectangular
-        #  同理关闭，否则输出会变成经纬图而不是矩形裁切的等距投影图像)
-        camera_bp.set_attribute('camera_model', 'equidistant')
+        # 默认等距投影相机模型（camera_model 在下面按相机逐个设置，这里只设公共默认值）：
+        # perspective=False 表示不再额外做一次转透视的 shader pass；equirectangular
+        # 同理关闭，否则输出会变成经纬图而不是矩形裁切的等距投影图像。
         camera_bp.set_attribute('perspective', 'False')
         camera_bp.set_attribute('equirectangular', 'False')
         camera_bp.set_attribute('fov_mask', 'False')
@@ -87,6 +86,37 @@ class CameraManager:
             # camera_config.py 里的 'fov' 字段沿用历史上的水平 FOV 语义，实际
             # 传给传感器的是换算后的 'fov_vertical')
             camera_bp.set_attribute('fov', str(cam_config['fov_vertical']))
+
+            # 物理镜头仿真层（默认不生效，见 camera_config.py 顶部说明）：
+            # ① lens_model：默认 'equidistant'（完美虚拟镜头，各相机等距焦距 fx=fy，
+            #    光心=精确几何中心）。设为 'kannala-brandt' 才会使用下面的畸变系数。
+            # ② distortion_coeffs=(k0,k1,k2,k3)：径向畸变多项式系数，与 OpenCV
+            #    fisheye/Kannala-Brandt 标定的 k1-k4 是同一套公式（0-indexed），
+            #    实验室标定出来的系数可以原样填进来，不需要转换。只有
+            #    lens_model='kannala-brandt' 时才生效。
+            # ③ principal_point=(cx,cy)：像素单位的真实光心，不设置时引擎侧默认为
+            #    精确几何中心 (width/2, height/2)。
+            # ④ fov_horizontal：独立于 fov_vertical 的水平 FOV（度）。不设置时引擎侧
+            #    保持"水平 FOV 按宽高比从垂直 FOV 线性推导"的行为，即当前实际生效的
+            #    fov_horizontal = fov_vertical * (width/height)，和 camera_config.py
+            #    里 'fov' 字段（历史上的水平 FOV 参考值）在各向同性等距投影下精确相等。
+            lens_model = cam_config.get('lens_model', 'equidistant')
+            camera_bp.set_attribute('camera_model', lens_model)
+
+            if lens_model == 'kannala-brandt':
+                k0, k1, k2, k3 = cam_config.get('distortion_coeffs', (0.0, 0.0, 0.0, 0.0))
+                camera_bp.set_attribute('k0', str(k0))
+                camera_bp.set_attribute('k1', str(k1))
+                camera_bp.set_attribute('k2', str(k2))
+                camera_bp.set_attribute('k3', str(k3))
+
+            if 'principal_point' in cam_config:
+                cx, cy = cam_config['principal_point']
+                camera_bp.set_attribute('cx', str(cx))
+                camera_bp.set_attribute('cy', str(cy))
+
+            if 'fov_horizontal' in cam_config:
+                camera_bp.set_attribute('fov_horizontal', str(cam_config['fov_horizontal']))
 
             # 设置 RawType，驱动引擎侧走 Bayer RGGB HDR 采集路径（走真实的
             # SendHDRDataToClient/EPixelFormat::BAYER_RGGB_U16，而不是默认 uint8
@@ -398,13 +428,20 @@ class CameraManager:
 
     def get_intrinsics(self, cam_id: str) -> np.ndarray:
         """
-        获取相机内参矩阵 (等距投影/equidistant，与 sensor.camera.rgb_fisheye +
-        camera_model=equidistant 采集时用的投影模型一致，对应 CARLA
-        Unreal/.../Util/CameraModelUtil.cpp::ComputeDistance 的 Equidistant 分支：
-        F = (Height/2) / (FOV_vertical/2)，即 r = f*theta。
-        各向同性，fx=fy=focal。
+        获取相机内参矩阵 (等距投影/equidistant 或 Kannala-Brandt，与相机实际配置的
+        camera_model 一致，对应 CARLA Unreal/.../Util/CameraModelUtil.cpp::
+        ComputeDistance：F = (ImageSize/2) / (FOV/2)，即等距分支下 r = f*theta。
+
+        fx/fy 默认各向同性相等（垂直 FOV 推导，按宽高比换算成水平方向），只有
+        camera_config.py 里显式设置了该相机的 'fov_horizontal' 时 fx 才会独立于 fy——
+        这种情况下这个 K 矩阵如实反映了各向异性的焦距，但要注意 e2e_occ 网络当前的
+        射线编码（position_encoding.py）还是假设 fx=fy 的各向同性模型，暂不支持
+        各向异性，用之前需要先确认/升级那边的算法。
+
+        cx/cy 默认精确几何中心，只有显式设置了 'principal_point' 才会是真实光心。
+
         Returns:
-            K: (3, 3) 内参矩阵 (fx=fy=等距焦距, cx, cy 为主点)
+            K: (3, 3) 内参矩阵
         """
         # 查找配置
         cam_config = None
@@ -419,14 +456,16 @@ class CameraManager:
         width = CAMERA_SENSOR_CONFIG['image_size_x']
         height = CAMERA_SENSOR_CONFIG['image_size_y']
         fov_vertical = cam_config['fov_vertical']
+        fov_horizontal = cam_config.get('fov_horizontal', fov_vertical * width / height)
 
-        focal = (height / 2.0) / (np.radians(fov_vertical) / 2.0)
-        cx = width / 2.0
-        cy = height / 2.0
+        fy = (height / 2.0) / (np.radians(fov_vertical) / 2.0)
+        fx = (width / 2.0) / (np.radians(fov_horizontal) / 2.0)
+
+        cx, cy = cam_config.get('principal_point', (width / 2.0, height / 2.0))
 
         K = np.array([
-            [focal, 0, cx],
-            [0, focal, cy],
+            [fx, 0, cx],
+            [0, fy, cy],
             [0, 0, 1]
         ], dtype=np.float32)
 
