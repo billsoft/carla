@@ -245,7 +245,29 @@ Cache 命中率接近 100%）+ NumPy 向量化批量赋值替代逐体素 Python
 
 `actor_occupancy_mapping.py` 映射优先级：① `type_id` 精确匹配（如
 `vehicle.tesla.cybertruck`→truck）② `CityObjectLabel` 映射（静态物体）③ 兜底规则
-（`vehicle.*`→car，`static.prop.*`→general_object）。
+（`vehicle.*`→car，`static.prop.*`→general_object，`walker.pedestrian.*`→pedestrian，
+这条是函数开头的整体 `startswith` 判断，`WALKER_MAPPING` 字典本身只是文档性质、不参与
+实际判断）。
+
+**核对映射表覆盖度**：`survey_actor_types.py` 枚举蓝图库全量 `vehicle.*`/
+`walker.pedestrian.*`/`static.prop.*` 类型 + 当前地图已生成的 `traffic.*` Actor +
+`get_environment_objects(Any)` 的全部 `CityObjectLabel`，逐一核对是否被
+`actor_occupancy_mapping.py` 显式覆盖，用法见脚本文件头注释。2026-08-27 用它核对出
+两处问题并已修复：
+1. `static.prop.plantpot01/02/03/05/06/07` 没有和 `plantpot04` 一起归进 Vegetation，
+   掉进了 general_object 兜底——同一类道具被不一致分类，已统一到 Vegetation(16)。
+2. `traffic.unknown`（`CarlaEpisode.cpp` 对无法识别的 `ETrafficSignState` 的兜底
+   type_id，`semantic_tags` 为空、样本里有 14m×11.2m 的巨大扁平包围盒，形状特征是
+   路口/触发区域逻辑体而非真实可见路牌）：已从 `ground_truth_voxel_generator.py` 的
+   光栅化 Actor 列表里排除。这类 actor 之前会被光栅化成 general_object，还会被
+   `Z≤1.0m` 的地面高度保护规则强制保留、完全绕开可见性过滤，在体素真值里凭空多出
+   一大块不存在的物体。
+
+**可见性→free 的强制保留规则本身也有一处相关 bug**：`occupancy_config.py` 的
+`GROUND_LABELS` 曾经是 `[11, 12, 13, 14, 6]`，多出的 "6" 是旧版 CARLA 语义标签
+(RoadLines=6) 的输入编号误当成 18 类输出编号写了进来——18 类里 6 是 motorcycle，
+导致所有摩托车被地面保护逻辑无条件强制保留，绕开了"不可见就归 free"的可见性过滤。
+已修复为 `[11, 12, 13, 14]`。
 
 ## 使用方法
 

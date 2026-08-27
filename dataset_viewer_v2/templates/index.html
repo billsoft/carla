@@ -20,12 +20,14 @@
             <div class="topbar-group">
                 <span class="topbar-label">数据集</span>
                 <input type="text" id="dataset-path" placeholder="数据集根目录路径">
+                <button id="browse-dataset-btn" title="浏览目录">📁 浏览</button>
                 <button id="load-dataset-btn">加载</button>
                 <span id="dataset-summary" class="topbar-summary"></span>
             </div>
             <div class="topbar-group">
                 <span class="topbar-label">推理结果</span>
                 <input type="text" id="prediction-path" placeholder="(可选) inference.py 输出目录">
+                <button id="browse-prediction-btn" title="浏览目录">📁 浏览</button>
                 <button id="load-prediction-btn">加载</button>
                 <button id="clear-prediction-btn" title="清除推理结果">✕</button>
                 <span id="prediction-summary" class="topbar-summary"></span>
@@ -136,6 +138,22 @@
             <div class="segmented" id="lightbox-mode-switch">
                 <button class="seg-btn active" data-view="rgb">RGB</button>
                 <button class="seg-btn" data-view="depth">Depth</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 目录浏览器: 给"数据集"/"推理结果"输入框选目录用，不用手动拷贝粘贴绝对路径 -->
+    <div id="dirbrowser" class="hidden">
+        <div id="dirbrowser-content">
+            <div id="dirbrowser-header">
+                <span id="dirbrowser-title">选择目录</span>
+                <button id="dirbrowser-close" title="关闭 (Esc)">✕</button>
+            </div>
+            <div id="dirbrowser-path"></div>
+            <div id="dirbrowser-list"></div>
+            <div id="dirbrowser-footer">
+                <span id="dirbrowser-current-hint"></span>
+                <button id="dirbrowser-select-btn">选择当前目录</button>
             </div>
         </div>
     </div>

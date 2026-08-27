@@ -171,6 +171,73 @@ def set_prediction():
 
 
 # ------------------------------------------------------------------
+# 目录浏览 (给"数据集"/"推理结果"输入框配一个可点选的目录选择器，
+# 不用手动拷贝粘贴绝对路径)
+# ------------------------------------------------------------------
+
+DATASET_MARKER_DIRS = ('occupancy', 'images')  # 出现任一个就判定为"看起来像数据集目录"
+
+
+def _looks_like_dataset(dir_path):
+    try:
+        return any((dir_path / marker).is_dir() for marker in DATASET_MARKER_DIRS)
+    except OSError:
+        return False
+
+
+def _list_windows_drives():
+    import string
+    drives = []
+    for letter in string.ascii_uppercase:
+        root = f"{letter}:\\"
+        if os.path.exists(root):
+            drives.append({'name': root, 'path': root, 'is_dataset': False})
+    return drives
+
+
+@app.route('/api/browse_dir')
+def browse_dir():
+    """
+    列出给定路径下的子目录，供前端目录选择器使用。
+    不传 path (或传空) 时，Windows 下返回盘符列表作为根；非 Windows 返回 '/'。
+    每个子目录附带 is_dataset (是否含 occupancy/ 或 images/ 子目录)，前端用它高亮"这是个数据集"。
+    """
+    raw_path = request.args.get('path', '').strip()
+
+    if not raw_path:
+        if os.name == 'nt':
+            return jsonify({'path': None, 'parent': None, 'entries': _list_windows_drives()})
+        raw_path = '/'
+
+    target = Path(raw_path)
+    if not target.exists() or not target.is_dir():
+        return jsonify({'error': 'Path does not exist or is not a directory'}), 400
+
+    try:
+        subdirs = [p for p in target.iterdir() if p.is_dir() and not p.name.startswith('.')]
+    except PermissionError:
+        return jsonify({'error': 'Permission denied'}), 403
+
+    entries = sorted(
+        [{'name': p.name, 'path': str(p), 'is_dataset': _looks_like_dataset(p)} for p in subdirs],
+        key=lambda e: e['name'].lower()
+    )
+
+    parent = str(target.parent) if target.parent != target else None
+    # Windows 盘符根 (如 D:\) 的 .parent 还是它自己，用上面这个判断已经处理了；
+    # 非根目录正常返回上一级路径即可，前端遇到 parent=None 就回退到盘符列表。
+    if os.name == 'nt' and len(str(target)) <= 3:  # "D:\" / "D:/" 这类根
+        parent = None
+
+    return jsonify({
+        'path': str(target),
+        'parent': parent,
+        'entries': entries,
+        'is_dataset': _looks_like_dataset(target),
+    })
+
+
+# ------------------------------------------------------------------
 # 相机图像 (RGB, 缩略图/高清)
 # ------------------------------------------------------------------
 

@@ -278,6 +278,27 @@ class Viewer {
             this.setPrediction('');
         };
 
+        document.getElementById('browse-dataset-btn').onclick = () => {
+            this.openDirBrowser('dataset-path', '选择数据集根目录', (path) => {
+                document.getElementById('dataset-path').value = path;
+                document.getElementById('load-dataset-btn').click();
+            });
+        };
+        document.getElementById('browse-prediction-btn').onclick = () => {
+            this.openDirBrowser('prediction-path', '选择推理结果输出目录', (path) => {
+                document.getElementById('prediction-path').value = path;
+                document.getElementById('load-prediction-btn').click();
+            });
+        };
+        document.getElementById('dirbrowser-close').onclick = () => this.closeDirBrowser();
+        document.getElementById('dirbrowser').onclick = (e) => { if (e.target.id === 'dirbrowser') this.closeDirBrowser(); };
+        document.getElementById('dirbrowser-select-btn').onclick = () => {
+            if (this._dirBrowserOnSelect && this._dirBrowserCurrentPath) {
+                this._dirBrowserOnSelect(this._dirBrowserCurrentPath);
+            }
+            this.closeDirBrowser();
+        };
+
         document.getElementById('prev-btn').onclick = () => this.prevFrame();
         document.getElementById('next-btn').onclick = () => this.nextFrame();
         document.getElementById('play-btn').onclick = () => this.togglePlay();
@@ -350,12 +371,84 @@ class Viewer {
 
         // 键盘快捷键
         document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { this.closeDirBrowser(); this.closeLightbox(); return; }
             if (e.target.tagName === 'INPUT') return;
+            if (!document.getElementById('dirbrowser').classList.contains('hidden')) return;
             if (e.key === 'ArrowLeft') this.prevFrame();
             else if (e.key === 'ArrowRight') this.nextFrame();
             else if (e.code === 'Space') { e.preventDefault(); this.togglePlay(); }
-            else if (e.key === 'Escape') this.closeLightbox();
         });
+    }
+
+    // ================================================================
+    // 目录浏览器 (给"数据集"/"推理结果"输入框选目录，不用手动拷贝粘贴绝对路径)
+    // ================================================================
+    openDirBrowser(inputId, title, onSelect) {
+        document.getElementById('dirbrowser-title').innerText = title;
+        this._dirBrowserOnSelect = onSelect;
+        document.getElementById('dirbrowser').classList.remove('hidden');
+        const startPath = document.getElementById(inputId).value.trim();
+        this.loadDirBrowser(startPath || null);
+    }
+
+    closeDirBrowser() {
+        document.getElementById('dirbrowser').classList.add('hidden');
+    }
+
+    loadDirBrowser(path) {
+        const url = path ? `/api/browse_dir?path=${encodeURIComponent(path)}` : '/api/browse_dir';
+        fetch(url).then(res => res.json()).then(data => {
+            if (data.error) { alert('无法打开该目录: ' + data.error); return; }
+            this._dirBrowserCurrentPath = data.path;  // null 时代表"盘符列表"根节点
+            this.renderDirBrowser(data);
+        }).catch(err => alert('目录浏览请求失败: ' + err));
+    }
+
+    renderDirBrowser(data) {
+        document.getElementById('dirbrowser-path').innerText = data.path || '(选择盘符)';
+        const hint = document.getElementById('dirbrowser-current-hint');
+        const selectBtn = document.getElementById('dirbrowser-select-btn');
+        if (data.path) {
+            hint.innerText = data.is_dataset ? '✓ 当前目录看起来是一个数据集' : '当前目录';
+            selectBtn.disabled = false;
+        } else {
+            hint.innerText = '请先进入一个目录';
+            selectBtn.disabled = true;
+        }
+
+        const list = document.getElementById('dirbrowser-list');
+        list.innerHTML = '';
+
+        if (data.parent !== null && data.parent !== undefined) {
+            const upRow = document.createElement('div');
+            upRow.className = 'dirbrowser-item dirbrowser-up';
+            upRow.innerHTML = `<span class="dirbrowser-icon">⬆</span><span class="dirbrowser-name">.. (上一级)</span>`;
+            upRow.onclick = () => this.loadDirBrowser(data.parent);
+            list.appendChild(upRow);
+        } else if (data.path) {
+            // 已经在盘符根目录: 提供一个"回到盘符列表"的入口
+            const upRow = document.createElement('div');
+            upRow.className = 'dirbrowser-item dirbrowser-up';
+            upRow.innerHTML = `<span class="dirbrowser-icon">⬆</span><span class="dirbrowser-name">.. (盘符列表)</span>`;
+            upRow.onclick = () => this.loadDirBrowser(null);
+            list.appendChild(upRow);
+        }
+
+        if (!data.entries || data.entries.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'dirbrowser-empty';
+            empty.innerText = '(空目录)';
+            list.appendChild(empty);
+        } else {
+            data.entries.forEach(entry => {
+                const row = document.createElement('div');
+                row.className = 'dirbrowser-item';
+                row.innerHTML = `<span class="dirbrowser-icon">📁</span><span class="dirbrowser-name">${entry.name}</span>` +
+                    (entry.is_dataset ? `<span class="dirbrowser-badge">数据集</span>` : '');
+                row.onclick = () => this.loadDirBrowser(entry.path);
+                list.appendChild(row);
+            });
+        }
     }
 
     // ================================================================

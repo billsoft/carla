@@ -226,7 +226,17 @@ class GroundTruthVoxelGenerator:
         walkers = actors.filter('walker.pedestrian.*')
         props = actors.filter('static.prop.*')
         traffic = actors.filter('traffic.*')  # ⭐ 新增：获取红绿灯、交通标志等 Actor
-        
+
+        # 2026-08-27 排除 traffic.unknown: 这是 CarlaEpisode.cpp::UCarlaEpisode_GetTrafficSignId
+        # 对"不认识的 ETrafficSignState"的兜底 type_id（非红绿灯/限速/停车让行），实测
+        # (survey_actor_types.py) 发现这类 actor 的 semantic_tags 是空的——CARLA的语义
+        # 分割没有给它们打过标签，即没有可渲染/可见的Tag mesh。已核实的3个样本里有一个
+        # 是14m×11.2m的巨大扁平包围盒(z范围仅0~0.64m)，形状上明显是路口/触发区域用的
+        # 逻辑体，不是真实可见的路牌。这类 actor 一旦被光栅化进体素，会被 Z<=1.0m 的
+        # 地面高度保护规则强制保留 (visibility_filter_simple.py)，完全绕开可见性过滤，
+        # 在体素真值里凭空多出一大块不存在的 general_object——直接排除，不参与光栅化。
+        traffic = [a for a in traffic if a.type_id != 'traffic.unknown']
+
         all_actors = list(vehicles) + list(walkers) + list(props) + list(traffic)
 
         print(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}, Props={len(props)}, Traffic={len(traffic)}")

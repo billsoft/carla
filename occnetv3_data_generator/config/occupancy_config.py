@@ -97,9 +97,14 @@ CARLA_TO_OCCUPANCY = {
     0: 0,    # unlabeled → empty
 }
 
-# 强制保留的地面/标线类别 (不参与过滤)
-# 11:Driveable, 12:OtherFlat, 13:Sidewalk, 14:Terrain, 6:RoadLine
-GROUND_LABELS = [11, 12, 13, 14, 6]
+# 强制保留的地面/标线类别 (不参与可见性过滤，即使LiDAR没有击中也保留)
+# 11:Driveable, 12:OtherFlat, 13:Sidewalk, 14:Terrain
+# 2026-08-27 修复: 曾经多了一个 "6"。这是旧版CARLA语义标签(RoadLines=6，见本文件
+# CARLA_TO_OCCUPANCY[6]=11)的输入编号，误当成了18类occupancy的输出编号写进这里——
+# 18类里 6 是 motorcycle，不是 RoadLine（RoadLines早就映射到11了，不需要单独再列）。
+# 这个杂质位让所有摩托车(label=6)被visibility_filter_simple.py的地面保护逻辑
+# 无条件强制保留，完全绕过了"不可见就归free"的可见性过滤规则。
+GROUND_LABELS = [11, 12, 13, 14]
 
 # ========== CARLA 语义标签 → Occupancy 映射（与 dense_occupancy_collection 对齐）==========
 # 用于 ground_truth_voxel_generator 的地面查询，消除对 dense_occupancy_collection 包的依赖

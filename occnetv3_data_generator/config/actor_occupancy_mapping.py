@@ -91,6 +91,10 @@ VEHICLE_MAPPING = {
 }
 
 # 行人类型映射
+# 注意: get_occupancy_label_from_type_id() 用的是开头的 `startswith('walker.pedestrian')`
+# 整体判断（所有行人子型号统一映射到7），不会真的遍历这个字典逐条比对——这份列表只是
+# 文档性质，列出蓝图库里实际存在的部分行人型号，新增/减少某个 walker.pedestrian.NNNN
+# 型号不需要同步改这里。
 WALKER_MAPPING = {
     # Pedestrian (7) - 行人
     7: [
@@ -155,7 +159,16 @@ PROP_MAPPING = {
         'static.prop.plant01',
         'static.prop.plant02',
         'static.prop.plant03',
-        'static.prop.plantpot04',    # Add Plantpot
+        # 2026-08-27 用 survey_actor_types.py 核对蓝图库发现: 只列了 plantpot04，
+        # 其余 plantpot01/02/03/05/06/07 之前掉进了 general_object 兜底——同一类
+        # 道具(花盆，视觉上以盆栽植物为主)被不一致地分到两个类别，统一成vegetation。
+        'static.prop.plantpot01',
+        'static.prop.plantpot02',
+        'static.prop.plantpot03',
+        'static.prop.plantpot04',
+        'static.prop.plantpot05',
+        'static.prop.plantpot06',
+        'static.prop.plantpot07',
     ],
 
     # General Object (17) - 通用障碍物/其他
