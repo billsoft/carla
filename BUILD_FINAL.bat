@@ -64,6 +64,22 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b %ERRORLEVEL%
 )
 
+rem KEY FIX: Deleting CMakeCache.txt above forces FetchContent to re-populate
+rem _deps\zlib-src on every run, but that fresh checkout never contains a
+rem generated zconf.h (zlib's own CMakeLists only writes it under
+rem _deps\zlib-build). libpng's pnglibconf.out generation step (genout.cmake)
+rem preprocesses pnglibconf.c, which #includes zlib.h, which does
+rem #include "zconf.h" via same-directory quote-include -- that invocation
+rem doesn't get zlib-build on its include path, so it fails to find zconf.h
+rem unless a copy sits right next to zlib.h. Self-heal it here so this
+rem doesn't need to be patched by hand after every cache-clear rebuild.
+if exist Build\_deps\zlib-build\zconf.h (
+    if not exist Build\_deps\zlib-src\zconf.h (
+        echo Working around missing zconf.h next to zlib.h ^(see comment above^)...
+        copy /y Build\_deps\zlib-build\zconf.h Build\_deps\zlib-src\zconf.h >nul
+    )
+)
+
 rem -- 3. BUILD UNREAL EDITOR PLUGINS --
 echo [4/4] Building CARLA Unreal Editor Plugins (target: carla-unreal-editor)...
 cmake --build Build --target carla-unreal-editor

@@ -62,26 +62,26 @@ TESLA_CAMERAS = [
     },
 
     # 侧向前视 (B柱) - ⭐ 修复: 增大Y轴偏移量,避免拍摄车内
-    # 特斯拉实际安装: B柱靠近车窗外侧,朝向侧前方约60°
+    # 特斯拉实际安装: B柱靠近车窗外侧,朝向侧前方约45°
     {
         'id': 'left_pillar',
         'index': 3,
-        'fov': 80.0,
-        'fov_vertical': 60.0,
+        'fov': 90.0,     # 2026-08-27 按真实 Tesla HW3 规格核对: B柱 ~90°(此前误配成80°)
+        'fov_vertical': 67.5,
         'position': [0.0, -1.1, 1.7],   # ⭐ Y=-1.1 (增加向左偏移,避免车架遮挡)
-        'rotation': [0.0, -55.0, 0.0],  # ⭐ yaw=-55° (轻微调整朝向,更贴近侧前方)
-        'description': '左B柱 (Left Pillar, 左前方 -55°)',
+        'rotation': [0.0, -45.0, 0.0],  # 2026-08-27 按用户要求改为严格 45°(原 -55°)
+        'description': '左B柱 (Left Pillar, 左前方 -45°, 90°FOV)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
     {
         'id': 'right_pillar',
         'index': 4,
-        'fov': 80.0,
-        'fov_vertical': 60.0,
+        'fov': 90.0,     # 同左B柱
+        'fov_vertical': 67.5,
         'position': [0.0, 1.1, 1.7],    # ⭐ Y=1.1 (增加向右偏移,避免车架遮挡)
-        'rotation': [0.0, 55.0, 0.0],   # ⭐ yaw=55° (轻微调整朝向,更贴近侧前方)
-        'description': '右B柱 (Right Pillar, 右前方 55°)',
+        'rotation': [0.0, 45.0, 0.0],   # 2026-08-27 按用户要求改为严格 45°(原 55°)
+        'description': '右B柱 (Right Pillar, 右前方 45°, 90°FOV)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
@@ -91,22 +91,24 @@ TESLA_CAMERAS = [
     {
         'id': 'left_repeater',
         'index': 5,
-        'fov': 100.0,
-        'fov_vertical': 75.0,
+        'fov': 90.0,     # 2026-08-27 按真实 Tesla HW3 规格核对: 翼子板 ~90°(此前误配成100°)
+        'fov_vertical': 67.5,
         'position': [1.0, -1.0, 1.0],   # ⭐ X=1.0 (靠近前轮), Y=-1.0 (翼子板外侧)
-        'rotation': [0.0, -130.0, 0.0], # ⭐ yaw=-130° (侧后方45°, 避免拍摄车身)
-        'description': '左Repeater (Left Repeater, 左后方 -130°)',
+        # 2026-08-27 按用户要求改为严格偏离正后方45°(原 -130°，即偏离正后方50°)
+        'rotation': [0.0, -135.0, 0.0],
+        'description': '左Repeater (Left Repeater, 偏正后方左侧45°, -135°yaw, 90°FOV)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
     {
         'id': 'right_repeater',
         'index': 6,
-        'fov': 100.0,
-        'fov_vertical': 75.0,
+        'fov': 90.0,     # 同左Repeater
+        'fov_vertical': 67.5,
         'position': [1.0, 1.0, 1.0],    # ⭐ X=1.0 (靠近前轮), Y=1.0 (翼子板外侧)
-        'rotation': [0.0, 130.0, 0.0],  # ⭐ yaw=130° (侧后方45°, 避免拍摄车身)
-        'description': '右Repeater (Right Repeater, 右后方 130°)',
+        # 2026-08-27 按用户要求改为严格偏离正后方45°(原 130°，即偏离正后方50°)
+        'rotation': [0.0, 135.0, 0.0],
+        'description': '右Repeater (Right Repeater, 偏正后方右侧45°, 135°yaw, 90°FOV)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },
@@ -116,11 +118,14 @@ TESLA_CAMERAS = [
     {
         'id': 'rear',
         'index': 7,
-        'fov': 120.0,
+        'fov': 120.0,    # 真实 Tesla 后摄约 130-150°，按用户要求简化取 120°
         'fov_vertical': 90.0,
         'position': [-2.7, 0.0, 1.2],   # ⭐ X=-2.7 (向车尾外延20cm, 原-2.5)
-        'rotation': [-8.0, 180.0, 0.0], # ⭐ pitch=-8° (增加俯仰角,看清地面)
-        'description': '后视 (Rear, 正后方 180°, 俯仰 -8°)',
+        # 2026-08-27 修复符号错误: LibCarla/geom/Rotation.h::RotateVector (2026-06-18
+        # 上游 #9751 修正后) forward.z = -sin(pitch)，pitch 为正才是向下看。原来的
+        # pitch=-8 在当前引擎公式下实际是向上抬头，和"看清地面"的注释意图正好相反。
+        'rotation': [8.0, 180.0, 0.0],  # ⭐ pitch=+8° (向下俯视，看清地面)
+        'description': '后视 (Rear, 正后方 180°, 俯仰 +8° 向下, 120°FOV)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },

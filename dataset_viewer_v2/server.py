@@ -3,7 +3,7 @@ import json
 import argparse
 from pathlib import Path
 import numpy as np
-from flask import Flask, jsonify, send_file, request, abort
+from flask import Flask, jsonify, send_file, request, abort, Response
 import io
 from PIL import Image
 import logging
@@ -29,60 +29,55 @@ werkzeug_logger.setLevel(logging.ERROR)
 @app.before_request
 def before_request():
     request.start_time = time.time()
-    # 记录请求开始
     logger.info(f"→ {request.method} {request.path} from {request.remote_addr}")
 
 @app.after_request
 def after_request(response):
     latency = (time.time() - request.start_time) * 1000  # ms
-
-    # 状态码颜色标记 (虽然在终端不显示颜色，但便于阅读)
     status_icon = "✓" if 200 <= response.status_code < 300 else "✗"
-
     logger.info(f"← {status_icon} {request.method} {request.path} - {response.status_code} ({latency:.1f}ms)")
     return response
 
 # LRU Cache for processed images (Max 32 images ~ 4 frames of 8 cams)
 @lru_cache(maxsize=32)
-def process_dng_cached(dng_path_str):
+def process_dng_cached(dng_path_str, half_size):
     """
     缓存的 DNG 处理函数
     输入必须是字符串(hashable)，不能是 Path 对象
+    half_size=True: 1/4 分辨率缩略图 (预览网格用)；False: 全分辨率 (lightbox 大图用)
     """
-    try:
-        import rawpy
-        with rawpy.imread(dng_path_str) as raw:
-            # 性能优化: half_size=True (1/4 分辨率, 4x 速度)
-            # Web 预览不需要全分辨率 (1280x960 -> 640x480)
-            rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False)
-            return rgb
-    except Exception as e:
-        # 这里不要 print，交给调用者处理
-        raise e
+    import rawpy
+    with rawpy.imread(dng_path_str) as raw:
+        rgb = raw.postprocess(use_camera_wb=True, half_size=half_size, no_auto_bright=False)
+        return rgb
 
 def create_placeholder_image(text="Error", size=(640, 480)):
-    """生成占位图"""
     img = Image.new('RGB', size, color=(30, 30, 30))
     return img
 
 # 默认配置
 DEFAULT_DATASET_DIR = r"d:\code\carla\dataset_10k_bak"
 CURRENT_DATASET_DIR = DEFAULT_DATASET_DIR
+CURRENT_PREDICTION_DIR = None  # 推理结果目录 (e2e_occ/inference.py 输出)，可选
 
-# 缓存帧列表
+# 缓存
 FRAMES_CACHE = []
+PRED_FRAMES_CACHE = None  # None = 未设置预测目录; set() = 预测目录里实际有 occupancy 的帧号集合
+
+# ------------------------------------------------------------------
+# 帧列表 / 数据集元信息
+# ------------------------------------------------------------------
 
 def get_frames():
     """获取数据集中的帧列表"""
     global FRAMES_CACHE
     if FRAMES_CACHE:
         return FRAMES_CACHE
-    
+
     dataset_path = Path(CURRENT_DATASET_DIR)
     if not dataset_path.exists():
         return []
 
-    # 优先读取 test.txt / train.txt / val.txt
     frames = []
     for txt_file in ['test.txt', 'train.txt', 'val.txt']:
         txt_path = dataset_path / txt_file
@@ -90,34 +85,56 @@ def get_frames():
             with open(txt_path, 'r') as f:
                 lines = [l.strip() for l in f.readlines() if l.strip()]
                 frames.extend(lines)
-    
-    # 如果没有 txt，扫描 occupancy 目录
+
     if not frames:
         occ_dir = dataset_path / 'occupancy'
         if occ_dir.exists():
             frames = [f.stem for f in occ_dir.glob('*.npy')]
             frames.sort()
-    
-    # 去重并排序
+
     frames = sorted(list(set(frames)))
     FRAMES_CACHE = frames
     return frames
 
+
+def get_prediction_frames():
+    """获取当前预测目录里实际存在 occupancy 结果的帧号集合"""
+    global PRED_FRAMES_CACHE
+    if CURRENT_PREDICTION_DIR is None:
+        return None
+    if PRED_FRAMES_CACHE is not None:
+        return PRED_FRAMES_CACHE
+
+    pred_occ_dir = Path(CURRENT_PREDICTION_DIR) / 'occupancy'
+    if not pred_occ_dir.exists():
+        PRED_FRAMES_CACHE = set()
+    else:
+        PRED_FRAMES_CACHE = {f.stem for f in pred_occ_dir.glob('*.npy')}
+    return PRED_FRAMES_CACHE
+
+
 @app.route('/')
 def index():
-    return send_file('templates/index.html') # Flask send_file doesn't process templates
-    # To use templates properly we should use render_template, but let's just stick to static file for now
-    # and use client-side cache busting
+    return send_file('templates/index.html')
 
 
 @app.route('/api/dataset_info')
 def dataset_info():
     frames = get_frames()
+    dataset_path = Path(CURRENT_DATASET_DIR)
+    pred_frames = get_prediction_frames()
+
     return jsonify({
         'path': CURRENT_DATASET_DIR,
         'count': len(frames),
-        'frames': frames
+        'frames': frames,
+        'has_depth': (dataset_path / 'depth').exists(),
+        'has_ego_pose': (dataset_path / 'ego_pose').exists(),
+        'has_calibration': (dataset_path / 'calibration' / 'intrinsics.json').exists(),
+        'prediction_path': CURRENT_PREDICTION_DIR,
+        'prediction_count': len(pred_frames) if pred_frames is not None else 0,
     })
+
 
 @app.route('/api/set_dataset', methods=['POST'])
 def set_dataset():
@@ -126,197 +143,484 @@ def set_dataset():
     new_path = data.get('path')
     if new_path and os.path.exists(new_path):
         CURRENT_DATASET_DIR = new_path
-        FRAMES_CACHE = [] # 清空缓存
+        FRAMES_CACHE = []
         return jsonify({'success': True, 'count': len(get_frames())})
     return jsonify({'success': False, 'message': 'Path does not exist'})
 
+
+@app.route('/api/set_prediction', methods=['POST'])
+def set_prediction():
+    """设置推理结果目录 (e2e_occ/inference.py 输出格式：<dir>/occupancy/<id>.npy)。
+    传空字符串/null 表示清除。"""
+    global CURRENT_PREDICTION_DIR, PRED_FRAMES_CACHE
+    data = request.json or {}
+    new_path = data.get('path')
+
+    if not new_path:
+        CURRENT_PREDICTION_DIR = None
+        PRED_FRAMES_CACHE = None
+        return jsonify({'success': True, 'count': 0})
+
+    if not os.path.exists(new_path):
+        return jsonify({'success': False, 'message': 'Path does not exist'})
+
+    CURRENT_PREDICTION_DIR = new_path
+    PRED_FRAMES_CACHE = None
+    frames = get_prediction_frames()
+    return jsonify({'success': True, 'count': len(frames)})
+
+
+# ------------------------------------------------------------------
+# 相机图像 (RGB, 缩略图/高清)
+# ------------------------------------------------------------------
+
 @app.route('/api/image/<frame_id>/<int:cam_idx>')
 def get_image(frame_id, cam_idx):
-    """获取指定帧和相机的图像 (优先 PNG > DNG > NPY)"""
+    """获取指定帧和相机的图像 (优先 PNG > DNG > NPY)。?hires=1 返回全分辨率(跳过缓存)。"""
     dataset_path = Path(CURRENT_DATASET_DIR)
     img_dir = dataset_path / 'images' / frame_id
+    hires = request.args.get('hires') == '1'
 
-    # 🔥 0. 优先加载 PNG 缩略图 (最快, 无需处理)
-    png_path = img_dir / f"cam_{cam_idx}.png"
-    if png_path.exists():
-        try:
-            logger.debug(f"✓ Loading PNG thumbnail: {png_path.name}")
-            return send_file(str(png_path), mimetype='image/png')
-        except Exception as e:
-            logger.warning(f"PNG loading failed: {e}, falling back to DNG")
+    if not hires:
+        png_path = img_dir / f"cam_{cam_idx}.png"
+        if png_path.exists():
+            try:
+                return send_file(str(png_path), mimetype='image/png')
+            except Exception as e:
+                logger.warning(f"PNG loading failed: {e}, falling back to DNG")
 
-    # 1. 尝试加载 DNG (需要实时处理)
     dng_path = img_dir / f"cam_{cam_idx}.dng"
 
     if dng_path.exists():
         try:
-            # ⭐⭐⭐ 性能优化: DNG-to-PNG 持久化缓存 ⭐⭐⭐
-            # 为每个 DNG 生成对应的 PNG 缓存文件
-            # 缓存路径: dataset/.png_cache/images/frame_id/cam_idx.png
+            if hires:
+                # 高清大图：不落盘缓存 (点开 lightbox 才会请求，量不大)，直接实时解码
+                import rawpy
+                with rawpy.imread(str(dng_path)) as raw:
+                    rgb = raw.postprocess(use_camera_wb=True, half_size=False, no_auto_bright=False)
+                img_pil = Image.fromarray(rgb)
+                img_io = io.BytesIO()
+                img_pil.save(img_io, 'JPEG', quality=92)
+                img_io.seek(0)
+                return send_file(img_io, mimetype='image/jpeg')
 
+            # 缩略图路径：DNG-to-PNG 持久化缓存
             cache_dir = dataset_path / '.png_cache' / 'images' / frame_id
             cache_png = cache_dir / f"cam_{cam_idx}.png"
 
-            # 检查缓存是否存在且比 DNG 新
             use_cache = False
             if cache_png.exists():
                 dng_mtime = dng_path.stat().st_mtime
                 png_mtime = cache_png.stat().st_mtime
                 if png_mtime >= dng_mtime:
                     use_cache = True
-                    logger.debug(f"✓ Using PNG cache: {cache_png.relative_to(dataset_path)}")
 
-            # 如果缓存可用，直接返回
             if use_cache:
                 return send_file(str(cache_png), mimetype='image/png')
 
-            # 缓存不可用，需要加载 DNG 并生成缓存
-            logger.debug(f"⚙ Generating PNG cache for: {dng_path.name}")
-
-            # 尝试使用 rawpy (最佳质量 + 缓存 + 性能优化)
             try:
                 import rawpy
-                # 使用缓存处理
-                rgb = process_dng_cached(str(dng_path))
-
+                rgb = process_dng_cached(str(dng_path), True)
                 if rgb is None:
-                    # 如果 rawpy 失败, 清除缓存并抛出异常以降级
-                    logger.warning(f"rawpy returned None for {dng_path.name}, clearing cache")
                     process_dng_cached.cache_clear()
                     raise Exception("Cached processing failed")
-
             except ImportError as e:
-                # rawpy 未安装，降级使用 OpenCV
                 logger.warning(f"rawpy not available: {e}, trying cv2")
                 import cv2
                 img = cv2.imread(str(dng_path), cv2.IMREAD_UNCHANGED)
                 if img is None:
                     logger.error(f"cv2 failed to load DNG: {dng_path}")
                     return abort(404, description="Failed to load DNG with cv2")
-
-                # Bayer RGGB -> RGB
                 rgb = cv2.cvtColor(img, cv2.COLOR_BAYER_RGGB2RGB)
-
-                # 关键修复: 如果是 16-bit/12-bit (uint16)，必须归一化到 8-bit
                 if rgb.dtype == np.uint16:
                     max_val = np.max(rgb)
-                    if max_val > 0:
-                        rgb = (rgb / max_val * 255).astype(np.uint8)
-                    else:
-                        rgb = rgb.astype(np.uint8)
+                    rgb = (rgb / max_val * 255).astype(np.uint8) if max_val > 0 else rgb.astype(np.uint8)
 
-            # 转换为 PIL Image
             img_pil = Image.fromarray(rgb)
-
-            # 保存 PNG 缓存到磁盘
             cache_dir.mkdir(parents=True, exist_ok=True)
             img_pil.save(str(cache_png), 'PNG', optimize=True)
-            logger.debug(f"✓ PNG cache saved: {cache_png.relative_to(dataset_path)}")
-
-            # 返回 PNG (直接发送缓存文件，避免二次编码)
             return send_file(str(cache_png), mimetype='image/png')
 
         except Exception as e:
             logger.error(f"❌ Error loading DNG {dng_path.name}: {type(e).__name__}: {e}")
-            # 返回占位图，防止前端图标破碎
             img = create_placeholder_image(text=f"Error: {dng_path.name}")
             img_io = io.BytesIO()
             img.save(img_io, 'JPEG')
             img_io.seek(0)
             return send_file(img_io, mimetype='image/jpeg')
 
-    # 2. 尝试加载 NPY
+    # NPY 兜底 (灰度)
     npy_path = img_dir / f"cam_{cam_idx}.npy"
     if not npy_path.exists():
         return abort(404, description="Image not found")
-        
+
     try:
-        # 加载 npy: (1, H, W) float16, range [0, 1]
         data = np.load(npy_path)
-        
-        # 转换为 (H, W)
-        if data.ndim == 3 and data.shape[0] == 1:
-            img_data = data[0]
-        else:
-            img_data = data
-            
-        # 检查是否包含 NaN 或 Inf
+        img_data = data[0] if data.ndim == 3 and data.shape[0] == 1 else data
         if not np.isfinite(img_data).all():
-             img_data = np.nan_to_num(img_data)
-            
-        # 归一化并转 uint8
+            img_data = np.nan_to_num(img_data)
         img_data = np.clip(img_data, 0, 1)
         img_uint8 = (img_data * 255).astype(np.uint8)
-        
-        # 转换为 PIL Image (灰度)
         img = Image.fromarray(img_uint8, mode='L')
-        
         img_io = io.BytesIO()
         img.save(img_io, 'JPEG', quality=85)
         img_io.seek(0)
-        
         return send_file(img_io, mimetype='image/jpeg')
-        
     except Exception as e:
-        print(f"Error loading NPY {npy_path}: {e}")
+        logger.error(f"Error loading NPY {npy_path}: {e}")
         return abort(500)
+
+
+# ------------------------------------------------------------------
+# 深度图 (colorized)
+# ------------------------------------------------------------------
+
+@app.route('/api/depth/<frame_id>/<int:cam_idx>')
+def get_depth(frame_id, cam_idx):
+    """深度图上色预览。depth/*.npy 是 (H,W) float32，单位米。?max_depth=80 可调裁剪范围。"""
+    dataset_path = Path(CURRENT_DATASET_DIR)
+    depth_path = dataset_path / 'depth' / frame_id / f"cam_{cam_idx}.npy"
+    if not depth_path.exists():
+        return abort(404, description="Depth not found")
+
+    try:
+        max_depth = float(request.args.get('max_depth', 80.0))
+    except ValueError:
+        max_depth = 80.0
+
+    cache_dir = dataset_path / '.png_cache' / 'depth' / frame_id
+    cache_png = cache_dir / f"cam_{cam_idx}_{int(max_depth)}.png"
+
+    if cache_png.exists() and cache_png.stat().st_mtime >= depth_path.stat().st_mtime:
+        return send_file(str(cache_png), mimetype='image/png')
+
+    try:
+        import cv2
+        depth = np.load(depth_path).astype(np.float32)
+        depth = np.nan_to_num(depth, nan=max_depth, posinf=max_depth, neginf=0.0)
+        depth_clipped = np.clip(depth, 0.0, max_depth)
+        depth_u8 = (depth_clipped / max_depth * 255.0).astype(np.uint8)
+        colormap = getattr(cv2, 'COLORMAP_TURBO', cv2.COLORMAP_JET)
+        colored_bgr = cv2.applyColorMap(depth_u8, colormap)
+        colored_rgb = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+
+        img_pil = Image.fromarray(colored_rgb)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        img_pil.save(str(cache_png), 'PNG', optimize=True)
+        return send_file(str(cache_png), mimetype='image/png')
+    except Exception as e:
+        logger.error(f"Error rendering depth {depth_path}: {e}")
+        return abort(500)
+
+
+# ------------------------------------------------------------------
+# 体素 (二进制传输)
+# ------------------------------------------------------------------
+
+def _load_occupancy_grid(frame_id, source):
+    """source: 'gt' | 'pred' -> (400,400,32) uint8 ndarray，找不到返回 None"""
+    if source == 'pred':
+        if CURRENT_PREDICTION_DIR is None:
+            return None
+        path = Path(CURRENT_PREDICTION_DIR) / 'occupancy' / f"{frame_id}.npy"
+    else:
+        path = Path(CURRENT_DATASET_DIR) / 'occupancy' / f"{frame_id}.npy"
+    if not path.exists():
+        return None
+    return np.load(path)
+
+
+def _pack_voxels(indices, labels):
+    """
+    indices: [N,3] int, labels: [N] uint8 -> 6 字节/体素，但按列拼接 (不是逐体素交织)：
+    [x u16 * N][y u16 * N][z u8 * N][label u8 * N]。
+    列式布局是为了让前端能用 `new Uint16Array(buf, offset, N)` 直接在 ArrayBuffer 上开视图
+    零拷贝解码，不用逐体素跑一遍 DataView 循环——真实数据一帧几百万体素时这个循环本身就是
+    卡顿来源之一。
+    """
+    n = len(indices)
+    if n == 0:
+        return b''
+    return (indices[:, 0].astype('<u2').tobytes()
+            + indices[:, 1].astype('<u2').tobytes()
+            + indices[:, 2].astype('u1').tobytes()
+            + labels.astype('u1').tobytes())
+
+
+def _z_mask(indices, z_min, z_max):
+    if z_min is None and z_max is None:
+        return None
+    z = indices[:, 2]
+    mask = np.ones(len(indices), dtype=bool)
+    if z_min is not None:
+        mask &= (z >= z_min)
+    if z_max is not None:
+        mask &= (z <= z_max)
+    return mask
+
+
+# 默认不限制体素数量——之前默认限流到 35 万会对整块的地面/建筑做等步长跨步采样，
+# np.argwhere 按 (x,y,z) 行优先顺序排列，跨步采样会周期性地漏采某些 x/y 列，肉眼看就是
+# "实心块变成一条条离散栅栏"的走样条纹，不是数据问题，是这个降采样策略本身有问题。
+# 配合二进制列式布局 (零拷贝解码) + 直接写 InstancedMesh 缓冲区 (跳过 Object3D)，
+# 全量数据本身已经能流畅渲染，不再需要默认限流。max_voxels 参数保留，只在显式传入时生效
+# (比如以后要给低配设备加一个"性能模式"开关)。
+DEFAULT_MAX_VOXELS = None
+
+
+def _decimate(indices, labels_tuple, max_count):
+    """均匀跨步降采样。labels_tuple 是要跟着 indices 一起降采样的若干 label 数组。
+    返回 (indices, labels_tuple, total_before_decimate)。"""
+    total = len(indices)
+    if max_count is None or total <= max_count:
+        return indices, labels_tuple, total
+    stride = int(np.ceil(total / max_count))
+    sl = slice(None, None, stride)
+    return indices[sl], tuple(a[sl] for a in labels_tuple), total
+
 
 @app.route('/api/occupancy/<frame_id>')
 def get_occupancy(frame_id):
-    """获取指定帧的体素数据 (稀疏格式)"""
-    dataset_path = Path(CURRENT_DATASET_DIR)
-    occ_path = dataset_path / 'occupancy' / f"{frame_id}.npy"
-    
-    if not occ_path.exists():
-        return abort(404)
-        
-    try:
-        # 加载 npy: (400, 400, 32) uint8
-        grid = np.load(occ_path)
+    """
+    体素二进制流。查询参数：
+      source=gt|pred (默认 gt)
+      include_free=0|1 (默认 0，排除 label==0)
+      z_min, z_max (可选，按 Z 层裁切，闭区间)
+      max_voxels (可选，默认 DEFAULT_MAX_VOXELS，超过则均匀降采样；传 0 表示不限制)
+    响应头 X-Voxel-Count 是实际发送的体素数 (body = count*6 字节)，
+    X-Voxel-Total 是降采样前的真实体素数。
+    """
+    source = request.args.get('source', 'gt')
+    include_free = request.args.get('include_free', '0') == '1'
+    z_min = request.args.get('z_min', type=int)
+    z_max = request.args.get('z_max', type=int)
+    max_voxels = request.args.get('max_voxels', default=DEFAULT_MAX_VOXELS, type=int)
+    if max_voxels == 0:
+        max_voxels = None
 
-        # 提取非空体素 (排除 free=0)
-        # ⚠️ 但我们的数据集使用 nuScenes 17 类,需要可视化所有类 (包括 free)
-        # 为了性能,只显示 label != 0 (但这会丢失 free 体素)
-        # 如果要显示 free,改为: indices = np.argwhere(grid >= 0)
-        indices = np.argwhere(grid != 0)  # 排除 free (0)
-        
-        if len(indices) == 0:
-             return jsonify({'points': [], 'labels': []})
-             
-        labels = grid[indices[:,0], indices[:,1], indices[:,2]]
-        
-        # 返回稀疏数据
-        # 为了减少传输量，可以将 points 和 labels 分开
-        # 或者使用简单的 list of lists
-        return jsonify({
-            'points': indices.tolist(),
-            'labels': labels.tolist(),
-            'shape': grid.shape
-        })
-        
-    except Exception as e:
-        print(f"Error loading occupancy {occ_path}: {e}")
-        return abort(500)
+    grid = _load_occupancy_grid(frame_id, source)
+    if grid is None:
+        return abort(404, description=f"Occupancy not found (source={source})")
+
+    indices = np.argwhere(grid >= 0) if include_free else np.argwhere(grid != 0)
+    if len(indices) == 0:
+        resp = Response(b'', mimetype='application/octet-stream')
+        resp.headers['X-Voxel-Count'] = '0'
+        resp.headers['X-Voxel-Total'] = '0'
+        return resp
+
+    labels = grid[indices[:, 0], indices[:, 1], indices[:, 2]]
+
+    mask = _z_mask(indices, z_min, z_max)
+    if mask is not None:
+        indices = indices[mask]
+        labels = labels[mask]
+
+    indices, (labels,), total = _decimate(indices, (labels,), max_voxels)
+
+    body = _pack_voxels(indices, labels)
+    resp = Response(body, mimetype='application/octet-stream')
+    resp.headers['X-Voxel-Count'] = str(len(indices))
+    resp.headers['X-Voxel-Total'] = str(total)
+    resp.headers['X-Grid-Shape'] = ','.join(str(s) for s in grid.shape)
+    return resp
+
+
+@app.route('/api/occupancy_diff/<frame_id>')
+def get_occupancy_diff(frame_id):
+    """
+    GT vs Pred 逐体素比较，只返回不一致的体素。
+    8 字节/体素: u16 x, u16 y, u8 z, u8 gt_label, u8 pred_label, u8 category
+    category: 0=confusion(两边都非空但类别不同) 1=miss(GT有Pred空) 2=false_positive(GT空Pred有)
+    """
+    z_min = request.args.get('z_min', type=int)
+    z_max = request.args.get('z_max', type=int)
+    max_voxels = request.args.get('max_voxels', default=DEFAULT_MAX_VOXELS, type=int)
+    if max_voxels == 0:
+        max_voxels = None
+
+    gt = _load_occupancy_grid(frame_id, 'gt')
+    pred = _load_occupancy_grid(frame_id, 'pred')
+    if gt is None or pred is None:
+        return abort(404, description="GT or Pred occupancy not found")
+    if gt.shape != pred.shape:
+        return abort(500, description="GT/Pred shape mismatch")
+
+    mismatch = gt != pred
+    indices = np.argwhere(mismatch)
+    if len(indices) == 0:
+        resp = Response(b'', mimetype='application/octet-stream')
+        resp.headers['X-Voxel-Count'] = '0'
+        resp.headers['X-Voxel-Total'] = '0'
+        return resp
+
+    gt_labels = gt[indices[:, 0], indices[:, 1], indices[:, 2]]
+    pred_labels = pred[indices[:, 0], indices[:, 1], indices[:, 2]]
+
+    mask = _z_mask(indices, z_min, z_max)
+    if mask is not None:
+        indices = indices[mask]
+        gt_labels = gt_labels[mask]
+        pred_labels = pred_labels[mask]
+
+    indices, (gt_labels, pred_labels), total = _decimate(indices, (gt_labels, pred_labels), max_voxels)
+
+    category = np.zeros(len(indices), dtype=np.uint8)
+    category[(gt_labels == 0) & (pred_labels != 0)] = 2   # false_positive
+    category[(gt_labels != 0) & (pred_labels == 0)] = 1   # miss
+    # 其余 (两边都非空但不同类) 保持默认 0 = confusion
+
+    # 列式布局 (同 _pack_voxels 的理由): x,y,z,gt,pred,cat 各自连续存放，前端零拷贝开视图
+    n = len(indices)
+    body = (indices[:, 0].astype('<u2').tobytes()
+            + indices[:, 1].astype('<u2').tobytes()
+            + indices[:, 2].astype('u1').tobytes()
+            + gt_labels.astype('u1').tobytes()
+            + pred_labels.astype('u1').tobytes()
+            + category.astype('u1').tobytes())
+
+    resp = Response(body, mimetype='application/octet-stream')
+    resp.headers['X-Voxel-Count'] = str(n)
+    resp.headers['X-Voxel-Total'] = str(total)
+    return resp
+
+
+@app.route('/api/occupancy_diff_summary/<frame_id>')
+def get_occupancy_diff_summary(frame_id):
+    """GT vs Pred 整帧质量摘要 (JSON，轻量，用于控制面板展示一行统计)"""
+    gt = _load_occupancy_grid(frame_id, 'gt')
+    pred = _load_occupancy_grid(frame_id, 'pred')
+    if gt is None or pred is None:
+        return abort(404, description="GT or Pred occupancy not found")
+    if gt.shape != pred.shape:
+        return abort(500, description="GT/Pred shape mismatch")
+
+    total = gt.size
+    exact_match = int(np.count_nonzero(gt == pred))
+    occ_gt = gt != 0
+    occ_pred = pred != 0
+    intersection = int(np.count_nonzero(occ_gt & occ_pred))
+    union = int(np.count_nonzero(occ_gt | occ_pred))
+
+    miss = int(np.count_nonzero(occ_gt & ~occ_pred))
+    false_positive = int(np.count_nonzero(~occ_gt & occ_pred))
+    confusion = int(np.count_nonzero(occ_gt & occ_pred & (gt != pred)))
+
+    return jsonify({
+        'total_voxels': int(total),
+        'gt_nonfree': int(np.count_nonzero(occ_gt)),
+        'pred_nonfree': int(np.count_nonzero(occ_pred)),
+        'exact_match': exact_match,
+        'accuracy': exact_match / total if total else 0.0,
+        'occupancy_iou': (intersection / union) if union else 1.0,
+        'miss_count': miss,
+        'false_positive_count': false_positive,
+        'confusion_count': confusion,
+    })
+
+
+# ------------------------------------------------------------------
+# 标定 / 轨迹
+# ------------------------------------------------------------------
+
+@app.route('/api/calibration')
+def get_calibration():
+    """返回当前数据集 calibration/intrinsics.json + extrinsics.json 的合并内容"""
+    dataset_path = Path(CURRENT_DATASET_DIR)
+    int_path = dataset_path / 'calibration' / 'intrinsics.json'
+    ext_path = dataset_path / 'calibration' / 'extrinsics.json'
+
+    if not int_path.exists() or not ext_path.exists():
+        return abort(404, description="Calibration not found")
+
+    with open(int_path, 'r') as f:
+        intrinsics = json.load(f)
+    with open(ext_path, 'r') as f:
+        extrinsics = json.load(f)
+
+    cameras = {}
+    cam_keys = sorted([k for k in intrinsics.keys() if k.startswith('cam_')],
+                       key=lambda k: int(k.split('_')[1]))
+    for key in cam_keys:
+        cameras[key] = {
+            **intrinsics.get(key, {}),
+            'extrinsics': extrinsics.get(key, {}),
+        }
+
+    return jsonify({
+        'cameras': cameras,
+        'raw_bit_depth': intrinsics.get('raw_bit_depth'),
+    })
+
+
+@app.route('/api/trajectory')
+def get_trajectory():
+    """
+    扫描 ego_pose/*.npy，返回按帧顺序排列的 (x,y) 位置，供 3D 视图画自车轨迹。
+    体素视图始终是"当前帧车辆自身坐标系"（车在原点），所以轨迹默认按 ?relative_to=<frame_id>
+    转换到该帧的自车坐标系下（用完整 4x4 位姿做旋转+平移变换），不传则返回原始世界坐标
+    （直接画意义不大，只有 relative_to 模式才能叠加到当前体素视图里）。
+    """
+    dataset_path = Path(CURRENT_DATASET_DIR)
+    ego_dir = dataset_path / 'ego_pose'
+    if not ego_dir.exists():
+        return jsonify({'points': []})
+
+    relative_to = request.args.get('relative_to')
+    frames = get_frames()
+
+    poses = {}
+    for frame_id in frames:
+        pose_path = ego_dir / f"{frame_id}.npy"
+        if not pose_path.exists():
+            continue
+        try:
+            poses[frame_id] = np.load(pose_path).astype(np.float64)  # (4,4) Vehicle->World
+        except Exception as e:
+            logger.warning(f"Failed to read ego_pose for {frame_id}: {e}")
+
+    ref_pose = poses.get(relative_to) if relative_to else None
+
+    points = []
+    for frame_id in frames:
+        pose = poses.get(frame_id)
+        if pose is None:
+            continue
+        if ref_pose is not None:
+            R_ref = ref_pose[:3, :3]
+            t_ref = ref_pose[:3, 3]
+            rel = R_ref.T @ (pose[:3, 3] - t_ref)
+            points.append([float(rel[0]), float(rel[1])])
+        else:
+            points.append([float(pose[0, 3]), float(pose[1, 3])])
+
+    return jsonify({'points': points, 'relative_to': relative_to})
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--dataset', type=str, default=DEFAULT_DATASET_DIR)
+    parser.add_argument('--prediction', type=str, default=None, help='推理结果目录 (可选)')
     args = parser.parse_args()
 
     if args.dataset and os.path.exists(args.dataset):
         CURRENT_DATASET_DIR = args.dataset
 
-    # 打印启动横幅 (类似 occupancy_viewer 风格)
+    if args.prediction and os.path.exists(args.prediction):
+        CURRENT_PREDICTION_DIR = args.prediction
+
     print("=" * 60)
     print("Dataset Viewer v2 Server")
     print("=" * 60)
-    print(f"Dataset:  {CURRENT_DATASET_DIR}")
-    print(f"Port:     {args.port}")
-    print(f"URL:      http://localhost:{args.port}/")
+    print(f"Dataset:    {CURRENT_DATASET_DIR}")
+    print(f"Prediction: {CURRENT_PREDICTION_DIR or '(未设置)'}")
+    print(f"Port:       {args.port}")
+    print(f"URL:        http://127.0.0.1:{args.port}/")
+    print("(用 127.0.0.1 而不是 localhost 打开 —— 本机 localhost 解析会先尝试 IPv6 再回退")
+    print(" IPv4，每个请求多出约 2 秒延迟，直接用 127.0.0.1 可以完全避开这个坑)")
     print("=" * 60)
 
-    # 验证数据集
     dataset_path = Path(CURRENT_DATASET_DIR)
     if not dataset_path.exists():
         logger.warning(f"⚠️ Dataset directory does not exist: {CURRENT_DATASET_DIR}")
@@ -324,8 +628,10 @@ if __name__ == '__main__':
         frames = get_frames()
         logger.info(f"✓ Found {len(frames)} frames")
 
-    # 显式开启多线程，禁用 Debugger (防止干扰线程)
-    # 禁用 Flask 自带的请求日志 (使用我们的自定义日志)
+    if CURRENT_PREDICTION_DIR:
+        pred_frames = get_prediction_frames()
+        logger.info(f"✓ Found {len(pred_frames)} prediction frames")
+
     import logging as flask_logging
     flask_logging.getLogger('werkzeug').setLevel(flask_logging.ERROR)
 

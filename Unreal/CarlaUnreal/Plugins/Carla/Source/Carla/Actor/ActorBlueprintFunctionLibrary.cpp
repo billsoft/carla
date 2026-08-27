@@ -523,7 +523,7 @@ void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
   FActorVariation WAL_FOVHorizontal;
   WAL_FOVHorizontal.Id = TEXT("fov_horizontal");
   WAL_FOVHorizontal.Type = EActorAttributeType::Float;
-  WAL_FOVHorizontal.RecommendedValues = {TEXT("90.0")};
+  WAL_FOVHorizontal.RecommendedValues = {TEXT("0.0")};
   WAL_FOVHorizontal.bRestrictToRecommended = false;
 
   // Principal point (optical center), in pixels. Unset means: exact
@@ -2055,18 +2055,29 @@ void UActorBlueprintFunctionLibrary::SetCamera(
 
   // Independent horizontal FOV override — must run after SetFOVAngle(): that
   // call also resets XFOVAngle to the aspect-ratio-derived default, so this
-  // has to happen afterwards to actually take effect. Omitting the attribute
-  // keeps the pre-existing aspect-ratio-derived behavior exactly as it was.
-  if (Variations.Contains("fov_horizontal"))
-    Camera->SetFOVAngleX(RetrieveActorAttributeToFloat("fov_horizontal", Variations, FOV));
+  // has to happen afterwards to actually take effect. 0.0 means "not set":
+  // ActorBlueprint::MakeActorDescription() (LibCarla/client/ActorBlueprint.cpp)
+  // serializes EVERY registered blueprint attribute, not just ones the Python
+  // caller explicitly set — so Variations always contains "fov_horizontal"
+  // (defaulting to its RecommendedValues, "0.0") and Contains() can never
+  // distinguish "explicitly set" from "using the default". Must use the same
+  // value-sentinel pattern as FocalLength above, not a presence check.
+  const auto FOVHorizontal = RetrieveActorAttributeToFloat("fov_horizontal", Variations, 0.0f);
+  if (FOVHorizontal != 0.0f)
+    Camera->SetFOVAngleX(FOVHorizontal);
 
   // Principal point (optical center) override, in pixels — a real physical
   // lens's calibrated optical center rarely lands exactly on the geometric
-  // center SetImageSize() defaults to. Omitting both cx/cy keeps that default.
-  if (Variations.Contains("cx") || Variations.Contains("cy"))
+  // center SetImageSize() defaults to. Same Contains()-is-always-true trap as
+  // fov_horizontal above: 0.0 is the "not set" sentinel (a real cx/cy is never
+  // legitimately exactly 0, that would put the optical center on the image
+  // edge), so gate on value, and only override the axis actually supplied.
+  const auto Cx = RetrieveActorAttributeToFloat("cx", Variations, 0.0f);
+  const auto Cy = RetrieveActorAttributeToFloat("cy", Variations, 0.0f);
+  if (Cx != 0.0f || Cy != 0.0f)
     Camera->SetPrincipalPoint(
-        RetrieveActorAttributeToFloat("cx", Variations, Camera->GetPrincipalPointX()),
-        RetrieveActorAttributeToFloat("cy", Variations, Camera->GetPrincipalPointY()));
+        Cx != 0.0f ? Cx : Camera->GetPrincipalPointX(),
+        Cy != 0.0f ? Cy : Camera->GetPrincipalPointY());
 
   Camera->SetRenderPerspective(RetrieveActorAttributeToBool("perspective", Variations, false));
   Camera->SetRenderEquirectangular(RetrieveActorAttributeToBool("equirectangular", Variations, false));

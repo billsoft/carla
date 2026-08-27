@@ -1,0 +1,1157 @@
+========================================================
+CARLA FINAL BUILD SCRIPT (VS 2026 + /wd4723 FIX)
+========================================================
+[1/4] Setting up environment for VS 2026...
+Using VS Toolchain: C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars64.bat
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.0.2
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[DEBUG:ext\vcvars.bat] Found potential v145 version file: 'Microsoft.VCToolsVersion.VC.14.50.18.0.txt'
+[DEBUG:ext\vcvars.bat] Testing v145 version file: 'Microsoft.VCToolsVersion.VC.14.50.18.0.txt'
+[vcvarsall.bat] Environment initialized for: 'x64'
+[2/4] Activating Conda environment...
+Using Python: C:\ProgramData\anaconda3\envs\carla\python.exe
+[3/4] Configuring CMake...
+-- The C compiler identification is MSVC 19.50.35719.0
+-- The CXX compiler identification is MSVC 19.50.35719.0
+-- The ASM compiler identification is MSVC
+CMake Warning (dev) at C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeDetermineASMCompiler.cmake:234 (message):
+  Policy CMP194 is not set: MSVC is not an assembler for language ASM.  Run
+  "cmake --help-policy CMP194" for policy details.  Use the cmake_policy
+  command to set the policy and suppress this warning.
+Call Stack (most recent call first):
+  CMakeLists.txt:46 (project)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found assembler: C:/Program Files/Microsoft Visual Studio/18/Professional/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Professional/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Professional/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- CARLA: Using D:/code/UnrealEngine5_carla as Unreal Engine root path.
+-- Performing Test HAS_MSVC_UTF8
+-- Performing Test HAS_MSVC_UTF8 - Success
+-- CARLA: Checking for /EHsc support
+-- Performing Test HAS_EXCEPTIONS_FLAG
+-- Performing Test HAS_EXCEPTIONS_FLAG - Success
+-- CARLA: Checking for /GR support
+-- Performing Test HAS_RTTI_FLAG
+-- Performing Test HAS_RTTI_FLAG - Success
+-- Performing Test HAS_W4_MSVC
+-- Performing Test HAS_W4_MSVC - Success
+-- Performing Test HAS_macro_redefined
+-- Performing Test HAS_macro_redefined - Failed
+-- Performing Test HAS__4005
+-- Performing Test HAS__4005 - Success
+-- Performing Test HAS_incompatible_pointer_types
+-- Performing Test HAS_incompatible_pointer_types - Failed
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - not found
+-- Found Threads: TRUE
+-- CARLA: Downloading sqlite3...
+-- CARLA: Downloading zlib...
+-- Looking for sys/types.h
+-- Looking for sys/types.h - found
+-- Looking for stdint.h
+-- Looking for stdint.h - found
+-- Looking for stddef.h
+-- Looking for stddef.h - found
+-- Check size of off64_t
+-- Check size of off64_t - failed
+-- Looking for fseeko
+-- Looking for fseeko - not found
+-- Looking for unistd.h
+-- Looking for unistd.h - not found
+-- Renaming
+--     D:/code/carla/Build/_deps/zlib-src/zconf.h
+-- to 'zconf.h.included' because this file is included with zlib
+-- but CMake generates it automatically in the build directory.
+-- CARLA: Downloading libpng...
+CMake Deprecation Warning at Build/_deps/libpng-src/CMakeLists.txt:33 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at Build/_deps/libpng-src/CMakeLists.txt:34 (cmake_policy):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Performing Test HAVE_LD_VERSION_SCRIPT
+-- Performing Test HAVE_LD_VERSION_SCRIPT - Failed
+-- Performing Test HAVE_SOLARIS_LD_VERSION_SCRIPT
+-- Performing Test HAVE_SOLARIS_LD_VERSION_SCRIPT - Failed
+-- CARLA: Downloading boost...
+-- CARLA: Downloading eigen...
+-- CARLA: Downloading rpclib...
+-- CARLA: Downloading recastnavigation...
+-- CARLA: Downloading StreetMap...
+-- CARLA: Downloading googletest...
+-- Boost: Release build, static libraries, MPI OFF, Python ON, testing OFF
+-- Boost: libraries included: asio;iterator;python;date_time;geometry;container;variant2;gil
+-- Performing Test BOOST_ATOMIC_TARGET_X86
+-- Performing Test BOOST_ATOMIC_TARGET_X86 - Success
+-- Performing Test BOOST_ATOMIC_COMPILER_HAS_SSE2
+-- Performing Test BOOST_ATOMIC_COMPILER_HAS_SSE2 - Success
+-- Performing Test BOOST_ATOMIC_COMPILER_HAS_SSE41
+-- Performing Test BOOST_ATOMIC_COMPILER_HAS_SSE41 - Success
+-- Performing Test BOOST_ATOMIC_HAS_PTHREAD_COND_CLOCKWAIT
+-- Performing Test BOOST_ATOMIC_HAS_PTHREAD_COND_CLOCKWAIT - Failed
+-- Boost.Context: architecture x86_64, binary format pe, ABI ms, assembler masm, suffix .asm, implementation fcontext
+-- The ASM_MASM compiler identification is MSVC
+-- Found assembler: C:/Program Files/Microsoft Visual Studio/18/Professional/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/ml64.exe
+-- Performing Test BOOST_FILESYSTEM_HAS_INIT_PRIORITY
+-- Performing Test BOOST_FILESYSTEM_HAS_INIT_PRIORITY - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_CXX20_ATOMIC_REF
+-- Performing Test BOOST_FILESYSTEM_HAS_CXX20_ATOMIC_REF - Success
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_BLKSIZE
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_BLKSIZE - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_MTIM
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_MTIM - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_MTIMENSEC
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_MTIMENSEC - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_MTIMESPEC
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_MTIMESPEC - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_BIRTHTIMENSEC
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_BIRTHTIMENSEC - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_BIRTHTIMESPEC
+-- Performing Test BOOST_FILESYSTEM_HAS_STAT_ST_BIRTHTIMESPEC - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_STATX
+-- Performing Test BOOST_FILESYSTEM_HAS_STATX - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_STATX_SYSCALL
+-- Performing Test BOOST_FILESYSTEM_HAS_STATX_SYSCALL - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_FDOPENDIR_NOFOLLOW
+-- Performing Test BOOST_FILESYSTEM_HAS_FDOPENDIR_NOFOLLOW - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_DIRENT_D_TYPE
+-- Performing Test BOOST_FILESYSTEM_HAS_DIRENT_D_TYPE - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_POSIX_AT_APIS
+-- Performing Test BOOST_FILESYSTEM_HAS_POSIX_AT_APIS - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_FALLOCATE
+-- Performing Test BOOST_FILESYSTEM_HAS_FALLOCATE - Failed
+-- Performing Test BOOST_FILESYSTEM_HAS_BCRYPT
+-- Performing Test BOOST_FILESYSTEM_HAS_BCRYPT - Failed
+-- Boost.Math: standalone mode OFF
+-- Boost.Multiprecision: standalone mode OFF
+-- Found Python: C:/ProgramData/anaconda3/envs/carla/libs/python310.lib (found version "3.10.19") found components: Development NumPy Interpreter Development.Module Development.Embed
+-- Boost.Python: using Python 3.10.19 with NumPy at C:/ProgramData/anaconda3/envs/carla/lib/site-packages/numpy/core/include
+-- Boost.Thread: threading API is win32
+CMake Deprecation Warning at Build/_deps/eigen-src/CMakeLists.txt:2 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Performing Test EIGEN_COMPILER_SUPPORT_CPP11
+-- Performing Test EIGEN_COMPILER_SUPPORT_CPP11 - Failed
+-- Performing Test COMPILER_SUPPORT_std=cpp03
+-- Performing Test COMPILER_SUPPORT_std=cpp03 - Failed
+-- Performing Test standard_math_library_linked_to_automatically
+-- Performing Test standard_math_library_linked_to_automatically - Success
+-- Standard libraries to link to explicitly: none
+-- Performing Test COMPILER_SUPPORT_OPENMP
+-- Performing Test COMPILER_SUPPORT_OPENMP - Success
+-- Looking for a Fortran compiler
+-- Looking for a Fortran compiler - NOTFOUND
+-- Found unsuitable Qt version "" from NOTFOUND
+-- Qt4 not found, so disabling the mandelbrot and opengl demos
+-- 
+-- Configured Eigen 3.4.0
+-- 
+-- Available targets (use: cmake --build . --target TARGET):
+-- ---------+--------------------------------------------------------------
+-- Target   |   Description
+-- ---------+--------------------------------------------------------------
+-- install  | Install Eigen. Headers will be installed to:
+--          |     <CMAKE_INSTALL_PREFIX>/<INCLUDE_INSTALL_DIR>
+--          |   Using the following values:
+--          |     CMAKE_INSTALL_PREFIX: C:/Program Files (x86)/CARLA
+--          |     INCLUDE_INSTALL_DIR:  include/eigen3
+--          |   Change the install location of Eigen headers using:
+--          |     cmake . -DCMAKE_INSTALL_PREFIX=yourprefix
+--          |   Or:
+--          |     cmake . -DINCLUDE_INSTALL_DIR=yourdir
+-- doc      | Generate the API documentation, requires Doxygen & LaTeX
+-- blas     | Build BLAS library (not the same thing as Eigen)
+-- uninstall| Remove files installed by the install target
+-- ---------+--------------------------------------------------------------
+-- 
+CMake Deprecation Warning at Build/_deps/rpclib-src/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at Build/_deps/recastnavigation-src/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Found Python3: C:/Program Files/WindowsApps/PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0/python3.12.exe (found version "3.12.10") found components: Interpreter
+-- Found Python3: C:/ProgramData/anaconda3/envs/carla/python.exe (found version "3.10.19") found components: Interpreter Development.Module Development.Embed Development.SABIModule
+-- CARLA: Found Numpy 1.26.4 for Python 3.10.19 (C:/ProgramData/anaconda3/envs/carla/python.exe).
+-- CARLA: CARLA Building C++ EXAMPLE CLIENT
+-- CARLA: CARLA Building Qt C++ example: dockable community tool + plugin
+CMake Warning at CMake/Util.cmake:17 (message):
+  Qt6 or Qt5 not found.  Skipping Qt example target.
+Call Stack (most recent call first):
+  Examples/QtClient/CMakeLists.txt:33 (carla_warning)
+
+
+-- Configuring done (46.1s)
+-- Generating done (1.3s)
+-- Build files have been written to: D:/code/carla/Build
+Working around missing zconf.h next to zlib.h (see comment above)...
+[4/4] Building CARLA Unreal Editor Plugins (target: carla-unreal-editor)...
+[0/2] Re-checking globbed directories...
+[0/3] C:\WINDOWS\system32\cmd.exe /C "cd /D D:\code\carla\Build\Unreal && D:\code\UnrealEngine5_carla\Engine\Build\BatchFiles\Build.bat CarlaUnreal Win64 Development -project=D:/code/carla/Unreal/CarlaUnreal/CarlaUnreal.uproject -game -buildscw"
+Using bundled DotNet SDK version: 8.0.300
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" CarlaUnreal Win64 Development -project=D:/code/carla/Unreal/CarlaUnreal/CarlaUnreal.uproject -game -buildscw
+Log file: D:\code\UnrealEngine5_carla\Engine\Programs\UnrealBuildTool\Log.txt
+Using 'git status' to determine working set for adaptive non-unity build (D:\code\UnrealEngine5_carla).
+Waiting for 'git status' command to complete
+Building CarlaUnreal...
+Using Visual Studio 2022 14.50.35719 toolchain (C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Tools\MSVC\14.50.35717) and Windows 10.0.22621.0 SDK (C:\Program Files (x86)\Windows Kits\10).
+Warning: Visual Studio 2022 compiler is not a preferred version
+[Adaptive Build] Excluded from RigLogicLib unity file: FilteredBinaryInputArchive.cpp
+Determining max actions to execute in parallel (24 physical cores, 32 logical cores)
+  Executing up to 24 processes, one per physical core
+Using Unreal Build Accelerator local executor to run 218 action(s)
+  Storage capacity 40Gb
+---- Starting trace: 260827_180704 ----
+UbaSessionServer - Disable remote execution (remote sessions will finish current processes)
+------ Building 218 action(s) started ------
+[1/218] Generate Header [x86-64] GPUSkinVertexFactory.ispc
+[2/218] Generate Header [x86-64] PBDCollisionSolver.ispc
+[3/218] Generate Header [x86-64] PBDEvolution.ispc
+[4/218] Generate Header [x86-64] BonePose.ispc
+[5/218] Generate Header [x86-64] SkinnedAsset.ispc
+[6/218] Generate Header [x86-64] AABB.ispc
+[7/218] Generate Header [x86-64] PerParticleDampVelocity.ispc
+[8/218] Generate Header [x86-64] KAggregateGeom.ispc
+[9/218] Generate Header [x86-64] PBDSpringConstraints.ispc
+[10/218] Generate Header [x86-64] PBDMinEvolution.ispc
+[11/218] Generate Header [x86-64] AnimationRuntime.ispc
+[12/218] Generate Header [x86-64] AnimEncoding_ConstantKeyLerp.ispc
+[13/218] Generate Header [x86-64] TriangleMesh.ispc
+[14/218] Generate Header [x86-64] PBDLongRangeConstraints.ispc
+[15/218] Generate Header [x86-64] PBDAxialSpringConstraints.ispc
+[16/218] Generate Header [x86-64] AnimEncoding_VariableKeyLerp.ispc
+[17/218] Generate Header [x86-64] GeometryCollectionSceneProxy.ispc
+[18/218] Generate Header [x86-64] NiagaraDataInterfaceVectorField.ispc
+[19/218] Generate Header [x86-64] ChaosClothingSimulation.ispc
+[20/218] Generate Header [x86-64] ChaosClothingSimulationMesh.ispc
+[21/218] Generate Header [x86-64] SoftsMultiResConstraints.ispc
+[22/218] Generate Header [x86-64] PBDJointSolverGaussSeidel.ispc
+[23/218] Generate Header [x86-64] FloatArrayMath.ispc
+[24/218] Generate Header [x86-64] PBDSphericalConstraint.ispc
+[25/218] Generate Header [x86-64] GeometryCollectionComponent.ispc
+[26/218] Generate Header [x86-64] GeometryCacheSceneProxy.ispc
+[27/218] Compile [x86-64] ChaosClothingSimulationMesh.ispc
+[28/218] Generate Header [x86-64] AnimEncoding_PerTrackCompression.ispc
+[29/218] Compile [x86-64] PBDCollisionSolver.ispc
+[30/218] Compile [x86-64] AABB.ispc
+[31/218] Generate Header [x86-64] PBDBendingConstraints.ispc
+[32/218] Generate Header [x86-64] PBDCollisionConstraints.ispc
+[33/218] Compile [x86-64] PBDEvolution.ispc
+[34/218] Compile [x86-64] ChaosClothingSimulation.ispc
+[35/218] Generate Header [x86-64] XPBDSpringConstraints.ispc
+[36/218] Compile [x86-64] TriangleMesh.ispc
+[37/218] Compile [x86-64] PBDAxialSpringConstraints.ispc
+[38/218] Compile [x86-64] PBDMinEvolution.ispc
+[39/218] Compile [x86-64] PerParticleDampVelocity.ispc
+[40/218] Compile [x86-64] PBDSpringConstraints.ispc
+[41/218] Generate Header [x86-64] PBDCollisionSpringConstraints.ispc
+[42/218] Compile [x86-64] PBDLongRangeConstraints.ispc
+[43/218] Generate Header [x86-64] ChaosClothingSimulationSolver.ispc
+[44/218] Compile [x86-64] GPUSkinVertexFactory.ispc
+[45/218] Compile [x86-64] BonePose.ispc
+[46/218] Compile [x86-64] SoftsMultiResConstraints.ispc
+[47/218] Compile [x86-64] AnimEncoding_ConstantKeyLerp.ispc
+[48/218] Compile [x86-64] PBDJointSolverGaussSeidel.ispc
+[49/218] Generate Header [x86-64] VelocityField.ispc
+[50/218] Compile [x64] Module.Engine.11.cpp
+[51/218] Compile [x64] Module.Engine.12.cpp
+[52/218] Compile [x86-64] KAggregateGeom.ispc
+[53/218] Compile [x64] Module.Engine.13.cpp
+UbaSessionServer - Waited 262ms for memory pressure to go down (Available: 13.0gb Total: 75.0gb)
+[54/218] Compile [x64] Module.Engine.1.cpp
+[55/218] Compile [x86-64] AnimationRuntime.ispc
+[56/218] Compile [x64] Module.Engine.14.cpp
+[57/218] Compile [x64] Module.Engine.10.cpp
+[58/218] Compile [x64] Module.Engine.16.cpp
+[59/218] Compile [x64] Module.Engine.15.cpp
+[60/218] Compile [x86-64] PBDSphericalConstraint.ispc
+[61/218] Generate Header [x86-64] XPBDStretchBiasElementConstraints.ispc
+[62/218] Compile [x64] Module.Engine.19.cpp
+[63/218] Compile [x64] Module.Engine.21.cpp
+[64/218] Compile [x64] Module.Engine.20.cpp
+UbaSessionServer - Waited 3.1s for memory pressure to go down (Available: 15.9gb Total: 75.0gb)
+[65/218] Compile [x64] Module.Engine.22.cpp
+UbaSessionServer - Waited 2.3s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 5 processes from spawning due to memory pressure (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - NOTE - To mitigate this spawn delay it is recommended to make page file larger until you don't see these messages again (Or reduce number of max parallel processes)
+UbaSessionServer -        Set max page file to a large number (like 128gb). It will not use disk space unless you actually start using that amount of committed memory
+UbaSessionServer -        Also note, this is "committed" memory. Not memory in use. So you necessarily don't need more physical memory
+UbaSessionServer -   MaxPage:   0b
+UbaSessionServer -   TotalPhys: 68.4gb
+UbaSessionServer -   AvailPhys: 38.6gb
+UbaSessionServer -   TotalPage: 75.0gb
+UbaSessionServer -   AvailPage: 12.4gb
+[66/218] Compile [x64] Module.Engine.2.cpp
+[67/218] Compile [x86-64] PBDBendingConstraints.ispc
+[68/218] Compile [x64] PCH.Carla.cpp
+Detected compiler newer than Visual Studio 2022, please update min version checking in WindowsPlatformCompilerSetup.h
+UbaSessionServer - Waited 3.3s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+[69/218] Generate Header [x86-64] PerParticlePBDCollisionConstraint.ispc
+[70/218] Compile [x64] Module.Engine.18.cpp
+[71/218] Compile [x64] Module.Engine.23.cpp
+UbaSessionServer - Waited 4.1s for memory pressure to go down (Available: 12.9gb Total: 75.0gb)
+[72/218] Compile [x64] Module.Engine.17.cpp
+[73/218] Compile [x86-64] AnimEncoding_VariableKeyLerp.ispc
+[74/218] Compile [x86-64] XPBDSpringConstraints.ispc
+UbaSessionServer - Delaying 5 processes from spawning due to memory pressure (Available: 4.1gb Total: 75.0gb)
+[75/218] Compile [x64] Module.Engine.24.cpp
+[76/218] Compile [x86-64] PBDCollisionConstraints.ispc
+[77/218] Generate Header [x86-64] XPBDAnisotropicBendingConstraints.ispc
+[78/218] Generate Header [x86-64] XPBDAnisotropicSpringConstraints.ispc
+[79/218] Generate Header [x86-64] XPBDBendingConstraints.ispc
+[80/218] Compile [x86-64] ChaosClothingSimulationSolver.ispc
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 9.1gb Total: 75.0gb)
+[81/218] Compile [x86-64] AnimEncoding_PerTrackCompression.ispc
+[82/218] Compile [x64] Module.Engine.28.cpp
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 10.3gb Total: 75.0gb)
+[83/218] Compile [x64] Module.Engine.29.cpp
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 8.9gb Total: 75.0gb)
+[84/218] Compile [x86-64] PBDCollisionSpringConstraints.ispc
+[85/218] Compile [x64] Module.ChaosCloth.cpp
+[86/218] Compile [x64] PCH.CarlaUnreal.cpp
+Detected compiler newer than Visual Studio 2022, please update min version checking in WindowsPlatformCompilerSetup.h
+UbaSessionServer - Waited 24.0s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 7.5gb Total: 75.0gb)
+[87/218] Compile [x64] Module.Carla.1.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 6.4gb Total: 75.0gb)
+[88/218] Compile [x86-64] VelocityField.ispc
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 7.2gb Total: 75.0gb)
+[89/218] Compile [x86-64] XPBDStretchBiasElementConstraints.ispc
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 7.1gb Total: 75.0gb)
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 8.8gb Total: 75.0gb)
+[90/218] Compile [x64] Module.Engine.25.cpp
+[91/218] Compile [x64] Module.Chaos.13.cpp
+UbaSessionServer - Delaying 20 processes from spawning due to memory pressure (Available: 8.7gb Total: 75.0gb)
+UbaSessionServer - Waited 52.7s for memory pressure to go down (Available: 11.6gb Total: 75.0gb)
+UbaSessionServer - Waited 54.6s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 10.2gb Total: 75.0gb)
+[92/218] Compile [x64] Module.Carla.14.cpp
+UbaSessionServer - Waited 54.6s for memory pressure to go down (Available: 12.0gb Total: 75.0gb)
+UbaSessionServer - Waited 55.0s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 10.5gb Total: 75.0gb)
+[93/218] Compile [x64] Module.Carla.10.cpp
+[94/218] Compile [x64] Module.Carla.11.cpp
+[95/218] Compile [x64] Module.Engine.26.cpp
+UbaSessionServer - Delaying 20 processes from spawning due to memory pressure (Available: 10.6gb Total: 75.0gb)
+UbaSessionServer - Waited 60.9s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+UbaSessionServer - Waited 61.8s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - Waited 63.1s for memory pressure to go down (Available: 14.3gb Total: 75.0gb)
+UbaSessionServer - Waited 63.4s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 12.6gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 9.0gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 7.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 6.1gb Total: 75.0gb)
+[96/218] Compile [x64] Module.Engine.27.cpp
+[97/218] Compile [x64] Module.Carla.13.cpp
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\CameraModelUtil.cpp(775): warning C4996: 'FTexture2DRHIRef': The separate RHI texture types were unified in UE 5.1. FTexture2DRHIRef is now deprecated. Use FTextureRHIRef instead. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(98): warning C4996: 'FJsonObject::TryGetArrayField': Passing an ANSI string to TryGetArrayField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(108): warning C4996: 'FJsonObject::GetObjectField': Passing an ANSI string to GetObjectField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(110): warning C4996: 'FJsonObject::GetStringField': Passing an ANSI string to GetStringField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(115): warning C4996: 'FJsonObject::TryGetArrayField': Passing an ANSI string to TryGetArrayField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 5.9gb Total: 75.0gb)
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Vehicle\CustomTerrainPhysicsComponent.cpp(97): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Vehicle\CustomTerrainPhysicsComponent.cpp(100): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[98/218] Compile [x64] Module.Carla.12.cpp
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Server\CarlaServer.cpp(501): warning C4996: 'ACarlaGameModeBase::GetNamesOfAllActors': This command no longer makes sense since the apply_textures API relies on IDs.
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 6.6gb Total: 75.0gb)
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Sensor\V2X\PathLossModel.cpp(529) : warning C4701: 使用了可能未初始化的局部变量“std_dev_dB”
+   while compiling PathLossModel::CalculateShadowFading
+[99/218] Compile [x64] Module.Carla.2.cpp
+UbaSessionServer - Waited 91.4s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 19 processes from spawning due to memory pressure (Available: 9.5gb Total: 75.0gb)
+UbaSessionServer - Waited 94.4s for memory pressure to go down (Available: 13.9gb Total: 75.0gb)
+UbaSessionServer - Waited 91.6s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+[100/218] Compile [x64] Module.Carla.3.cpp
+[101/218] Compile [x64] Module.Carla.4.cpp
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 10.2gb Total: 75.0gb)
+UbaSessionServer - Waited 92.2s for memory pressure to go down (Available: 15.0gb Total: 75.0gb)
+UbaSessionServer - Waited 88.9s for memory pressure to go down (Available: 13.5gb Total: 75.0gb)
+[102/218] Compile [x64] Module.Carla.5.cpp
+[103/218] Compile [x64] Module.Carla.7.cpp
+UbaSessionServer - Waited 87.6s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 10.3gb Total: 75.0gb)
+[104/218] Compile [x64] Module.Carla.6.cpp
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 10.4gb Total: 75.0gb)
+[105/218] Compile [x64] Module.Chaos.10.cpp
+[106/218] Compile [x64] Module.Chaos.6.cpp
+UbaSessionServer - Waited 96.5s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+[107/218] Compile [x64] Module.Chaos.1.cpp
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 9.7gb Total: 75.0gb)
+[108/218] Compile [x64] CarlaUnreal.cpp
+UbaSessionServer - Waited 94.4s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+UbaSessionServer - Waited 92.9s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[109/218] Compile [x64] Module.Chaos.5.cpp
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 10.1gb Total: 75.0gb)
+UbaSessionServer - Waited 87.7s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+[110/218] Compile [x64] Module.Chaos.7.cpp
+[111/218] Compile [x64] Module.Chaos.12.cpp
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 10.9gb Total: 75.0gb)
+[112/218] Compile [x64] Module.Chaos.8.cpp
+[113/218] Compile [x64] Module.Carla.8.cpp
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 13.5gb Total: 75.0gb)
+UbaSessionServer - Waited 89.8s for memory pressure to go down (Available: 13.5gb Total: 75.0gb)
+UbaSessionServer - Waited 90.5s for memory pressure to go down (Available: 13.7gb Total: 75.0gb)
+UbaSessionServer - Waited 81.0s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+UbaSessionServer - Waited 78.9s for memory pressure to go down (Available: 14.8gb Total: 75.0gb)
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 14.8gb Total: 75.0gb)
+[114/218] Compile [x64] Module.Chaos.11.cpp
+UbaSessionServer - Waited 78.7s for memory pressure to go down (Available: 13.4gb Total: 75.0gb)
+[115/218] Compile [x64] Module.Chaos.14.cpp
+[116/218] Compile [x64] Module.Engine.30.cpp
+[117/218] Compile [x64] Module.Chaos.16.cpp
+[118/218] Compile [x64] Module.Chaos.17.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 8.7gb Total: 75.0gb)
+[119/218] Compile [x64] Module.Carla.9.cpp
+UbaSessionServer - Waited 87.3s for memory pressure to go down (Available: 11.6gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 11.6gb Total: 75.0gb)
+[120/218] Compile [x64] Module.Chaos.19.cpp
+UbaSessionServer - Waited 64.7s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+UbaSessionServer - Waited 61.0s for memory pressure to go down (Available: 13.9gb Total: 75.0gb)
+[121/218] Compile [x64] Module.Chaos.15.cpp
+[122/218] Compile [x64] Module.Chaos.18.cpp
+[123/218] Compile [x64] Module.Engine.4.cpp
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 9.6gb Total: 75.0gb)
+[124/218] Compile [x64] Module.Engine.36.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 10.6gb Total: 75.0gb)
+[125/218] Compile [x64] Module.Chaos.20.cpp
+UbaSessionServer - Waited 65.3s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+[126/218] Compile [x64] Module.Engine.35.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 12.2gb Total: 75.0gb)
+UbaSessionServer - Waited 68.1s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+[127/218] Compile [x64] Module.Chaos.2.cpp
+UbaSessionServer - Waited 56.3s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+[128/218] Compile [x64] Module.Engine.40.cpp
+[129/218] Compile [x64] Module.Engine.34.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 11.1gb Total: 75.0gb)
+[130/218] Compile [x64] Module.Chaos.23.cpp
+UbaSessionServer - Waited 56.2s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+[131/218] Compile [x64] Module.Engine.47.cpp
+[132/218] Compile [x64] Module.Chaos.22.cpp
+[133/218] Compile [x64] Module.Chaos.21.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 13.0gb Total: 75.0gb)
+UbaSessionServer - Waited 58.6s for memory pressure to go down (Available: 13.0gb Total: 75.0gb)
+UbaSessionServer - Waited 57.7s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+[134/218] Compile [x64] Module.Engine.5.cpp
+[135/218] Compile [x64] Module.Engine.41.cpp
+[136/218] Compile [x64] Module.Chaos.4.cpp
+UbaSessionServer - Waited 57.1s for memory pressure to go down (Available: 16.8gb Total: 75.0gb)
+UbaSessionServer - Waited 55.2s for memory pressure to go down (Available: 16.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 14.5gb Total: 75.0gb)
+UbaSessionServer - Waited 51.4s for memory pressure to go down (Available: 14.5gb Total: 75.0gb)
+[137/218] Compile [x64] Module.Chaos.9.cpp
+UbaSessionServer - Waited 50.6s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+[138/218] Compile [x64] Module.Engine.50.cpp
+[139/218] Compile [x64] Module.Engine.3.cpp
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 9.1gb Total: 75.0gb)
+[140/218] Compile [x64] Module.Engine.46.cpp
+UbaSessionServer - Waited 55.4s for memory pressure to go down (Available: 14.3gb Total: 75.0gb)
+UbaSessionServer - Waited 45.9s for memory pressure to go down (Available: 14.4gb Total: 75.0gb)
+UbaSessionServer - Waited 45.9s for memory pressure to go down (Available: 12.3gb Total: 75.0gb)
+UbaSessionServer - Waited 42.0s for memory pressure to go down (Available: 12.3gb Total: 75.0gb)
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 12.3gb Total: 75.0gb)
+[141/218] Compile [x64] Module.Chaos.3.cpp
+[142/218] Compile [x64] Module.Engine.31.cpp
+[143/218] Compile [x64] Module.Engine.55.cpp
+[144/218] Compile [x64] Module.Engine.56.cpp
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 10.5gb Total: 75.0gb)
+UbaSessionServer - Waited 42.1s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+[145/218] Compile [x64] Module.Engine.52.cpp
+UbaSessionServer - Waited 40.3s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 9.9gb Total: 75.0gb)
+[146/218] Compile [x64] Module.Engine.32.cpp
+UbaSessionServer - Waited 41.9s for memory pressure to go down (Available: 11.9gb Total: 75.0gb)
+[147/218] Compile [x64] Module.Engine.37.cpp
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 8.1gb Total: 75.0gb)
+[148/218] Compile [x64] Module.Engine.38.cpp
+UbaSessionServer - Waited 45.1s for memory pressure to go down (Available: 13.8gb Total: 75.0gb)
+UbaSessionServer - Waited 40.0s for memory pressure to go down (Available: 14.1gb Total: 75.0gb)
+UbaSessionServer - Delaying 12 processes from spawning due to memory pressure (Available: 12.0gb Total: 75.0gb)
+UbaSessionServer - Waited 38.6s for memory pressure to go down (Available: 12.0gb Total: 75.0gb)
+[149/218] Compile [x64] Module.Engine.39.cpp
+UbaSessionServer - Waited 38.0s for memory pressure to go down (Available: 12.0gb Total: 75.0gb)
+[150/218] Compile [x64] Module.Engine.64.cpp
+[151/218] Compile [x64] Module.Engine.43.cpp
+[152/218] Compile [x86-64] XPBDAnisotropicBendingConstraints.ispc
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 8.6gb Total: 75.0gb)
+[153/218] Compile [x64] Module.Engine.48.cpp
+[154/218] Compile [x86-64] XPBDAnisotropicSpringConstraints.ispc
+[155/218] Compile [x64] Module.Engine.49.cpp
+[156/218] Compile [x86-64] XPBDBendingConstraints.ispc
+UbaSessionServer - Waited 40.9s for memory pressure to go down (Available: 12.7gb Total: 75.0gb)
+UbaSessionServer - Waited 41.6s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+[157/218] Compile [x64] Module.Engine.42.cpp
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 12.8gb Total: 75.0gb)
+UbaSessionServer - Waited 36.3s for memory pressure to go down (Available: 12.8gb Total: 75.0gb)
+[158/218] Compile [x64] Module.Engine.44.cpp
+[159/218] Compile [x86-64] PerParticlePBDCollisionConstraint.ispc
+[160/218] Compile [x64] Module.Engine.67.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 8.7gb Total: 75.0gb)
+[161/218] Compile [x64] Module.Engine.68.cpp
+[162/218] Compile [x64] Module.Engine.45.cpp
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 9.9gb Total: 75.0gb)
+[163/218] Compile [x64] Module.Engine.51.cpp
+UbaSessionServer - Waited 45.7s for memory pressure to go down (Available: 11.8gb Total: 75.0gb)
+[164/218] Compile [x64] Module.Engine.53.cpp
+UbaSessionServer - Waited 42.1s for memory pressure to go down (Available: 12.7gb Total: 75.0gb)
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 10.3gb Total: 75.0gb)
+[165/218] Compile [x64] Module.Engine.33.cpp
+[166/218] Compile [x86-64] SkinnedAsset.ispc
+UbaSessionServer - Waited 44.6s for memory pressure to go down (Available: 14.9gb Total: 75.0gb)
+UbaSessionServer - Waited 45.5s for memory pressure to go down (Available: 12.9gb Total: 75.0gb)
+[167/218] Compile [x64] Module.Engine.54.cpp
+UbaSessionServer - Waited 45.3s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 10.5gb Total: 75.0gb)
+[168/218] Compile [x64] Module.Engine.6.cpp
+[169/218] Compile [x64] Module.Engine.74.cpp
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 10.3gb Total: 75.0gb)
+UbaSessionServer - Waited 48.7s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - Waited 47.2s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+[170/218] Compile [x64] Module.Engine.73.cpp
+[171/218] Compile [x86-64] GeometryCollectionComponent.ispc
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 10.5gb Total: 75.0gb)
+[172/218] Compile [x64] Module.Engine.57.cpp
+UbaSessionServer - Waited 43.9s for memory pressure to go down (Available: 13.0gb Total: 75.0gb)
+UbaSessionServer - Waited 41.9s for memory pressure to go down (Available: 12.3gb Total: 75.0gb)
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Waited 41.3s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+[173/218] Compile [x64] Module.Engine.61.cpp
+[174/218] Compile [x64] Module.Engine.60.cpp
+[175/218] Compile [x64] Module.Engine.63.cpp
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 10.1gb Total: 75.0gb)
+UbaSessionServer - Waited 44.7s for memory pressure to go down (Available: 13.8gb Total: 75.0gb)
+UbaSessionServer - Waited 45.5s for memory pressure to go down (Available: 13.3gb Total: 75.0gb)
+[176/218] Compile [x64] Module.Engine.62.cpp
+[177/218] Compile [x64] Module.Engine.7.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 9.5gb Total: 75.0gb)
+[178/218] Compile [x64] Module.Engine.58.cpp
+[179/218] Compile [x64] Module.Engine.65.cpp
+UbaSessionServer - Waited 48.7s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+[180/218] Compile [x64] Module.Engine.69.cpp
+UbaSessionServer - Waited 51.4s for memory pressure to go down (Available: 12.0gb Total: 75.0gb)
+[181/218] Compile [x64] Module.Engine.59.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 8.3gb Total: 75.0gb)
+[182/218] Compile [x64] Module.Niagara.3.cpp
+UbaSessionServer - Waited 49.6s for memory pressure to go down (Available: 12.0gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 9.5gb Total: 75.0gb)
+[183/218] Compile [x64] Module.Engine.71.cpp
+[184/218] Compile [x64] Module.Niagara.15.cpp
+[185/218] Compile [x64] Module.Niagara.14.cpp
+[186/218] Compile [x64] Module.GeometryCollectionEngine.2.cpp
+UbaSessionServer - Waited 54.3s for memory pressure to go down (Available: 14.4gb Total: 75.0gb)
+UbaSessionServer - Waited 53.0s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 10.4gb Total: 75.0gb)
+[187/218] Compile [x64] Module.Engine.66.cpp
+UbaSessionServer - Waited 54.8s for memory pressure to go down (Available: 13.0gb Total: 75.0gb)
+[188/218] Compile [x64] Module.Niagara.4.cpp
+UbaSessionServer - Waited 50.5s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[189/218] Compile [x64] Module.Engine.75.cpp
+UbaSessionServer - Waited 47.5s for memory pressure to go down (Available: 13.7gb Total: 75.0gb)
+[190/218] Compile [x64] Module.Engine.8.cpp
+UbaSessionServer - Waited 47.7s for memory pressure to go down (Available: 13.1gb Total: 75.0gb)
+[191/218] Compile [x64] Module.Engine.9.cpp
+[192/218] Compile [x64] Module.Engine.76.cpp
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 11.5gb Total: 75.0gb)
+UbaSessionServer - Waited 42.7s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+UbaSessionServer - Waited 43.5s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+[193/218] Compile [x64] Module.SignalProcessing.3.cpp
+[194/218] Compile [x64] Module.SignalProcessing.1.cpp
+UbaSessionServer - Waited 38.2s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+[195/218] Compile [x64] Module.SignalProcessing.2.cpp
+[196/218] Compile [x86-64] GeometryCacheSceneProxy.ispc
+[197/218] Compile [x86-64] GeometryCollectionSceneProxy.ispc
+[198/218] Compile [x86-64] FloatArrayMath.ispc
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 15.8gb Total: 75.0gb)
+UbaSessionServer - Waited 39.8s for memory pressure to go down (Available: 15.8gb Total: 75.0gb)
+[199/218] Compile [x64] Module.Engine.77.cpp
+[200/218] Compile [x64] Module.Niagara.1.cpp
+UbaSessionServer - Waited 34.1s for memory pressure to go down (Available: 14.5gb Total: 75.0gb)
+UbaSessionServer - Waited 34.6s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+[201/218] Compile [x64] Module.Engine.70.cpp
+UbaSessionServer - Delaying 9 processes from spawning due to memory pressure (Available: 9.7gb Total: 75.0gb)
+UbaSessionServer - Delaying 9 processes from spawning due to memory pressure (Available: 8.5gb Total: 75.0gb)
+UbaSessionServer - Waited 42.4s for memory pressure to go down (Available: 17.6gb Total: 75.0gb)
+[202/218] Compile [x64] Module.GeometryCache.cpp
+UbaSessionServer - Waited 38.1s for memory pressure to go down (Available: 16.0gb Total: 75.0gb)
+UbaSessionServer - Waited 38.3s for memory pressure to go down (Available: 13.9gb Total: 75.0gb)
+UbaSessionServer - Waited 35.1s for memory pressure to go down (Available: 11.7gb Total: 75.0gb)
+UbaSessionServer - Delaying 5 processes from spawning due to memory pressure (Available: 11.7gb Total: 75.0gb)
+[203/218] Compile [x64] Module.Engine.72.cpp
+[204/218] Compile [x64] Module.Niagara.12.cpp
+[205/218] Compile [x64] Module.Niagara.10.cpp
+[206/218] Compile [x64] Module.Niagara.11.cpp
+UbaSessionServer - Waited 34.1s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Delaying 4 processes from spawning due to memory pressure (Available: 9.9gb Total: 75.0gb)
+[207/218] Compile [x64] Module.Niagara.2.cpp
+UbaSessionServer - Waited 35.7s for memory pressure to go down (Available: 12.3gb Total: 75.0gb)
+UbaSessionServer - Waited 36.4s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+[208/218] Compile [x64] Module.GeometryCollectionEngine.1.cpp
+UbaSessionServer - Delaying 2 processes from spawning due to memory pressure (Available: 9.8gb Total: 75.0gb)
+[209/218] Compile [x64] Module.Niagara.16.cpp
+UbaSessionServer - Waited 39.9s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Waited 39.7s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[210/218] Compile [x64] Module.Niagara.13.cpp
+[211/218] Compile [x64] Module.Niagara.8.cpp
+[212/218] Compile [x64] Module.Niagara.5.cpp
+[213/218] Compile [x86-64] NiagaraDataInterfaceVectorField.ispc
+[214/218] Compile [x64] Module.Niagara.6.cpp
+[215/218] Compile [x64] Module.Niagara.9.cpp
+[216/218] Compile [x64] Module.Niagara.7.cpp
+[217/218] Link [x64] CarlaUnreal.exe
+  正在创建库 D:\code\carla\Unreal\CarlaUnreal\Binaries\Win64\CarlaUnreal.lib 和对象 D:\code\carla\Unreal\CarlaUnreal\Binaries\Win64\CarlaUnreal.exp
+[218/218] WriteMetadata CarlaUnreal.target (UBA disabled)
+Trace file written to D:/code/UnrealEngine5_carla/Engine/Programs/UnrealBuildTool/Log.uba with size 68.7kb
+Total time in Unreal Build Accelerator local executor: 398.12 seconds
+Total execution time: 404.12 seconds
+[1/3] C:\WINDOWS\system32\cmd.exe /C "cd /D D:\code\carla\Build\Unreal && D:\code\UnrealEngine5_carla\Engine\Build\BatchFiles\Build.bat CarlaUnrealEditor Win64 Development -project=D:/code/carla/Unreal/CarlaUnreal/CarlaUnreal.uproject -game -buildscw"
+Using bundled DotNet SDK version: 8.0.300
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" CarlaUnrealEditor Win64 Development -project=D:/code/carla/Unreal/CarlaUnreal/CarlaUnreal.uproject -game -buildscw
+Log file: D:\code\UnrealEngine5_carla\Engine\Programs\UnrealBuildTool\Log.txt
+Using 'git status' to determine working set for adaptive non-unity build (D:\code\UnrealEngine5_carla).
+Waiting for 'git status' command to complete
+Building CarlaUnrealEditor...
+Using Visual Studio 2022 14.50.35719 toolchain (C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Tools\MSVC\14.50.35717) and Windows 10.0.22621.0 SDK (C:\Program Files (x86)\Windows Kits\10).
+Warning: Visual Studio 2022 compiler is not a preferred version
+[Adaptive Build] Excluded from RigLogicLib unity file: FilteredBinaryInputArchive.cpp
+[Adaptive Build] Excluded from RigLogicLibTest unity file: FilteredBinaryInputArchive.cpp
+Determining max actions to execute in parallel (24 physical cores, 32 logical cores)
+  Executing up to 24 processes, one per physical core
+Using Unreal Build Accelerator local executor to run 245 action(s)
+  Storage capacity 40Gb
+---- Starting trace: 260827_181348 ----
+UbaSessionServer - Disable remote execution (remote sessions will finish current processes)
+------ Building 245 action(s) started ------
+[1/245] Generate Header [x86-64] GPUSkinVertexFactory.ispc
+[2/245] Generate Header [x86-64] PBDCollisionSolver.ispc
+[3/245] Generate Header [x86-64] PBDEvolution.ispc
+[4/245] Generate Header [x86-64] BonePose.ispc
+[5/245] Generate Header [x86-64] SkinnedAsset.ispc
+[6/245] Generate Header [x86-64] AABB.ispc
+[7/245] Generate Header [x86-64] PerParticleDampVelocity.ispc
+[8/245] Generate Header [x86-64] KAggregateGeom.ispc
+[9/245] Generate Header [x86-64] PBDSpringConstraints.ispc
+[10/245] Generate Header [x86-64] PBDMinEvolution.ispc
+[11/245] Generate Header [x86-64] AnimationRuntime.ispc
+[12/245] Generate Header [x86-64] TriangleMesh.ispc
+[13/245] Generate Header [x86-64] AnimEncoding_ConstantKeyLerp.ispc
+[14/245] Generate Header [x86-64] PBDLongRangeConstraints.ispc
+[15/245] Generate Header [x86-64] PBDAxialSpringConstraints.ispc
+[16/245] Generate Header [x86-64] AnimEncoding_VariableKeyLerp.ispc
+[17/245] Compile [x86-64] BonePose.ispc
+[18/245] Compile [x86-64] GPUSkinVertexFactory.ispc
+[19/245] Generate Header [x86-64] NiagaraDataInterfaceVectorField.ispc
+[20/245] Generate Header [x86-64] SoftsMultiResConstraints.ispc
+[21/245] Generate Header [x86-64] PBDJointSolverGaussSeidel.ispc
+[22/245] Compile [x86-64] SkinnedAsset.ispc
+[23/245] Generate Header [x86-64] PBDSphericalConstraint.ispc
+[24/245] Compile [x86-64] PBDCollisionSolver.ispc
+[25/245] Compile [x86-64] KAggregateGeom.ispc
+[26/245] Generate Header [x86-64] PBDBendingConstraints.ispc
+[27/245] Compile [x86-64] AABB.ispc
+[28/245] Generate Header [x86-64] AnimEncoding_PerTrackCompression.ispc
+[29/245] Generate Header [x86-64] PBDCollisionConstraints.ispc
+[30/245] Compile [x86-64] AnimationRuntime.ispc
+[31/245] Compile [x86-64] PBDEvolution.ispc
+[32/245] Generate Header [x86-64] FloatArrayMath.ispc
+[33/245] Compile [x86-64] AnimEncoding_ConstantKeyLerp.ispc
+[34/245] Compile [x64] Module.Engine.11.cpp
+[35/245] Generate Header [x86-64] XPBDSpringConstraints.ispc
+[36/245] Compile [x64] Module.Engine.13.cpp
+[37/245] Compile [x64] Module.Engine.12.cpp
+[38/245] Compile [x86-64] PBDAxialSpringConstraints.ispc
+UbaSessionServer - Waited 961ms for memory pressure to go down (Available: 12.7gb Total: 75.0gb)
+[39/245] Compile [x86-64] PBDMinEvolution.ispc
+[40/245] Generate Header [x86-64] PBDCollisionSpringConstraints.ispc
+[41/245] Compile [x64] Module.Engine.15.cpp
+[42/245] Compile [x64] Module.Engine.14.cpp
+[43/245] Compile [x86-64] PBDSpringConstraints.ispc
+[44/245] Compile [x64] Module.Engine.16.cpp
+[45/245] Compile [x86-64] PBDLongRangeConstraints.ispc
+[46/245] Compile [x64] Module.Engine.1.cpp
+[47/245] Compile [x64] Module.Engine.10.cpp
+UbaSessionServer - Waited 3.4s for memory pressure to go down (Available: 18.4gb Total: 75.0gb)
+[48/245] Compile [x64] Module.Engine.21.cpp
+[49/245] Compile [x64] Module.Engine.23.cpp
+[50/245] Compile [x64] Module.Engine.18.cpp
+[51/245] Compile [x64] Module.Engine.22.cpp
+UbaSessionServer - Delaying 4 processes from spawning due to memory pressure (Available: 9.7gb Total: 75.0gb)
+UbaSessionServer - NOTE - To mitigate this spawn delay it is recommended to make page file larger until you don't see these messages again (Or reduce number of max parallel processes)
+UbaSessionServer -        Set max page file to a large number (like 128gb). It will not use disk space unless you actually start using that amount of committed memory
+UbaSessionServer -        Also note, this is "committed" memory. Not memory in use. So you necessarily don't need more physical memory
+UbaSessionServer -   MaxPage:   0b
+UbaSessionServer -   TotalPhys: 68.4gb
+UbaSessionServer -   AvailPhys: 40.8gb
+UbaSessionServer -   TotalPage: 75.0gb
+UbaSessionServer -   AvailPage: 9.7gb
+[52/245] Compile [x64] Module.Engine.20.cpp
+[53/245] Compile [x86-64] AnimEncoding_VariableKeyLerp.ispc
+[54/245] Compile [x64] Module.Engine.2.cpp
+UbaSessionServer - Waited 3.7s for memory pressure to go down (Available: 13.2gb Total: 75.0gb)
+[55/245] Compile [x64] Module.Engine.19.cpp
+[56/245] Compile [x64] Module.Engine.17.cpp
+[57/245] Generate Header [x86-64] VelocityField.ispc
+[58/245] Compile [x86-64] PBDJointSolverGaussSeidel.ispc
+[59/245] Generate Header [x86-64] XPBDStretchBiasElementConstraints.ispc
+UbaSessionServer - Delaying 8 processes from spawning due to memory pressure (Available: 6.8gb Total: 75.0gb)
+[60/245] Compile [x86-64] PBDSphericalConstraint.ispc
+[61/245] Compile [x64] Module.Engine.3.cpp
+[62/245] Compile [x64] Module.Engine.24.cpp
+[63/245] Compile [x86-64] PBDBendingConstraints.ispc
+[64/245] Generate Header [x86-64] PerParticlePBDCollisionConstraint.ispc
+[65/245] Compile [x64] PCH.Carla.cpp
+Detected compiler newer than Visual Studio 2022, please update min version checking in WindowsPlatformCompilerSetup.h
+UbaSessionServer - Waited 11.7s for memory pressure to go down (Available: 13.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 12 processes from spawning due to memory pressure (Available: 11.2gb Total: 75.0gb)
+[66/245] Generate Header [x86-64] XPBDAnisotropicBendingConstraints.ispc
+[67/245] Generate Header [x86-64] XPBDAnisotropicSpringConstraints.ispc
+UbaSessionServer - Waited 15.6s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+[68/245] Generate Header [x86-64] XPBDBendingConstraints.ispc
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 11.3gb Total: 75.0gb)
+UbaSessionServer - Waited 16.4s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[69/245] Compile [x64] Module.Engine.29.cpp
+[70/245] Compile [x86-64] AnimEncoding_PerTrackCompression.ispc
+UbaSessionServer - Waited 17.8s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+[71/245] Compile [x64] Module.Engine.28.cpp
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 7.9gb Total: 75.0gb)
+UbaSessionServer - Waited 23.7s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 12.8gb Total: 75.0gb)
+UbaSessionServer - Waited 24.2s for memory pressure to go down (Available: 12.8gb Total: 75.0gb)
+[72/245] Compile [x64] Module.Engine.36.cpp
+UbaSessionServer - Waited 21.7s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+[73/245] Compile [x64] Module.Engine.35.cpp
+UbaSessionServer - Delaying 10 processes from spawning due to memory pressure (Available: 13.4gb Total: 75.0gb)
+UbaSessionServer - Waited 25.4s for memory pressure to go down (Available: 13.4gb Total: 75.0gb)
+[74/245] Compile [x64] Module.Engine.47.cpp
+[75/245] Compile [x64] PCH.CarlaUnreal.cpp
+Detected compiler newer than Visual Studio 2022, please update min version checking in WindowsPlatformCompilerSetup.h
+UbaSessionServer - Waited 26.0s for memory pressure to go down (Available: 12.7gb Total: 75.0gb)
+[76/245] Compile [x64] Module.Engine.30.cpp
+UbaSessionServer - Delaying 10 processes from spawning due to memory pressure (Available: 8.1gb Total: 75.0gb)
+[77/245] Compile [x64] Module.Engine.5.cpp
+[78/245] Compile [x64] Module.Engine.26.cpp
+UbaSessionServer - Waited 30.3s for memory pressure to go down (Available: 11.4gb Total: 75.0gb)
+[79/245] Compile [x64] Module.Engine.27.cpp
+[80/245] Compile [x64] Module.Engine.49.cpp
+UbaSessionServer - Waited 31.7s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+UbaSessionServer - Delaying 12 processes from spawning due to memory pressure (Available: 10.3gb Total: 75.0gb)
+[81/245] Compile [x64] Module.Engine.25.cpp
+UbaSessionServer - Waited 33.6s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[82/245] Compile [x64] Module.Engine.4.cpp
+[83/245] Compile [x64] Module.Engine.34.cpp
+UbaSessionServer - Waited 35.6s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+[84/245] Compile [x64] Module.Engine.31.cpp
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 8.8gb Total: 75.0gb)
+[85/245] Compile [x64] Module.Engine.37.cpp
+[86/245] Compile [x64] Module.Engine.32.cpp
+UbaSessionServer - Waited 36.6s for memory pressure to go down (Available: 13.4gb Total: 75.0gb)
+UbaSessionServer - Waited 37.2s for memory pressure to go down (Available: 13.6gb Total: 75.0gb)
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 11.2gb Total: 75.0gb)
+[87/245] Compile [x64] Module.Engine.38.cpp
+[88/245] Compile [x64] Module.Engine.45.cpp
+[89/245] Compile [x64] Module.Engine.51.cpp
+UbaSessionServer - Waited 40.4s for memory pressure to go down (Available: 13.0gb Total: 75.0gb)
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 13.0gb Total: 75.0gb)
+[90/245] Compile [x64] Module.Engine.52.cpp
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - Waited 44.4s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+UbaSessionServer - Waited 33.8s for memory pressure to go down (Available: 15.5gb Total: 75.0gb)
+UbaSessionServer - Waited 30.1s for memory pressure to go down (Available: 15.5gb Total: 75.0gb)
+[91/245] Compile [x64] Module.Engine.39.cpp
+UbaSessionServer - Waited 27.6s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Waited 28.4s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 9.7gb Total: 75.0gb)
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 8.0gb Total: 75.0gb)
+UbaSessionServer - Waited 34.4s for memory pressure to go down (Available: 13.8gb Total: 75.0gb)
+UbaSessionServer - Waited 35.0s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[92/245] Compile [x64] Module.Engine.40.cpp
+UbaSessionServer - Delaying 9 processes from spawning due to memory pressure (Available: 7.8gb Total: 75.0gb)
+[93/245] Compile [x64] Module.Engine.33.cpp
+UbaSessionServer - Waited 36.4s for memory pressure to go down (Available: 11.9gb Total: 75.0gb)
+[94/245] Compile [x64] Module.Engine.42.cpp
+UbaSessionServer - Waited 35.6s for memory pressure to go down (Available: 13.0gb Total: 75.0gb)
+UbaSessionServer - Waited 37.1s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Delaying 7 processes from spawning due to memory pressure (Available: 12.1gb Total: 75.0gb)
+[95/245] Compile [x64] Module.Engine.44.cpp
+[96/245] Compile [x64] Module.Engine.41.cpp
+UbaSessionServer - Waited 35.4s for memory pressure to go down (Available: 14.8gb Total: 75.0gb)
+UbaSessionServer - Waited 35.8s for memory pressure to go down (Available: 14.6gb Total: 75.0gb)
+[97/245] Compile [x64] Module.Engine.7.cpp
+[98/245] Compile [x64] Module.Engine.55.cpp
+UbaSessionServer - Delaying 7 processes from spawning due to memory pressure (Available: 8.4gb Total: 75.0gb)
+[99/245] Compile [x64] Module.Engine.6.cpp
+[100/245] Compile [x64] Module.Engine.60.cpp
+[101/245] Compile [x64] Module.Engine.67.cpp
+UbaSessionServer - Delaying 10 processes from spawning due to memory pressure (Available: 9.8gb Total: 75.0gb)
+[102/245] Compile [x64] Module.Engine.53.cpp
+[103/245] Compile [x64] Module.Engine.46.cpp
+[104/245] Compile [x64] Module.Engine.43.cpp
+[105/245] Compile [x64] Module.Engine.56.cpp
+[106/245] Compile [x64] Module.Engine.48.cpp
+UbaSessionServer - Waited 42.5s for memory pressure to go down (Available: 15.4gb Total: 75.0gb)
+UbaSessionServer - Waited 42.2s for memory pressure to go down (Available: 15.3gb Total: 75.0gb)
+UbaSessionServer - Delaying 12 processes from spawning due to memory pressure (Available: 12.9gb Total: 75.0gb)
+UbaSessionServer - Waited 40.7s for memory pressure to go down (Available: 12.9gb Total: 75.0gb)
+UbaSessionServer - Waited 40.0s for memory pressure to go down (Available: 13.2gb Total: 75.0gb)
+[107/245] Compile [x64] Module.Engine.50.cpp
+[108/245] Compile [x64] Module.Engine.54.cpp
+[109/245] Compile [x64] Module.Engine.68.cpp
+UbaSessionServer - Waited 24.0s for memory pressure to go down (Available: 11.8gb Total: 75.0gb)
+UbaSessionServer - Delaying 12 processes from spawning due to memory pressure (Available: 11.8gb Total: 75.0gb)
+UbaSessionServer - Waited 20.2s for memory pressure to go down (Available: 14.2gb Total: 75.0gb)
+UbaSessionServer - Waited 20.3s for memory pressure to go down (Available: 13.9gb Total: 75.0gb)
+UbaSessionServer - Waited 16.0s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+[110/245] Compile [x64] Module.Engine.62.cpp
+UbaSessionServer - Delaying 9 processes from spawning due to memory pressure (Available: 8.2gb Total: 75.0gb)
+UbaSessionServer - Waited 20.0s for memory pressure to go down (Available: 13.2gb Total: 75.0gb)
+[111/245] Compile [x64] Module.Engine.61.cpp
+UbaSessionServer - Waited 20.8s for memory pressure to go down (Available: 12.3gb Total: 75.0gb)
+[112/245] Compile [x64] Module.Engine.63.cpp
+UbaSessionServer - Delaying 6 processes from spawning due to memory pressure (Available: 12.5gb Total: 75.0gb)
+UbaSessionServer - Waited 19.6s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+[113/245] Compile [x64] Module.Engine.64.cpp
+UbaSessionServer - Delaying 7 processes from spawning due to memory pressure (Available: 7.8gb Total: 75.0gb)
+[114/245] Compile [x64] Module.Engine.69.cpp
+[115/245] Compile [x64] Module.Engine.73.cpp
+UbaSessionServer - Delaying 9 processes from spawning due to memory pressure (Available: 10.3gb Total: 75.0gb)
+[116/245] Compile [x64] Module.Engine.71.cpp
+UbaSessionServer - Waited 33.4s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+UbaSessionServer - Waited 34.2s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Delaying 8 processes from spawning due to memory pressure (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Waited 36.1s for memory pressure to go down (Available: 16.3gb Total: 75.0gb)
+[117/245] Compile [x64] Module.Engine.65.cpp
+UbaSessionServer - Waited 35.8s for memory pressure to go down (Available: 18.3gb Total: 75.0gb)
+[118/245] Compile [x64] Module.Engine.66.cpp
+UbaSessionServer - Waited 31.0s for memory pressure to go down (Available: 16.5gb Total: 75.0gb)
+[119/245] Compile [x64] Module.Engine.9.cpp
+UbaSessionServer - Delaying 4 processes from spawning due to memory pressure (Available: 14.3gb Total: 75.0gb)
+UbaSessionServer - Waited 31.4s for memory pressure to go down (Available: 14.3gb Total: 75.0gb)
+[120/245] Compile [x64] Module.Engine.8.cpp
+UbaSessionServer - Waited 17.3s for memory pressure to go down (Available: 16.4gb Total: 75.0gb)
+UbaSessionServer - Waited 16.4s for memory pressure to go down (Available: 13.9gb Total: 75.0gb)
+UbaSessionServer - Waited 17.0s for memory pressure to go down (Available: 12.3gb Total: 75.0gb)
+[121/245] Compile [x64] Module.Chaos.14.cpp
+UbaSessionServer - Delaying 1 processes from spawning due to memory pressure (Available: 10.6gb Total: 75.0gb)
+[122/245] Compile [x64] Module.Engine.57.cpp
+[123/245] Compile [x64] Module.Chaos.16.cpp
+UbaSessionServer - Delaying 3 processes from spawning due to memory pressure (Available: 9.7gb Total: 75.0gb)
+[124/245] Compile [x64] Module.Engine.59.cpp
+UbaSessionServer - Waited 18.0s for memory pressure to go down (Available: 12.0gb Total: 75.0gb)
+[125/245] Compile [x64] Module.Chaos.10.cpp
+UbaSessionServer - Waited 6.8s for memory pressure to go down (Available: 11.6gb Total: 75.0gb)
+UbaSessionServer - Waited 6.5s for memory pressure to go down (Available: 11.7gb Total: 75.0gb)
+UbaSessionServer - Waited 4.2s for memory pressure to go down (Available: 12.9gb Total: 75.0gb)
+UbaSessionServer - Delaying 1 processes from spawning due to memory pressure (Available: 12.9gb Total: 75.0gb)
+[126/245] Compile [x64] Module.Chaos.17.cpp
+UbaSessionServer - Waited 3.6s for memory pressure to go down (Available: 13.9gb Total: 75.0gb)
+[127/245] Compile [x64] Module.Chaos.11.cpp
+[128/245] Compile [x64] Module.Chaos.19.cpp
+[129/245] Compile [x64] Module.Engine.58.cpp
+[130/245] Compile [x64] Module.Chaos.1.cpp
+[131/245] Compile [x64] Module.Engine.76.cpp
+[132/245] Compile [x64] Module.Engine.74.cpp
+[133/245] Compile [x64] Module.Chaos.15.cpp
+[134/245] Compile [x86-64] PerParticleDampVelocity.ispc
+[135/245] Compile [x64] Module.Engine.75.cpp
+[136/245] Compile [x64] Module.Chaos.4.cpp
+[137/245] Compile [x86-64] TriangleMesh.ispc
+[138/245] Compile [x64] Module.Chaos.23.cpp
+[139/245] Compile [x86-64] SoftsMultiResConstraints.ispc
+[140/245] Compile [x64] Module.Engine.77.cpp
+[141/245] Compile [x64] Module.Chaos.6.cpp
+[142/245] Compile [x64] Module.Chaos.18.cpp
+[143/245] Generate Header [x86-64] GeometryCollectionSceneProxy.ispc
+[144/245] Compile [x64] Module.Chaos.3.cpp
+[145/245] Compile [x64] Module.Chaos.20.cpp
+[146/245] Compile [x86-64] PBDCollisionConstraints.ispc
+[147/245] Compile [x64] Module.SignalProcessing.3.cpp
+[148/245] Compile [x64] Module.Chaos.12.cpp
+[149/245] Generate Header [x86-64] GeometryCollectionComponent.ispc
+[150/245] Compile [x64] Module.Chaos.22.cpp
+[151/245] Compile [x64] Module.Chaos.2.cpp
+[152/245] Generate Header [x86-64] ChaosClothingSimulationMesh.ispc
+[153/245] Compile [x64] Module.Chaos.8.cpp
+[154/245] Generate Header [x86-64] ChaosClothingSimulation.ispc
+[155/245] Generate Header [x86-64] GeometryCacheSceneProxy.ispc
+[156/245] Compile [x64] Module.SignalProcessing.2.cpp
+[157/245] Compile [x64] Module.SignalProcessing.1.cpp
+[158/245] Compile [x86-64] FloatArrayMath.ispc
+[159/245] Compile [x86-64] PBDCollisionSpringConstraints.ispc
+[160/245] Compile [x64] Module.Chaos.9.cpp
+[161/245] Compile [x86-64] XPBDSpringConstraints.ispc
+[162/245] Compile [x64] Module.Chaos.5.cpp
+[163/245] Compile [x64] Module.Chaos.13.cpp
+UbaSessionServer - Delaying 7 processes from spawning due to memory pressure (Available: 11.2gb Total: 75.0gb)
+[164/245] Compile [x64] Module.Chaos.21.cpp
+UbaSessionServer - Waited 4.1s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[165/245] Compile [x64] Module.Chaos.7.cpp
+[166/245] Link [x64] UnrealEditor-SignalProcessing.lib
+  正在创建库 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\SignalProcessing\UnrealEditor-SignalProcessing.lib 和对象 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\SignalProcessing\UnrealEditor-SignalProcessing.exp
+[167/245] Compile [x64] Module.Engine.72.cpp
+[168/245] Generate Header [x86-64] ChaosClothingSimulationSolver.ispc
+UbaSessionServer - Delaying 10 processes from spawning due to memory pressure (Available: 10.0gb Total: 75.0gb)
+[169/245] Compile [x64] Module.Engine.70.cpp
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 8.9gb Total: 75.0gb)
+[170/245] Compile [x86-64] VelocityField.ispc
+UbaSessionServer - Delaying 12 processes from spawning due to memory pressure (Available: 9.4gb Total: 75.0gb)
+[171/245] Compile [x86-64] XPBDStretchBiasElementConstraints.ispc
+[172/245] Compile [x64] Module.Carla.1.cpp
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 8.9gb Total: 75.0gb)
+[173/245] Compile [x86-64] XPBDAnisotropicBendingConstraints.ispc
+[174/245] Compile [x86-64] PerParticlePBDCollisionConstraint.ispc
+[175/245] Compile [x86-64] XPBDAnisotropicSpringConstraints.ispc
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 8.5gb Total: 75.0gb)
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 7.5gb Total: 75.0gb)
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 5.6gb Total: 75.0gb)
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 7.0gb Total: 75.0gb)
+[176/245] Compile [x86-64] XPBDBendingConstraints.ispc
+[177/245] Compile [x64] Module.Carla.2.cpp
+UbaSessionServer - Waited 46.6s for memory pressure to go down (Available: 11.6gb Total: 75.0gb)
+[178/245] Compile [x64] Module.Carla.14.cpp
+[179/245] Link [x64] UnrealEditor-SignalProcessing.dll
+   创建对象 ..\Binaries\Win64\UnrealEditor-SignalProcessing.exp
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 8.9gb Total: 75.0gb)
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 13.6gb Total: 75.0gb)
+UbaSessionServer - Waited 52.5s for memory pressure to go down (Available: 13.6gb Total: 75.0gb)
+[180/245] Compile [x64] Module.Carla.9.cpp
+UbaSessionServer - Waited 52.7s for memory pressure to go down (Available: 11.6gb Total: 75.0gb)
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 8.7gb Total: 75.0gb)
+[181/245] Compile [x64] Module.Niagara.3.cpp
+[182/245] Compile [x64] Module.Carla.10.cpp
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\BlueprintLibary\MeshToLandscape.cpp(402): warning C4457: “Index”的声明隐藏了函数参数
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\BlueprintLibary\MeshToLandscape.cpp(349): note: 参见“Index”的声明
+UbaSessionServer - Delaying 19 processes from spawning due to memory pressure (Available: 9.0gb Total: 75.0gb)
+UbaSessionServer - Waited 62.7s for memory pressure to go down (Available: 12.1gb Total: 75.0gb)
+UbaSessionServer - Waited 65.6s for memory pressure to go down (Available: 16.8gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 15.2gb Total: 75.0gb)
+UbaSessionServer - Waited 66.0s for memory pressure to go down (Available: 15.2gb Total: 75.0gb)
+UbaSessionServer - Waited 65.9s for memory pressure to go down (Available: 13.4gb Total: 75.0gb)
+UbaSessionServer - Waited 65.3s for memory pressure to go down (Available: 11.6gb Total: 75.0gb)
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 8.3gb Total: 75.0gb)
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\CityMapGenerator.cpp(69): warning C4996: 'FCoreUObjectDelegates::OnObjectSaved': Use OnObjectPreSave instead. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+[183/245] Compile [x64] Module.Carla.11.cpp
+[184/245] Compile [x64] Module.Niagara.1.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 9.5gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 8.4gb Total: 75.0gb)
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 7.3gb Total: 75.0gb)
+[185/245] Compile [x64] Module.Niagara.5.cpp
+[186/245] Compile [x64] Module.Carla.13.cpp
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\CameraModelUtil.cpp(775): warning C4996: 'FTexture2DRHIRef': The separate RHI texture types were unified in UE 5.1. FTexture2DRHIRef is now deprecated. Use FTextureRHIRef instead. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(98): warning C4996: 'FJsonObject::TryGetArrayField': Passing an ANSI string to TryGetArrayField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(108): warning C4996: 'FJsonObject::GetObjectField': Passing an ANSI string to GetObjectField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(110): warning C4996: 'FJsonObject::GetStringField': Passing an ANSI string to GetStringField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Util\GeometryImporter.cpp(115): warning C4996: 'FJsonObject::TryGetArrayField': Passing an ANSI string to TryGetArrayField has been deprecated outside of UTF-8 mode. Please use the overload that takes a TCHAR string. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 7.3gb Total: 75.0gb)
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Vehicle\CustomTerrainPhysicsComponent.cpp(97): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Vehicle\CustomTerrainPhysicsComponent.cpp(100): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[187/245] Compile [x64] Module.Carla.12.cpp
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Server\CarlaServer.cpp(501): warning C4996: 'ACarlaGameModeBase::GetNamesOfAllActors': This command no longer makes sense since the apply_textures API relies on IDs.
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 7.5gb Total: 75.0gb)
+UbaSessionServer - Waited 94.0s for memory pressure to go down (Available: 12.4gb Total: 75.0gb)
+D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Source\Carla\Sensor\V2X\PathLossModel.cpp(529) : warning C4701: 使用了可能未初始化的局部变量“std_dev_dB”
+   while compiling PathLossModel::CalculateShadowFading
+[188/245] Compile [x64] Module.Carla.3.cpp
+UbaSessionServer - Delaying 18 processes from spawning due to memory pressure (Available: 10.1gb Total: 75.0gb)
+[189/245] Compile [x64] Module.Carla.4.cpp
+UbaSessionServer - Delaying 19 processes from spawning due to memory pressure (Available: 8.9gb Total: 75.0gb)
+[190/245] Compile [x86-64] GeometryCollectionSceneProxy.ispc
+UbaSessionServer - Waited 103.6s for memory pressure to go down (Available: 14.3gb Total: 75.0gb)
+UbaSessionServer - Waited 99.0s for memory pressure to go down (Available: 15.0gb Total: 75.0gb)
+UbaSessionServer - Waited 97.6s for memory pressure to go down (Available: 16.5gb Total: 75.0gb)
+[191/245] Compile [x64] Module.Carla.8.cpp
+[192/245] Link [x64] UnrealEditor-Engine.lib
+  正在创建库 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\Engine\UnrealEditor-Engine.lib 和对象 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\Engine\UnrealEditor-Engine.exp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 17.5gb Total: 75.0gb)
+UbaSessionServer - Waited 94.5s for memory pressure to go down (Available: 17.5gb Total: 75.0gb)
+[193/245] Compile [x64] Module.Carla.5.cpp
+[194/245] Compile [x64] Module.Carla.6.cpp
+UbaSessionServer - Waited 92.5s for memory pressure to go down (Available: 13.6gb Total: 75.0gb)
+[195/245] Compile [x64] Module.Carla.7.cpp
+[196/245] Link [x64] UnrealEditor-Carla.lib
+  正在创建库 D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Intermediate\Build\Win64\x64\UnrealEditor\Development\Carla\UnrealEditor-Carla.lib 和对象 D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Intermediate\Build\Win64\x64\UnrealEditor\Development\Carla\UnrealEditor-Carla.exp
+UbaSessionServer - Delaying 15 processes from spawning due to memory pressure (Available: 7.5gb Total: 75.0gb)
+[197/245] Compile [x86-64] ChaosClothingSimulationMesh.ispc
+[198/245] Compile [x86-64] GeometryCacheSceneProxy.ispc
+UbaSessionServer - Delaying 17 processes from spawning due to memory pressure (Available: 9.1gb Total: 75.0gb)
+UbaSessionServer - Waited 100.9s for memory pressure to go down (Available: 15.1gb Total: 75.0gb)
+UbaSessionServer - Waited 101.3s for memory pressure to go down (Available: 14.3gb Total: 75.0gb)
+[199/245] Compile [x64] Module.Niagara.10.cpp
+[200/245] Compile [x64] Module.GeometryCache.cpp
+[201/245] Link [x64] UnrealEditor-GeometryCache.lib
+  正在创建库 ..\Plugins\Runtime\GeometryCache\Intermediate\Build\Win64\x64\UnrealEditor\Development\GeometryCache\UnrealEditor-GeometryCache.lib 和对象 ..\Plugins\Runtime\GeometryCache\Intermediate\Build\Win64\x64\UnrealEditor\Development\GeometryCache\UnrealEditor-GeometryCache.exp
+UbaSessionServer - Waited 102.1s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+[202/245] Link [x64] UnrealEditor-Chaos.lib
+  正在创建库 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\Chaos\UnrealEditor-Chaos.lib 和对象 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\Chaos\UnrealEditor-Chaos.exp
+UbaSessionServer - Waited 83.2s for memory pressure to go down (Available: 13.1gb Total: 75.0gb)
+UbaSessionServer - Delaying 14 processes from spawning due to memory pressure (Available: 13.1gb Total: 75.0gb)
+UbaSessionServer - Waited 83.5s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+[203/245] Compile [x86-64] ChaosClothingSimulationSolver.ispc
+[204/245] Link [x64] UnrealEditor-Chaos.dll
+   创建对象 ..\Binaries\Win64\UnrealEditor-Chaos.exp
+[205/245] Compile [x64] Module.Niagara.13.cpp
+UbaSessionServer - Delaying 16 processes from spawning due to memory pressure (Available: 7.1gb Total: 75.0gb)
+[206/245] Compile [x64] Module.Niagara.12.cpp
+[207/245] Link [x64] UnrealEditor-Engine.dll
+   创建对象 ..\Binaries\Win64\UnrealEditor-Engine.exp
+[208/245] Compile [x64] Module.Niagara.14.cpp
+[209/245] Compile [x64] Module.Niagara.11.cpp
+UbaSessionServer - Waited 87.8s for memory pressure to go down (Available: 17.7gb Total: 75.0gb)
+UbaSessionServer - Waited 77.4s for memory pressure to go down (Available: 15.2gb Total: 75.0gb)
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 12.8gb Total: 75.0gb)
+UbaSessionServer - Waited 77.2s for memory pressure to go down (Available: 12.8gb Total: 75.0gb)
+[210/245] Compile [x64] Module.Niagara.2.cpp
+[211/245] Compile [x64] Module.Niagara.16.cpp
+[212/245] Compile [x64] Module.ChaosCloth.cpp
+UbaSessionServer - Delaying 13 processes from spawning due to memory pressure (Available: 10.5gb Total: 75.0gb)
+UbaSessionServer - Waited 72.2s for memory pressure to go down (Available: 12.3gb Total: 75.0gb)
+UbaSessionServer - Delaying 12 processes from spawning due to memory pressure (Available: 9.6gb Total: 75.0gb)
+UbaSessionServer - Waited 76.8s for memory pressure to go down (Available: 11.7gb Total: 75.0gb)
+[213/245] Compile [x64] Module.Niagara.15.cpp
+UbaSessionServer - Delaying 11 processes from spawning due to memory pressure (Available: 9.7gb Total: 75.0gb)
+UbaSessionServer - Waited 64.2s for memory pressure to go down (Available: 12.0gb Total: 75.0gb)
+UbaSessionServer - Waited 62.8s for memory pressure to go down (Available: 14.3gb Total: 75.0gb)
+UbaSessionServer - Waited 55.2s for memory pressure to go down (Available: 14.0gb Total: 75.0gb)
+UbaSessionServer - Delaying 7 processes from spawning due to memory pressure (Available: 11.5gb Total: 75.0gb)
+UbaSessionServer - Waited 55.3s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+[214/245] Compile [x64] Module.Niagara.4.cpp
+[215/245] Compile [x86-64] NiagaraDataInterfaceVectorField.ispc
+UbaSessionServer - Delaying 6 processes from spawning due to memory pressure (Available: 11.3gb Total: 75.0gb)
+UbaSessionServer - Waited 53.3s for memory pressure to go down (Available: 11.3gb Total: 75.0gb)
+[216/245] Compile [x64] Module.Niagara.6.cpp
+[217/245] Compile [x86-64] GeometryCollectionComponent.ispc
+UbaSessionServer - Delaying 8 processes from spawning due to memory pressure (Available: 10.3gb Total: 75.0gb)
+[218/245] Compile [x86-64] ChaosClothingSimulation.ispc
+[219/245] Compile [x64] Module.Niagara.9.cpp
+[220/245] Compile [x64] Module.Niagara.8.cpp
+UbaSessionServer - Delaying 9 processes from spawning due to memory pressure (Available: 14.6gb Total: 75.0gb)
+UbaSessionServer - Waited 54.9s for memory pressure to go down (Available: 14.6gb Total: 75.0gb)
+[221/245] Compile [x64] Module.Niagara.7.cpp
+UbaSessionServer - Waited 54.2s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+[222/245] Compile [x64] Module.CarlaTools.1.cpp
+[223/245] Compile [x64] CarlaUnreal.cpp
+[224/245] Compile [x64] PerModuleInline.gen.cpp
+[225/245] Link [x64] UnrealEditor-CarlaUnreal.lib
+  正在创建库 D:\code\carla\Unreal\CarlaUnreal\Intermediate\Build\Win64\x64\UnrealEditor\Development\CarlaUnreal\UnrealEditor-CarlaUnreal.lib 和对象 D:\code\carla\Unreal\CarlaUnreal\Intermediate\Build\Win64\x64\UnrealEditor\Development\CarlaUnreal\UnrealEditor-CarlaUnreal.exp
+UbaSessionServer - Waited 47.7s for memory pressure to go down (Available: 14.9gb Total: 75.0gb)
+[226/245] Link [x64] UnrealEditor-CarlaUnreal.dll
+   创建对象 D:\code\carla\Unreal\CarlaUnreal\Binaries\Win64\UnrealEditor-CarlaUnreal.exp
+UbaSessionServer - Waited 45.6s for memory pressure to go down (Available: 14.2gb Total: 75.0gb)
+[227/245] Link [x64] UnrealEditor-Carla.dll
+   创建对象 D:\code\carla\Unreal\CarlaUnreal\Plugins\Carla\Binaries\Win64\UnrealEditor-Carla.exp
+UbaSessionServer - Waited 44.7s for memory pressure to go down (Available: 15.8gb Total: 75.0gb)
+UbaSessionServer - Delaying 4 processes from spawning due to memory pressure (Available: 13.3gb Total: 75.0gb)
+UbaSessionServer - Waited 45.4s for memory pressure to go down (Available: 13.3gb Total: 75.0gb)
+UbaSessionServer - Delaying 4 processes from spawning due to memory pressure (Available: 10.5gb Total: 75.0gb)
+UbaSessionServer - Waited 17.7s for memory pressure to go down (Available: 12.6gb Total: 75.0gb)
+[228/245] Compile [x64] Module.GeometryCollectionEngine.1.cpp
+[229/245] Compile [x64] Module.StreetMapRuntime.cpp
+D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Source\StreetMapRuntime\Private\StreetMap.cpp(28): warning C4996: 'UObject::GetAssetRegistryTags': Implement the version that takes FAssetRegistryTagsContext instead. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Source\StreetMapRuntime\Private\StreetMapComponent.cpp(341): warning C4996: 'TArray<FVector,FDefaultAllocator>::SetNum': SetNum with a boolean bAllowShrinking has been deprecated - please use the EAllowShrinking enum instead Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Source\StreetMapRuntime\Private\StreetMapComponent.cpp(359): warning C4996: 'TArray<FVector,FDefaultAllocator>::SetNum': SetNum with a boolean bAllowShrinking has been deprecated - please use the EAllowShrinking enum instead Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Source\StreetMapRuntime\Private\StreetMapComponent.cpp(374): warning C4996: 'TArray<int,FDefaultAllocator>::SetNum': SetNum with a boolean bAllowShrinking has been deprecated - please use the EAllowShrinking enum instead Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Source\StreetMapRuntime\Private\StreetMapComponent.cpp(712): warning C4996: 'TArray<FVector,FDefaultAllocator>::SetNum': SetNum with a boolean bAllowShrinking has been deprecated - please use the EAllowShrinking enum instead Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Source\StreetMapRuntime\Private\StreetMapSceneProxy.cpp(174): warning C4996: 'FDynamicPrimitiveUniformBuffer::Set': Set requires a command list Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+[230/245] Link [x64] UnrealEditor-StreetMapRuntime.lib
+  正在创建库 D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Intermediate\Build\Win64\x64\UnrealEditor\Development\StreetMapRuntime\UnrealEditor-StreetMapRuntime.lib 和对象 D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Intermediate\Build\Win64\x64\UnrealEditor\Development\StreetMapRuntime\UnrealEditor-StreetMapRuntime.exp
+UbaSessionServer - Waited 18.7s for memory pressure to go down (Available: 11.5gb Total: 75.0gb)
+[231/245] Link [x64] UnrealEditor-ChaosCloth.lib
+  正在创建库 ..\Plugins\ChaosCloth\Intermediate\Build\Win64\x64\UnrealEditor\Development\ChaosCloth\UnrealEditor-ChaosCloth.lib 和对象 ..\Plugins\ChaosCloth\Intermediate\Build\Win64\x64\UnrealEditor\Development\ChaosCloth\UnrealEditor-ChaosCloth.exp
+[232/245] Link [x64] UnrealEditor-ChaosCloth.dll
+   创建对象 ..\Plugins\ChaosCloth\Binaries\Win64\UnrealEditor-ChaosCloth.exp
+[233/245] Link [x64] UnrealEditor-StreetMapRuntime.dll
+   创建对象 D:\code\carla\Unreal\CarlaUnreal\Plugins\StreetMap\Binaries\Win64\UnrealEditor-StreetMapRuntime.exp
+UbaSessionServer - Waited 14.6s for memory pressure to go down (Available: 12.5gb Total: 75.0gb)
+[234/245] Link [x64] UnrealEditor-Niagara.lib
+  正在创建库 ..\Plugins\FX\Niagara\Intermediate\Build\Win64\x64\UnrealEditor\Development\Niagara\UnrealEditor-Niagara.lib 和对象 ..\Plugins\FX\Niagara\Intermediate\Build\Win64\x64\UnrealEditor\Development\Niagara\UnrealEditor-Niagara.exp
+[235/245] Compile [x64] Module.GeometryCollectionEngine.2.cpp
+[236/245] Link [x64] UnrealEditor-GeometryCollectionEngine.lib
+  正在创建库 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\GeometryCollectionEngine\UnrealEditor-GeometryCollectionEngine.lib 和对象 ..\Intermediate\Build\Win64\x64\UnrealEditor\Development\GeometryCollectionEngine\UnrealEditor-GeometryCollectionEngine.exp
+UbaSessionServer - Waited 15.6s for memory pressure to go down (Available: 12.2gb Total: 75.0gb)
+[237/245] Link [x64] UnrealEditor-GeometryCache.dll
+   创建对象 ..\Plugins\Runtime\GeometryCache\Binaries\Win64\UnrealEditor-GeometryCache.exp
+[238/245] Link [x64] UnrealEditor-GeometryCollectionEngine.dll
+   创建对象 ..\Binaries\Win64\UnrealEditor-GeometryCollectionEngine.exp
+[239/245] Link [x64] UnrealEditor-Niagara.dll
+   创建对象 ..\Plugins\FX\Niagara\Binaries\Win64\UnrealEditor-Niagara.exp
+[240/245] WriteMetadata UnrealEditor.version (CarlaUnrealEditor) (UBA disabled)
+[241/245] Compile [x64] Module.CarlaTools.2.cpp
+[242/245] Compile [x64] Module.CarlaTools.3.cpp
+D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Source\CarlaTools\Private\BlueprintLibrary\CarlaToolsFunctionLibrary.cpp(212): warning C4996: 'UPackage::SavePackage': Pack the arguments into FSavePackageArgs and call the function overload that takes FSavePackageArgs. Note that Conform is no longer implemented. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Source\CarlaTools\Private\BlueprintLibrary\CarlaToolsFunctionLibrary.cpp(310): warning C4996: 'UPackage::SavePackage': Pack the arguments into FSavePackageArgs and call the function overload that takes FSavePackageArgs. Note that Conform is no longer implemented. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Source\CarlaTools\Private\BlueprintLibrary\MeshToSplineActor.cpp(108): warning C4996: 'TArray<int,FDefaultAllocator>::Pop': Pop with a boolean bAllowShrinking has been deprecated - please use the EAllowShrinking enum instead Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Source\CarlaTools\Private\MapGeneratorWidget.cpp(1100): warning C4996: 'ALandscapeProxy::Import': Use the new method prototype which takes a TArrayView parameter for import layers Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.
+D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Source\CarlaTools\Private\MapGeneratorWidget.cpp(1338) : warning C4701: 使用了可能未初始化的局部变量“NumOfTilesForSpreadedActorsGrid”
+   while compiling UMapGeneratorWidget::CookMiscSpreadedActors
+[243/245] Link [x64] UnrealEditor-CarlaTools.lib
+  正在创建库 D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Intermediate\Build\Win64\x64\UnrealEditor\Development\CarlaTools\UnrealEditor-CarlaTools.lib 和对象 D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Intermediate\Build\Win64\x64\UnrealEditor\Development\CarlaTools\UnrealEditor-CarlaTools.exp
+[244/245] Link [x64] UnrealEditor-CarlaTools.dll
+   创建对象 D:\code\carla\Unreal\CarlaUnreal\Plugins\CarlaTools\Binaries\Win64\UnrealEditor-CarlaTools.exp
+[245/245] WriteMetadata CarlaUnrealEditor.target (UBA disabled)
+Trace file written to D:/code/UnrealEngine5_carla/Engine/Programs/UnrealBuildTool/Log.uba with size 77.2kb
+Total time in Unreal Build Accelerator local executor: 449.29 seconds
+Total execution time: 455.75 seconds
+========================================================
+BUILD COMPLETED SUCCESSFULLY
+========================================================
+
+Verifying plugin files...
+SUCCESS: Plugin binaries found:
+UnrealEditor-Carla.dll
+
+========================================================
+NEXT STEPS:
+========================================================
+
+1. Start server:
+   start_carla_server.bat
+
+2. Click Play button in Unreal Editor
+
+3. Test connection:
+   conda activate carla
+   python test_connection.py
+
+请按任意键继续. . . 

@@ -4,75 +4,138 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dataset Viewer V2</title>
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link id="app-css" rel="stylesheet" href="/static/css/style.css">
+    <script>
+        // CSS 改动频繁，避免浏览器缓存旧样式导致"看起来没生效"
+        document.getElementById('app-css').href = '/static/css/style.css?v=' + Date.now();
+    </script>
     <!-- 使用 CDN 引入 Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
-    <div id="container">
-        <!-- 左侧: 图像预览 (2列4行 或者 4列2行) -->
-        <div id="image-panel">
-            <div class="camera-grid">
-                <!-- 8个相机位 -->
-                <div class="cam-box"><img id="cam_0" src="" alt="Front Main"><div class="cam-label">Front Main</div></div>
-                <div class="cam-box"><img id="cam_1" src="" alt="Front Wide"><div class="cam-label">Front Wide</div></div>
-                <div class="cam-box"><img id="cam_2" src="" alt="Front Narrow"><div class="cam-label">Front Narrow</div></div>
-                <div class="cam-box"><img id="cam_7" src="" alt="Rear"><div class="cam-label">Rear</div></div>
-                
-                <div class="cam-box"><img id="cam_3" src="" alt="Left Pillar"><div class="cam-label">Left Pillar</div></div>
-                <div class="cam-box"><img id="cam_4" src="" alt="Right Pillar"><div class="cam-label">Right Pillar</div></div>
-                <div class="cam-box"><img id="cam_5" src="" alt="Left Repeater"><div class="cam-label">Left Repeater</div></div>
-                <div class="cam-box"><img id="cam_6" src="" alt="Right Repeater"><div class="cam-label">Right Repeater</div></div>
+    <div id="app">
+        <!-- 顶部条: 数据集 / 推理结果目录 -->
+        <header id="topbar">
+            <div class="topbar-group">
+                <span class="topbar-label">数据集</span>
+                <input type="text" id="dataset-path" placeholder="数据集根目录路径">
+                <button id="load-dataset-btn">加载</button>
+                <span id="dataset-summary" class="topbar-summary"></span>
             </div>
-            
-            <div id="voxel-list-container" style="margin-top: 20px;">
-                <h3>Voxel Statistics</h3>
-                <div id="voxel-list"></div>
+            <div class="topbar-group">
+                <span class="topbar-label">推理结果</span>
+                <input type="text" id="prediction-path" placeholder="(可选) inference.py 输出目录">
+                <button id="load-prediction-btn">加载</button>
+                <button id="clear-prediction-btn" title="清除推理结果">✕</button>
+                <span id="prediction-summary" class="topbar-summary"></span>
             </div>
+        </header>
+
+        <div id="main">
+            <!-- 左栏: 相机/深度面板 —— 车顶俯视图 + 按真实标定位置摆放的相机缩略图 -->
+            <aside id="camera-panel">
+                <div id="camera-layout">
+                    <svg id="car-silhouette" viewBox="0 0 200 340" preserveAspectRatio="xMidYMid meet">
+                        <rect x="34" y="18" width="132" height="304" rx="34" ry="34" fill="none" stroke="currentColor" stroke-width="3"/>
+                        <path d="M 58 52 L 142 52 L 128 100 L 72 100 Z" fill="currentColor" opacity="0.5"/>
+                        <path d="M 64 258 L 136 258 L 126 296 L 74 296 Z" fill="currentColor" opacity="0.3"/>
+                        <rect x="18" y="58" width="16" height="48" rx="7" fill="currentColor" opacity="0.55"/>
+                        <rect x="166" y="58" width="16" height="48" rx="7" fill="currentColor" opacity="0.55"/>
+                        <rect x="18" y="234" width="16" height="48" rx="7" fill="currentColor" opacity="0.55"/>
+                        <rect x="166" y="234" width="16" height="48" rx="7" fill="currentColor" opacity="0.55"/>
+                        <polygon points="100,4 88,26 112,26" fill="currentColor" opacity="0.7"/>
+                    </svg>
+                    <div id="camera-markers"><!-- JS 按 calibration 动态插入 --></div>
+                </div>
+            </aside>
+
+            <!-- 中间: 3D 体素视图 -->
+            <section id="viewer-panel">
+                <div id="viewer-toolbar">
+                    <div class="segmented" id="mode-switch">
+                        <button class="seg-btn active" data-mode="gt">GT</button>
+                        <button class="seg-btn" data-mode="pred" disabled>Pred</button>
+                        <button class="seg-btn" data-mode="diff" disabled>Diff</button>
+                    </div>
+                    <div class="segmented" id="color-switch">
+                        <button class="seg-btn active" data-color="semantic">语义色</button>
+                        <button class="seg-btn" data-color="height">高度着色</button>
+                    </div>
+                    <div id="diff-summary" class="toolbar-info"></div>
+                </div>
+                <div id="three-container"></div>
+                <div id="loading-overlay">Loading...</div>
+                <div id="voxel-tooltip" class="hidden"></div>
+            </section>
+
+            <!-- 右栏: 控制面板 -->
+            <aside id="control-panel">
+                <div class="control-group">
+                    <div class="playback-controls">
+                        <button id="prev-btn" title="上一帧 (←)">⏮</button>
+                        <button id="play-btn" title="播放/暂停 (Space)">▶</button>
+                        <button id="next-btn" title="下一帧 (→)">⏭</button>
+                    </div>
+                    <div class="slider-container">
+                        <input type="range" id="frame-slider" min="0" max="100" value="0">
+                        <span id="frame-counter">0 / 0</span>
+                    </div>
+                    <div class="speed-control">
+                        <label>播放间隔 (ms)</label>
+                        <input type="number" id="speed-input" value="500" step="100" min="100">
+                    </div>
+                </div>
+
+                <div class="control-group" id="frame-info-group">
+                    <h3>帧信息</h3>
+                    <div id="frame-name">ID: -</div>
+                    <div id="frame-ego-pos"></div>
+                    <div id="voxel-stats">Voxels: 0</div>
+                </div>
+
+                <div class="control-group">
+                    <h3>体素显示</h3>
+                    <label class="toggle-row"><input type="checkbox" id="toggle-free"> 显示 free 体素</label>
+                    <label class="toggle-row"><input type="checkbox" id="toggle-trajectory"> 自车轨迹</label>
+                    <label class="toggle-row"><input type="checkbox" id="toggle-frustum"> 相机视锥 (简化)</label>
+                    <div class="z-range-row">
+                        <label>Z 层裁切: <span id="z-range-label">0 - 31</span></label>
+                        <div class="dual-slider">
+                            <input type="range" id="z-min-slider" min="0" max="31" value="0">
+                            <input type="range" id="z-max-slider" min="0" max="31" value="31">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <div class="legend-header">
+                        <h3>类别图例</h3>
+                        <div class="legend-actions">
+                            <button id="legend-show-all">全选</button>
+                            <button id="legend-hide-all">全不选</button>
+                        </div>
+                    </div>
+                    <div id="voxel-list"></div>
+                </div>
+
+                <div class="control-group">
+                    <h3>帧列表</h3>
+                    <div id="frame-list"></div>
+                </div>
+            </aside>
         </div>
+    </div>
 
-        <!-- 中间: 3D Viewer -->
-        <div id="viewer-panel">
-            <div id="three-container"></div>
-            <div id="loading-overlay">Loading...</div>
-        </div>
-
-        <!-- 右侧: 控制面板 -->
-        <div id="control-panel">
-            <h2>Controls</h2>
-            
-            <div class="control-group">
-                <label>Dataset Path:</label>
-                <input type="text" id="dataset-path" value="d:\code\carla\dataset_10k_bak">
-                <button id="load-dataset-btn">Load</button>
-            </div>
-
-            <div class="control-group">
-                <div class="playback-controls">
-                    <button id="prev-btn">⏮</button>
-                    <button id="play-btn">▶</button>
-                    <button id="next-btn">⏭</button>
-                </div>
-                <div class="slider-container">
-                    <input type="range" id="frame-slider" min="0" max="100" value="0">
-                    <span id="frame-counter">0 / 0</span>
-                </div>
-                <div class="speed-control">
-                    <label>Speed (ms):</label>
-                    <input type="number" id="speed-input" value="500" step="100" min="100">
-                </div>
-            </div>
-
-            <div class="control-group">
-                <h3>Frame Info</h3>
-                <div id="frame-name">ID: -</div>
-                <div id="voxel-stats">Voxels: 0</div>
-            </div>
-
-            <div class="control-group">
-                <h3>Frame List</h3>
-                <div id="frame-list"></div>
+    <!-- Lightbox: 相机大图 -->
+    <div id="lightbox" class="hidden">
+        <div id="lightbox-content">
+            <button id="lightbox-close" title="关闭 (Esc)">✕</button>
+            <img id="lightbox-img" src="" alt="">
+            <div id="lightbox-info"></div>
+            <div class="segmented" id="lightbox-mode-switch">
+                <button class="seg-btn active" data-view="rgb">RGB</button>
+                <button class="seg-btn" data-view="depth">Depth</button>
             </div>
         </div>
     </div>

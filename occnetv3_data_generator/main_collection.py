@@ -439,8 +439,16 @@ def main():
         print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 7. 等待传感器初始化 (重要!)
+        # 8 个等距鱼眼相机首次渲染要做 cubemap 捕获 + distort compute shader，引擎侧对应
+        # 打开的 render fence 等待上限是 g.TimeoutForBlockOnRenderFence=300000ms (见
+        # SceneCaptureSensor_WideAngleLens 相关代码)；实测这几个相机刚创建完的第一次
+        # world.tick() 实际耗时在 20s 左右，客户端默认 10s RPC 超时会在此提前炸掉，报
+        # "time-out while waiting for the simulator"，和引擎侧是否卡死无关，纯粹是客户端
+        # 等得不够久。这里临时调高超时覆盖这几次 tick，后面各步骤远用不到这么久，
+        # 不用再调回去。
         print("\n[4/5] 等待传感器初始化...")
         step_start = time.time()
+        client.set_timeout(60.0)
         for i in range(10):
             world.tick()
             if i % 2 == 0:
