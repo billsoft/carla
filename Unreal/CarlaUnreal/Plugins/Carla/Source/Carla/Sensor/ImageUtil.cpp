@@ -33,6 +33,46 @@ public:
 
 namespace ImageUtil
 {
+  void ConvertRGBToBayerRGGB(
+    TArrayView<const FLinearColor> Pixels,
+    int32 Width,
+    int32 Height,
+    TArray<uint16>& OutBayerData)
+  {
+    OutBayerData.SetNumUninitialized(Width * Height);
+
+    for (int32 y = 0; y < Height; ++y)
+    {
+      for (int32 x = 0; x < Width; ++x)
+      {
+        const int32 idx = y * Width + x;
+        const FLinearColor& Pixel = Pixels[idx];
+
+        uint16 BayerValue = 0;
+
+        // RGGB 模式判断
+        if (y % 2 == 0)  // 偶数行
+        {
+          if (x % 2 == 0)
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.R, 0.0f, 1.0f) * 65535.0f);  // R
+          else
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f);  // G
+        }
+        else  // 奇数行
+        {
+          if (x % 2 == 0)
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f);  // G
+          else
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.B, 0.0f, 1.0f) * 65535.0f);  // B
+        }
+
+        OutBayerData[idx] = BayerValue;
+      }
+    }
+  }
+
+
+
   bool DecodePixelsByFormat(
     const void* PixelData,
     int32 SourcePitch,
@@ -271,8 +311,13 @@ namespace ImageUtil
   static void ReadImageDataEndAsync(
     ReadImageDataContext&& Self)
   {
+    // Must stay off render-pipeline named threads: this busy-waits on
+    // FRHIGPUTextureReadback::IsReady(), which the RHI thread itself has to
+    // drive forward — dispatching the wait onto a render-pipeline thread
+    // would deadlock. Mirrors FPixelReader::WritePixelsToBuffer's choice of
+    // AnyBackgroundHiPriTask for the identical wait.
     AsyncTask(
-      ENamedThreads::HighTaskPriority, [
+      ENamedThreads::AnyBackgroundHiPriTask, [
       Self = std::move(Self)]() mutable
     {
       while (!Self.Readback->IsReady())
@@ -313,7 +358,13 @@ namespace ImageUtil
       {
         ReadImageDataContext Context = { };
         ReadImageDataBegin(Context, RenderTarget, std::move(Pool), std::move(Callback));
-        ReadImageDataEnd(Context);
+        // ReadImageDataBegin only submits the GPU->CPU copy (EnqueueCopy) and
+        // flushes it to the RHI thread; it does not wait for the GPU to
+        // finish executing it. Calling ReadImageDataEnd() synchronously here
+        // would Lock() a readback buffer that may not be ready yet, handing
+        // the callback stale/uninitialized staging memory. Must go through
+        // the async wait, same as the IsInRenderingThread() branch does.
+        ReadImageDataEndAsync(std::move(Context));
       });
 
     }

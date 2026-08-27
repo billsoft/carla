@@ -35,10 +35,17 @@ ULoadAssetMaterialsCommandlet::ULoadAssetMaterialsCommandlet()
 
 #if WITH_EDITORONLY_DATA
 
-  static ConstructorHelpers::FObjectFinder<UBlueprint> RoadPainterBlueprint(TEXT(
-    "Blueprint'/Game/Carla/Blueprints/LevelDesign/RoadPainterPreset.RoadPainterPreset'"));
-
-  RoadPainterSubclass = (UClass*)RoadPainterBlueprint.Object->GeneratedClass;
+  // NOTE: previously loaded RoadPainterPreset via
+  // ConstructorHelpers::FObjectFinder<UBlueprint> here to populate
+  // RoadPainterSubclass, but that member is never read anywhere in the
+  // plugin (dead code). Loading a Blueprint asset synchronously from a
+  // Commandlet's constructor is fragile: this CDO gets constructed on
+  // every editor/game startup (via UObjectLoadAllCompiledInDefaultProperties),
+  // whether or not the commandlet is ever run, and the resulting recursive
+  // Blueprint compilation reliably crashed with
+  // EXCEPTION_ACCESS_VIOLATION inside UClass::InternalCreateDefaultObjectWrapper
+  // (called back into via FLiveCodingModule::StartupModule while compiling
+  // the loaded Blueprint) on this engine version. Removed since unused.
 
   // Dirt
   DecalNamesMap.Add("dirt1", "MaterialInstanceConstant'/Game/Carla/Static/Decals/Road/RoadDirt/DI_RoadDirt_01.DI_RoadDirt_01'");

@@ -46,7 +46,7 @@ class OccNetDataSaver:
         │   └── extrinsics.json
         ├── images/
         │   └── scene_XXXX_frame_YYYY/
-        │       ├── cam_0.dng  (12-bit Bayer RGGB)
+        │       ├── cam_0.dng  (Bayer RGGB, 位深可配置, 默认 12-bit)
         │       └── ...
         ├── depth/
         │   └── scene_XXXX_frame_YYYY/
@@ -67,14 +67,22 @@ class OccNetDataSaver:
         └── test.txt
     """
 
-    def __init__(self, output_dir: str, scene_name: str = 'scene'):
+    def __init__(self, output_dir: str, scene_name: str = 'scene', raw_bit_depth: int = 12):
         """
         Args:
             output_dir: 输出根目录 (如 D:/code/carla/dataset_10k_bak)
             scene_name: 场景名称前缀
+            raw_bit_depth: 保存 DNG 时模拟的传感器 ADC 位深 (8/10/12/14/16)，
+                默认 12-bit（常见 CMOS 传感器精度）。相机管线内部始终以 16-bit
+                (0-65535) 传输，这里只是保存前的量化位深，越大保留的细节越多、
+                文件也略大。必须是 8-16 之间的整数。
         """
+        if not (8 <= raw_bit_depth <= 16):
+            raise ValueError(f"raw_bit_depth 必须在 8-16 之间，收到: {raw_bit_depth}")
+
         self.output_dir = Path(output_dir)
         self.scene_name = scene_name
+        self.raw_bit_depth = raw_bit_depth
         self.scene_counter = 0
         self.frame_counter = 0
 
@@ -135,15 +143,23 @@ class OccNetDataSaver:
                 'cy': float(K[1, 2]),
                 'width': 1280,
                 'height': 960,
+                # fov: 水平 FOV，仅作文档参考；fov_vertical 才是实际传给等距投影
+                # 相机、并用于计算 fx/fy 的值（focal = (height/2)/(fov_vertical/2 弧度)）
                 'fov': float(cam_config['fov']),
+                'fov_vertical': float(cam_config['fov_vertical']),
+                # 等距投影 (equidistant, r=f*theta)，与 CARLA sensor.camera.rgb_fisheye
+                # (camera_model=equidistant) 采集时用的投影模型一致，不是针孔模型，
+                # 没有径向/切向畸变系数的概念
                 'distortion': {
-                    'model': 'pinhole',
-                    'k1': 0.0,
-                    'k2': 0.0,
-                    'p1': 0.0,
-                    'p2': 0.0,
+                    'model': 'equidistant',
                 }
             }
+
+        # 顶层字段（不是相机 ID，e2e_occ/dataset.py 按 cam_i 精确查找，不会被这个
+        # 额外键干扰）：DNG 实际保存的位深。DNG 的 BitsPerSample EXIF 标签靠不住——
+        # PIL 的 TIFF writer 按存储容器宽度（固定 uint16）覆盖它，不反映真实 ADC 位深，
+        # 所以位深必须在这里单独记一份，供 dataset.py 加载 DNG 时做正确的归一化。
+        intrinsics_data['raw_bit_depth'] = self.raw_bit_depth
 
         with open(self.output_dir / 'calibration' / 'intrinsics.json', 'w') as f:
             json.dump(intrinsics_data, f, indent=2)
@@ -269,15 +285,16 @@ class OccNetDataSaver:
         # 转换为 uint16
         bayer_u16 = bayer_data.astype(np.uint16)
 
-        # 16-bit → 12-bit: 右移 4 位
-        # [0, 65535] → [0, 4095]
-        bayer_12bit = (bayer_u16 >> 4).astype(np.uint16)
+        # 相机管线内部始终以 16-bit (0-65535) 传输，这里右移到目标位深模拟
+        # 真实传感器的 ADC 精度，例如 12-bit: [0, 65535] → [0, 4095]。
+        shift = 16 - self.raw_bit_depth
+        bayer_quantized = (bayer_u16 >> shift).astype(np.uint16) if shift > 0 else bayer_u16
 
         try:
             # 使用 PIL/Pillow 保存单通道 16-bit TIFF（DNG 兼容）
             if DNG_AVAILABLE:
                 # 创建 PIL Image（单通道灰度）
-                img_pil = Image.fromarray(bayer_12bit, mode='I;16')  # 16-bit grayscale
+                img_pil = Image.fromarray(bayer_quantized, mode='I;16')  # 16-bit grayscale
 
                 # 构建 EXIF/TIFF 元数据
                 exif_dict = {
@@ -287,7 +304,7 @@ class OccNetDataSaver:
                         piexif.ImageIFD.Software: b"OccNetV3 Data Generator",
                         piexif.ImageIFD.PhotometricInterpretation: 32803,  # CFA (Color Filter Array)
                         piexif.ImageIFD.SamplesPerPixel: 1,
-                        piexif.ImageIFD.BitsPerSample: (12,),  # 12-bit
+                        piexif.ImageIFD.BitsPerSample: (self.raw_bit_depth,),
                     }
                 }
                 exif_bytes = piexif.dump(exif_dict)
@@ -298,7 +315,7 @@ class OccNetDataSaver:
             else:
                 # 降级: 使用 OpenCV 保存为 TIFF 后重命名
                 path_tif = output_path.with_suffix('.tif')
-                success = cv2.imwrite(str(path_tif), bayer_12bit, [
+                success = cv2.imwrite(str(path_tif), bayer_quantized, [
                     cv2.IMWRITE_TIFF_COMPRESSION, 1  # 无压缩
                 ])
                 if not success:

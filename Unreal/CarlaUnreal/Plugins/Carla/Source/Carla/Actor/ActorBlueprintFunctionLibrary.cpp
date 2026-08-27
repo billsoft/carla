@@ -15,6 +15,7 @@
 #include "Carla/Sensor/LidarDescription.h"
 #include "Carla/Sensor/SceneCaptureSensor.h"
 #include "Carla/Sensor/SceneCaptureCamera.h" // Added
+#include "Carla/Sensor/SceneCaptureCamera_WideAngleLens.h"
 #include "Carla/Sensor/ShaderBasedSensor.h"
 #include "Carla/Sensor/SceneCaptureSensor_WideAngleLens.h"
 #include "Carla/Sensor/ShaderBasedSensor_WideAngleLens.h"
@@ -401,6 +402,17 @@ void UActorBlueprintFunctionLibrary::MakeCameraDefinition(
   UseRayTracing.RecommendedValues = {TEXT("true")};
   UseRayTracing.bRestrictToRecommended = false;
 
+  // Raw pixel format ("uint8"/"uint16"/"float32"/"bayer_rggb"), consumed by
+  // SetCamera(..., ASceneCaptureSensor*) below to set RawType on
+  // ASceneCaptureCamera. Must be registered here or set_attribute("raw_type",
+  // ...) throws (ActorBlueprint::SetAttribute requires the attribute id to
+  // already exist in this Variations list).
+  FActorVariation RawType;
+  RawType.Id = TEXT("raw_type");
+  RawType.Type = EActorAttributeType::String;
+  RawType.RecommendedValues = {TEXT("uint8")};
+  RawType.bRestrictToRecommended = false;
+
   Definition.Variations.Append({ResX,
                                 ResY,
                                 FOV,
@@ -410,7 +422,8 @@ void UActorBlueprintFunctionLibrary::MakeCameraDefinition(
                                 LensKcube,
                                 LensXSize,
                                 LensYSize,
-                                UseRayTracing});
+                                UseRayTracing,
+                                RawType});
 
   if (bEnableModifyingPostProcessEffects)
   {
@@ -584,6 +597,17 @@ void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
   WAL_LensYSize.RecommendedValues = {TEXT("0.08")};
   WAL_LensYSize.bRestrictToRecommended = false;
 
+  // Raw pixel format ("uint8"/"uint16"/"float32"/"bayer_rggb"), consumed by
+  // SetCamera(..., ASceneCaptureSensor_WideAngleLens*) below to set RawType
+  // on ASceneCaptureCamera_WideAngleLens. Must be registered here or
+  // set_attribute("raw_type", ...) throws (ActorBlueprint::SetAttribute
+  // requires the attribute id to already exist in this Variations list).
+  FActorVariation WAL_RawType;
+  WAL_RawType.Id = TEXT("raw_type");
+  WAL_RawType.Type = EActorAttributeType::String;
+  WAL_RawType.RecommendedValues = {TEXT("uint8")};
+  WAL_RawType.bRestrictToRecommended = false;
+
   Definition.Variations.Append({
       CameraModel,
       K0, K1, K2, K3,
@@ -601,7 +625,8 @@ void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
       WAL_LensK,
       WAL_LensKcube,
       WAL_LensXSize,
-      WAL_LensYSize});
+      WAL_LensYSize,
+      WAL_RawType});
 
   if (bEnableModifyingPostProcessEffects)
   {
@@ -1858,7 +1883,15 @@ void UActorBlueprintFunctionLibrary::SetCamera(
     auto* SceneCaptureCamera = Cast<ASceneCaptureCamera>(Camera);
     if (SceneCaptureCamera)
     {
-      SceneCaptureCamera->RawType = RetrieveActorAttributeToString("raw_type", Description.Variations, TEXT("uint8"));
+      const FString RawTypeValue = RetrieveActorAttributeToString("raw_type", Description.Variations, TEXT("uint8"));
+      SceneCaptureCamera->RawType = RawTypeValue;
+      // HDR raw 模式（float32/uint16/bayer_rggb）需要 16-bit 渲染目标（PF_FloatRGBA），
+      // 否则捕获的是 8-bit 量化后再放大到 0-65535 的假 16-bit 数据。必须在 BeginPlay
+      // （InitCustomFormat 读取这个 flag）之前设置，SetCamera 在 actor 构造期间调用，满足这个时序。
+      if (RawTypeValue != TEXT("uint8"))
+      {
+        Camera->Enable16BitFormat(true);
+      }
     }
   }
 
@@ -2014,6 +2047,23 @@ void UActorBlueprintFunctionLibrary::SetCamera(
   if (Variations.Contains("gamma"))
     Camera->SetTargetGamma(
         RetrieveActorAttributeToFloat("gamma", Variations, 2.2f));
+
+  // ========== 新增: 设置 RawType（镜像 SetCamera(ASceneCaptureSensor*) 里的逻辑） ==========
+  if (Variations.Contains("raw_type"))
+  {
+    auto* SceneCaptureCameraWideAngleLens = Cast<ASceneCaptureCamera_WideAngleLens>(Camera);
+    if (SceneCaptureCameraWideAngleLens)
+    {
+      const FString RawTypeValue = RetrieveActorAttributeToString("raw_type", Variations, TEXT("uint8"));
+      SceneCaptureCameraWideAngleLens->RawType = RawTypeValue;
+      // 同 SetCamera(ASceneCaptureSensor*) 那边：HDR raw 模式需要 16-bit 渲染目标，
+      // 否则读到的是 8-bit 量化后放大的假 16-bit 数据。必须在 BeginPlay 之前设置。
+      if (RawTypeValue != TEXT("uint8"))
+      {
+        Camera->Enable16BitFormat(true);
+      }
+    }
+  }
 }
 
 void UActorBlueprintFunctionLibrary::SetCamera(

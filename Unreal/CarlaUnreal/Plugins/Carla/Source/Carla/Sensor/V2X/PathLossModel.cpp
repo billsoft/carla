@@ -17,42 +17,40 @@
 #include <limits>
 #include <random>
 
-PathLossModel::PathLossModel(URandomEngine *random_engine, AActor *Owner)
+PathLossModel::PathLossModel(URandomEngine *random_engine, AActor *InOwner)
 {
     mRandomEngine = random_engine;
-    mActorOwner = Owner;
+    mActorOwner = InOwner;
 }
 
-void PathLossModel::SetParams(const float TransmitPower,
-                              const float ReceiverSensitivity,
-                              const float Frequency,
-                              const float combined_antenna_gain,
-                              const float path_loss_exponent,
-                              const float reference_distance_fspl,
-                              const float filter_distance,
-                              const bool use_etsi_fading,
-                              const float custom_fading_stddev)
+void PathLossModel::SetParams(const float InTransmitPower,
+                              const float InReceiverSensitivity,
+                              const float InFrequency,
+                              const float InCombinedAntennaGain,
+                              const float InPathLossExponent,
+                              const float InReferenceDistanceFspl,
+                              const float InFilterDistance,
+                              const bool InUseEtsiFading,
+                              const float InCustomFadingStddev)
 {
-    this->TransmitPower = TransmitPower;
-    this->ReceiverSensitivity = ReceiverSensitivity;
-    this->path_loss_exponent = path_loss_exponent;
-    this->reference_distance_fspl = reference_distance_fspl;
-    this->filter_distance = filter_distance;
-    this->use_etsi_fading = use_etsi_fading;
-    this->custom_fading_stddev = custom_fading_stddev;
-    this->combined_antenna_gain = combined_antenna_gain;
-    // The parameter is named Frequency and shadows the member of the same name,
-    // so disambiguate the member writes with this->.
-    this->Frequency_GHz = Frequency;
+    this->TransmitPower = InTransmitPower;
+    this->ReceiverSensitivity = InReceiverSensitivity;
+    this->path_loss_exponent = InPathLossExponent;
+    this->reference_distance_fspl = InReferenceDistanceFspl;
+    this->filter_distance = InFilterDistance;
+    this->use_etsi_fading = InUseEtsiFading;
+    this->custom_fading_stddev = InCustomFadingStddev;
+    this->combined_antenna_gain = InCombinedAntennaGain;
+    this->Frequency_GHz = InFrequency;
     this->Frequency = this->Frequency_GHz * std::pow(10, 9);
     this->lambda = PathLossModel::c_speedoflight / this->Frequency;
     // when reference distance is set, we prepare the FSPL for the reference distance to be used in LDPL
     CalculateFSPL_d0();
 }
 
-void PathLossModel::SetScenario(EScenario scenario)
+void PathLossModel::SetScenario(EScenario InScenario)
 {
-    this->scenario = scenario;
+    this->scenario = InScenario;
 }
 
 std::map<AActor *, float> PathLossModel::GetReceiveActorPowerList()
@@ -213,14 +211,14 @@ float PathLossModel::CalculateReceivedPower(AActor *OtherActor,
 }
 
 void PathLossModel::EstimatePathStateAndVehicleObstacles(AActor *OtherActor,
-                                                         FVector CurrentActorLocation,
+                                                         FVector InCurrentActorLocation,
                                                          double TxHeight,
                                                          double RxHeight,
                                                          double reference_z,
                                                          EPathState &state,
                                                          std::vector<FVector> &vehicle_obstacles)
 {
-    // CurrentActorLocation in cm original
+    // InCurrentActorLocation in cm original
     // TxHeight in m
     // RxHeight in m
     // reference_z in cm
@@ -245,7 +243,7 @@ void PathLossModel::EstimatePathStateAndVehicleObstacles(AActor *OtherActor,
         }
 
         // cal by ref
-        if (GetLocationIfVehicle(CurrentActorLocation, HitInfo, reference_z, location))
+        if (GetLocationIfVehicle(InCurrentActorLocation, HitInfo, reference_z, location))
         {
             // we found a vehicle
             // Note: we may set this several times if we have several vehicles in between
@@ -408,7 +406,7 @@ bool PathLossModel::HitIsSelfOrOther(const FHitResult &HitInfo, AActor *OtherAct
     return false;
 }
 
-bool PathLossModel::GetLocationIfVehicle(const FVector CurrentActorLocation, const FHitResult &HitInfo, const double reference_z, FVector &location)
+bool PathLossModel::GetLocationIfVehicle(const FVector InCurrentActorLocation, const FHitResult &HitInfo, const double reference_z, FVector &location)
 {
     // reference_z in cm
     bool Vehicle = false;

@@ -1,6 +1,12 @@
 """
 Tesla 8相机配置 - 用于OccNetV3
 输出单通道灰度图像 (1, 960, 1280) float16
+
+相机模型: 等距投影(fisheye)，对应 CARLA sensor.camera.rgb_fisheye + camera_model=equidistant
+(见 sensors/camera_manager.py)。等距投影的 fov 属性是垂直 FOV (YFOVAngle)，而这里每个相机
+的 'fov' 字段沿用的是历史上的水平 FOV 语义，'fov_vertical' 才是实际传给传感器/用于计算
+intrinsics 的值。两者换算关系(各向同性等距投影下精确成立): fov_vertical = fov * (image_size_y / image_size_x)
+= fov * 0.75 (960/1280)。
 """
 
 # ========== Tesla 8相机布局 ==========
@@ -12,6 +18,7 @@ TESLA_CAMERAS = [
         'id': 'front_main',
         'index': 0,
         'fov': 50.0,
+        'fov_vertical': 37.5,
         'position': [1.0, 0.0, 1.6],    # (x, y, z) 米 (对齐 dense_occupancy)
         'rotation': [0.0, 0.0, 0.0],    # (pitch, yaw, roll) 度
         'description': '前主相机 (Main, 50° 标准视野)',
@@ -22,6 +29,7 @@ TESLA_CAMERAS = [
         'id': 'front_wide',
         'index': 1,
         'fov': 120.0,
+        'fov_vertical': 90.0,
         'position': [1.0, 0.0, 1.6],    # 对齐 dense_occupancy
         'rotation': [0.0, 0.0, 0.0],
         'description': '前广角 (Wide, 120° 广角)',
@@ -32,6 +40,7 @@ TESLA_CAMERAS = [
         'id': 'front_narrow',
         'index': 2,
         'fov': 35.0,
+        'fov_vertical': 26.25,
         'position': [1.0, 0.0, 1.6],    # 对齐 dense_occupancy
         'rotation': [0.0, 0.0, 0.0],
         'description': '前窄角/长焦 (Narrow, 35° 长焦)',
@@ -45,6 +54,7 @@ TESLA_CAMERAS = [
         'id': 'left_pillar',
         'index': 3,
         'fov': 80.0,
+        'fov_vertical': 60.0,
         'position': [0.0, -1.1, 1.7],   # ⭐ Y=-1.1 (增加向左偏移,避免车架遮挡)
         'rotation': [0.0, -55.0, 0.0],  # ⭐ yaw=-55° (轻微调整朝向,更贴近侧前方)
         'description': '左B柱 (Left Pillar, 左前方 -55°)',
@@ -55,6 +65,7 @@ TESLA_CAMERAS = [
         'id': 'right_pillar',
         'index': 4,
         'fov': 80.0,
+        'fov_vertical': 60.0,
         'position': [0.0, 1.1, 1.7],    # ⭐ Y=1.1 (增加向右偏移,避免车架遮挡)
         'rotation': [0.0, 55.0, 0.0],   # ⭐ yaw=55° (轻微调整朝向,更贴近侧前方)
         'description': '右B柱 (Right Pillar, 右前方 55°)',
@@ -68,6 +79,7 @@ TESLA_CAMERAS = [
         'id': 'left_repeater',
         'index': 5,
         'fov': 100.0,
+        'fov_vertical': 75.0,
         'position': [1.0, -1.0, 1.0],   # ⭐ X=1.0 (靠近前轮), Y=-1.0 (翼子板外侧)
         'rotation': [0.0, -130.0, 0.0], # ⭐ yaw=-130° (侧后方45°, 避免拍摄车身)
         'description': '左Repeater (Left Repeater, 左后方 -130°)',
@@ -78,6 +90,7 @@ TESLA_CAMERAS = [
         'id': 'right_repeater',
         'index': 6,
         'fov': 100.0,
+        'fov_vertical': 75.0,
         'position': [1.0, 1.0, 1.0],    # ⭐ X=1.0 (靠近前轮), Y=1.0 (翼子板外侧)
         'rotation': [0.0, 130.0, 0.0],  # ⭐ yaw=130° (侧后方45°, 避免拍摄车身)
         'description': '右Repeater (Right Repeater, 右后方 130°)',
@@ -91,6 +104,7 @@ TESLA_CAMERAS = [
         'id': 'rear',
         'index': 7,
         'fov': 120.0,
+        'fov_vertical': 90.0,
         'position': [-2.7, 0.0, 1.2],   # ⭐ X=-2.7 (向车尾外延20cm, 原-2.5)
         'rotation': [-8.0, 180.0, 0.0], # ⭐ pitch=-8° (增加俯仰角,看清地面)
         'description': '后视 (Rear, 正后方 180°, 俯仰 -8°)',

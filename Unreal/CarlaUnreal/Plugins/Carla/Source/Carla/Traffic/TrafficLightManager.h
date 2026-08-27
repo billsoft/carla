@@ -61,6 +61,15 @@ public:
 
 private:
 
+  // Loads the default traffic light/sign Blueprint classes (TrafficLightModel_RHT,
+  // TrafficSignsModels, SpeedLimitModels, ...) if not already loaded. Must
+  // NOT be called from the constructor (see ATrafficLightManager::
+  // ATrafficLightManager) — call lazily right before SpawnTrafficLights()/
+  // SpawnSignals() need them.
+  void EnsureDefaultModelsLoaded();
+
+  bool bDefaultModelsLoaded = false;
+
   void SpawnTrafficLights();
 
   void SpawnSignals();

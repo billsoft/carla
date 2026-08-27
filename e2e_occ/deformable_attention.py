@@ -1,6 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+try:
+    from .position_encoding import rescale_focal_to_feature_map
+except (ImportError, ValueError):
+    from position_encoding import rescale_focal_to_feature_map
 
 class DeformableCrossAttention(nn.Module):
     def __init__(self, dim, num_heads, num_cameras, num_points=1, dropout=0.1):
@@ -28,38 +32,47 @@ class DeformableCrossAttention(nn.Module):
         """
         Project 3D query coordinates to 2D image reference points.
         query_coords: [B, Q, 3] in [0, 1]
+
+        等距投影(equidistant)正向投影，必须和 RayDirectionEncoding.get_rays_from_params
+        的反投影是同一个相机模型的正/逆变换——那边决定"这个像素对应哪个方向的入射光线"，
+        这边决定"这个 3D 点该去图像哪里采样特征"，两者不一致会导致几何自相矛盾。
+        公式: theta = acos(Z/|P|)（与光轴夹角），phi = atan2(Y, X)，r = f * theta（像素半径）。
         """
         B, Q, _ = query_coords.shape
         N = self.num_cameras
-        
+
         # Map [0,1] to World Coords [-40, 40] ...
         real_x = query_coords[..., 0] * 80.0 - 40.0
         real_y = query_coords[..., 1] * 80.0 - 40.0
         real_z = query_coords[..., 2] * 6.4 - 1.0
         world_points = torch.stack([real_x, real_y, real_z, torch.ones_like(real_x)], dim=-1) # [B, Q, 4]
-        
+
         # Expand for cameras
         world_points = world_points.unsqueeze(1).expand(-1, N, -1, -1) # [B, N, Q, 4]
-        
+
         # World to Camera
         inv_extrinsics = torch.inverse(extrinsics) # [B, N, 4, 4]
         cam_points = torch.matmul(inv_extrinsics.unsqueeze(2), world_points.unsqueeze(-1)).squeeze(-1)
-        
-        # Camera to Image
+
+        # Camera to Image：等距投影正向投影
         cam_points_3d = cam_points[..., :3] # [B, N, Q, 3]
-        img_points_h = torch.matmul(intrinsics.unsqueeze(2), cam_points_3d.unsqueeze(-1)).squeeze(-1)
-        
-        # Normalize
-        depth = img_points_h[..., 2] + 1e-6
-        u = img_points_h[..., 0] / depth
-        v = img_points_h[..., 1] / depth
-        
+        r3 = torch.linalg.norm(cam_points_3d, dim=-1).clamp_min(1e-6)  # [B, N, Q]
+        cos_theta = (cam_points_3d[..., 2] / r3).clamp(-1.0, 1.0)
+        theta = torch.acos(cos_theta)  # 与光轴 (Z) 夹角
+        phi = torch.atan2(cam_points_3d[..., 1], cam_points_3d[..., 0])
+
+        f = rescale_focal_to_feature_map(intrinsics, H, W).unsqueeze(-1)  # [B, N, 1]
+        r_img = f * theta  # [B, N, Q]，等距投影下的像素半径
+
+        u = W / 2.0 + r_img * torch.cos(phi)
+        v = H / 2.0 + r_img * torch.sin(phi)
+
         # Normalize to [-1, 1]
         u_norm = 2.0 * u / (W - 1) - 1.0
         v_norm = 2.0 * v / (H - 1) - 1.0
-        
+
         ref_points = torch.stack([u_norm, v_norm], dim=-1) # [B, N, Q, 2]
-        
+
         return ref_points
 
     def forward(self, query, query_coords, image_feats, intrinsics=None, extrinsics=None):

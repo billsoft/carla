@@ -2,6 +2,7 @@ import torch
 import time
 import os
 import sys
+import math
 import traceback
 
 try:
@@ -9,11 +10,15 @@ try:
     from config import E2EOccConfig
     from e2e_occ_net import E2EOccNet
     from voxel_head import VoxelHead
+    from position_encoding import RayDirectionEncoding
+    from deformable_attention import DeformableCrossAttention
 except (ImportError, ValueError):
     print("无法从相对路径导入，尝试作为包导入。")
     from e2e_occ.config import E2EOccConfig
     from e2e_occ.e2e_occ_net import E2EOccNet
     from e2e_occ.voxel_head import VoxelHead
+    from e2e_occ.position_encoding import RayDirectionEncoding
+    from e2e_occ.deformable_attention import DeformableCrossAttention
 
 
 def print_header(title):
@@ -93,6 +98,87 @@ def verify_voxel_head(config, device):
     return all_ok
 
 
+def verify_equidistant_geometry(device):
+    """
+    等距投影(equidistant)几何正确性验证：
+
+    1. RayDirectionEncoding.get_rays_from_params 本身：构造一个已知垂直 FOV 的合成
+       相机，检查画面中心射线指向光轴、水平边缘射线的入射角等于水平半 FOV
+       (等距投影下 FOV_h/FOV_v = W/H 精确成立，见 position_encoding.py 的推导)。
+    2. DeformableCrossAttention.get_reference_points 与 RayDirectionEncoding 的
+       往返一致性：3D 点正向投影到像素，再从该像素反查射线方向，应该基本指回原方向。
+       这一步专门用来抓"两处实现各自没错但互相不一致"的问题——这正是这次修复要解决的
+       历史 bug（原来是等距编码 + 针孔参考点投影，两者矛盾）。
+    """
+    print_section("等距投影几何检查（射线编码 + 参考点投影往返一致性）")
+    all_ok = True
+
+    fov_vertical_deg = 90.0
+    W_orig, H_orig = 1280, 960
+    # 模拟 patch_embed 实测的 /8 降采样后的特征图分辨率
+    W_feat, H_feat = 160, 120
+
+    focal = (H_orig / 2.0) / math.radians(fov_vertical_deg / 2.0)
+    intrinsics = torch.tensor(
+        [[focal, 0.0, W_orig / 2.0], [0.0, focal, H_orig / 2.0], [0.0, 0.0, 1.0]],
+        dtype=torch.float32, device=device
+    ).view(1, 1, 3, 3)  # [B=1, N=1, 3, 3]
+    extrinsics = torch.eye(4, dtype=torch.float32, device=device).view(1, 1, 4, 4)  # 单位外参
+
+    ray_encoder = RayDirectionEncoding(dim=64, image_size=(H_feat, W_feat), num_cameras=1).to(device)
+    with torch.no_grad():
+        world_dirs = ray_encoder.get_rays_from_params(intrinsics, extrinsics, H_feat, W_feat)  # [1,1,H,W,3]
+
+    # 画面中心应指向光轴 [0,0,1]
+    center_dir = world_dirs[0, 0, H_feat // 2, W_feat // 2]
+    center_angle_deg = math.degrees(torch.acos(center_dir[2].clamp(-1, 1)).item())
+    center_ok = center_angle_deg < 1.0
+    print(f"  {'✅' if center_ok else '❌'} 画面中心射线与光轴夹角: {center_angle_deg:.3f}°（期望 ≈0°）")
+    all_ok = all_ok and center_ok
+
+    # 水平边缘像素 (dy≈0) 的入射角应等于水平半FOV = 垂直FOV/2 * (W/H)
+    edge_dir = world_dirs[0, 0, H_feat // 2, W_feat - 1]
+    edge_angle_deg = math.degrees(torch.acos(edge_dir[2].clamp(-1, 1)).item())
+    expected_edge_deg = fov_vertical_deg * (W_orig / H_orig) / 2.0
+    edge_ok = abs(edge_angle_deg - expected_edge_deg) < 1.0
+    print(f"  {'✅' if edge_ok else '❌'} 水平边缘射线与光轴夹角: {edge_angle_deg:.2f}°（期望 ≈{expected_edge_deg:.2f}°）")
+    all_ok = all_ok and edge_ok
+
+    # get_reference_points → get_rays_from_params 往返一致性
+    cross_attn = DeformableCrossAttention(dim=64, num_heads=1, num_cameras=1, num_points=1).to(device)
+
+    # 单位外参下世界系=相机系（光轴 = 世界 Z 轴）。voxel_range 里 X,Y 是 ±40m 大范围，
+    # Z（对应这里的相机前向）只有 -1~5.4m，所以要选一个 X,Y 偏移很小、Z 接近上限的点，
+    # 才会落在相机 FOV 以内（否则往返一致性检查测的是"落在画幅外被裁剪"而非真正的往返误差）。
+    # 偏离光轴 ~34°，phi≈-45°（非对称，能检验 phi 方向是否正确）。
+    query_coords_01 = torch.tensor([[[0.53, 0.47, 0.95]]], dtype=torch.float32, device=device)  # [B,Q,3] in [0,1]
+    with torch.no_grad():
+        ref_points = cross_attn.get_reference_points(query_coords_01, intrinsics, extrinsics, H_feat, W_feat)
+
+    u_norm, v_norm = ref_points[0, 0, 0].tolist()
+    u = (u_norm + 1.0) * (W_feat - 1) / 2.0
+    v = (v_norm + 1.0) * (H_feat - 1) / 2.0
+    iu = max(0, min(W_feat - 1, int(round(u))))
+    iv = max(0, min(H_feat - 1, int(round(v))))
+
+    projected_pixel_dir = world_dirs[0, 0, iv, iu]
+
+    real_x = query_coords_01[0, 0, 0].item() * 80.0 - 40.0
+    real_y = query_coords_01[0, 0, 1].item() * 80.0 - 40.0
+    real_z = query_coords_01[0, 0, 2].item() * 6.4 - 1.0
+    point_dir = torch.tensor([real_x, real_y, real_z], dtype=torch.float32, device=device)
+    point_dir = point_dir / point_dir.norm()
+
+    cos_sim = torch.dot(point_dir, projected_pixel_dir).clamp(-1.0, 1.0).item()
+    roundtrip_angle_deg = math.degrees(math.acos(cos_sim))
+    # 离散像素量化 + H/W 取整会带来一点误差，2° 容差足够宽松同时能抓住系统性不一致
+    roundtrip_ok = roundtrip_angle_deg < 2.0
+    print(f"  {'✅' if roundtrip_ok else '❌'} 参考点投影↔射线编码往返夹角误差: {roundtrip_angle_deg:.2f}°（期望 <2°）")
+    all_ok = all_ok and roundtrip_ok
+
+    return all_ok
+
+
 def run_verification():
     print_header("E2E-OccNet 网络验证（含新输出头）")
 
@@ -111,6 +197,9 @@ def run_verification():
         # 2. VoxelHead 专项验证
         print_section("2. VoxelHead 新结构专项验证")
         head_ok = verify_voxel_head(config, device)
+
+        # 2b. 等距投影几何检查
+        geometry_ok = verify_equidistant_geometry(device)
 
         # 3. 完整模型构建
         print_section("3. 完整模型构建")
@@ -179,7 +268,7 @@ def run_verification():
             print(f"  推理峰值显存: {peak_gb:.2f} GB")
 
         # 汇总
-        all_pass = head_ok and seq_ok
+        all_pass = head_ok and geometry_ok and seq_ok
         if all_pass:
             print_header("✅ 全部验证通过")
         else:

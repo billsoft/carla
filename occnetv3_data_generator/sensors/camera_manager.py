@@ -37,14 +37,22 @@ class CameraManager:
             self._setup_depth_cameras()
 
     def _setup_cameras(self):
-        """创建并附加8个相机"""
+        """创建并附加8个相机 (等距投影/鱼眼相机, sensor.camera.rgb_fisheye)"""
         bp_library = self.world.get_blueprint_library()
-        camera_bp = bp_library.find('sensor.camera.rgb')
+        camera_bp = bp_library.find('sensor.camera.rgb_fisheye')
 
         # 设置基础属性
         camera_bp.set_attribute('image_size_x', str(CAMERA_SENSOR_CONFIG['image_size_x']))
         camera_bp.set_attribute('image_size_y', str(CAMERA_SENSOR_CONFIG['image_size_y']))
         camera_bp.set_attribute('sensor_tick', str(CAMERA_SENSOR_CONFIG['sensor_tick']))
+
+        # 等距投影相机模型: camera_model=equidistant，保留原生鱼眼畸变输出
+        # (perspective=False 表示不再额外做一次转透视的 shader pass；equirectangular
+        #  同理关闭，否则输出会变成经纬图而不是矩形裁切的等距投影图像)
+        camera_bp.set_attribute('camera_model', 'equidistant')
+        camera_bp.set_attribute('perspective', 'False')
+        camera_bp.set_attribute('equirectangular', 'False')
+        camera_bp.set_attribute('fov_mask', 'False')
 
         # 后处理设置
         if camera_bp.has_attribute('enable_postprocess_effects'):
@@ -75,8 +83,16 @@ class CameraManager:
         for cam_config in self.camera_configs:
             cam_id = cam_config['id']
 
-            # 设置FOV
-            camera_bp.set_attribute('fov', str(cam_config['fov']))
+            # 设置垂直FOV (等距鱼眼相机的 fov 属性对应 YFOVAngle，即垂直 FOV；
+            # camera_config.py 里的 'fov' 字段沿用历史上的水平 FOV 语义，实际
+            # 传给传感器的是换算后的 'fov_vertical')
+            camera_bp.set_attribute('fov', str(cam_config['fov_vertical']))
+
+            # 设置 RawType，驱动引擎侧走 Bayer RGGB HDR 采集路径（走真实的
+            # SendHDRDataToClient/EPixelFormat::BAYER_RGGB_U16，而不是默认 uint8
+            # FColor 输出）。需要 C++ 侧已注册 raw_type 蓝图属性，否则 set_attribute
+            # 会抛异常，提示先重新编译 CARLA。
+            camera_bp.set_attribute('raw_type', cam_config.get('raw_type', 'uint8'))
 
             # 创建Transform
             pos = cam_config['position']
@@ -253,32 +269,22 @@ class CameraManager:
     @staticmethod
     def convert_to_bayer(image: carla.Image) -> np.ndarray:
         """
-        将CARLA RGB图像转换为单通道 Bayer RGGB (uint16)
+        读取引擎侧真实采集的单通道 Bayer RGGB 数据 (uint16, EPixelFormat::BAYER_RGGB_U16)。
+
+        依赖相机 blueprint 的 raw_type 属性被设为 'bayer_rggb'（见 _setup_cameras），
+        此时引擎侧走 SendHDRDataToClient，直接从 HDR FLinearColor 采样出单通道 Bayer
+        马赛克再发给客户端，raw_data 本身就是 (H, W) uint16，不再是 BGRA。
+
+        注：此前 raw_type 属性从未被设置到 blueprint 上（set_attribute 会因未注册该
+        属性而抛异常），引擎侧实际一直走默认 uint8 FColor 路径；这里之前的实现是从
+        已经过 tone mapping 的 8-bit BGRA 图像里按 Bayer 相位挑一个通道、再左移 8 位
+        伪造成 16-bit，并非真正的传感器级 raw 数据。
         """
-        # 解析BGRA数据
-        # CARLA UE5 raw_data 可能含4字节header，截取精确像素字节数
-        raw = np.frombuffer(image.raw_data, dtype=np.uint8)
-        expected = image.height * image.width * 4
-        bgra = raw[-expected:].reshape((image.height, image.width, 4))
-        
-        # 创建 Bayer 容器
-        bayer = np.zeros((image.height, image.width), dtype=np.uint8)
-        
-        # RGGB 采样:
-        # R: (0,0), (0,2)... -> bgra[..., 2]
-        # G: (0,1), (1,0)... -> bgra[..., 1]
-        # B: (1,1), (1,3)... -> bgra[..., 0]
-        
-        # Row 0, 2, ... (Even rows)
-        bayer[0::2, 0::2] = bgra[0::2, 0::2, 2] # R
-        bayer[0::2, 1::2] = bgra[0::2, 1::2, 1] # G
-        
-        # Row 1, 3, ... (Odd rows)
-        bayer[1::2, 0::2] = bgra[1::2, 0::2, 1] # G
-        bayer[1::2, 1::2] = bgra[1::2, 1::2, 0] # B
-        
-        # 转为 uint16 (左移 8 位, 模拟 16-bit 传感器)
-        return bayer.astype(np.uint16) << 8
+        # CARLA UE5 raw_data 可能含 header，截取精确像素字节数（与其余转换函数的做法一致）
+        array = np.frombuffer(image.raw_data, dtype=np.uint16)
+        expected = image.height * image.width
+        bayer = array[-expected:].reshape((image.height, image.width))
+        return bayer.copy()
 
     @staticmethod
     def convert_to_grayscale(image: carla.Image) -> np.ndarray:
@@ -392,9 +398,13 @@ class CameraManager:
 
     def get_intrinsics(self, cam_id: str) -> np.ndarray:
         """
-        获取相机内参矩阵
+        获取相机内参矩阵 (等距投影/equidistant，与 sensor.camera.rgb_fisheye +
+        camera_model=equidistant 采集时用的投影模型一致，对应 CARLA
+        Unreal/.../Util/CameraModelUtil.cpp::ComputeDistance 的 Equidistant 分支：
+        F = (Height/2) / (FOV_vertical/2)，即 r = f*theta。
+        各向同性，fx=fy=focal。
         Returns:
-            K: (3, 3) 内参矩阵
+            K: (3, 3) 内参矩阵 (fx=fy=等距焦距, cx, cy 为主点)
         """
         # 查找配置
         cam_config = None
@@ -402,15 +412,15 @@ class CameraManager:
             if cfg['id'] == cam_id:
                 cam_config = cfg
                 break
-        
+
         if cam_config is None:
              raise ValueError(f"Unknown camera id: {cam_id}")
 
         width = CAMERA_SENSOR_CONFIG['image_size_x']
         height = CAMERA_SENSOR_CONFIG['image_size_y']
-        fov = cam_config['fov']
-        
-        focal = width / (2.0 * np.tan(np.radians(fov) / 2.0))
+        fov_vertical = cam_config['fov_vertical']
+
+        focal = (height / 2.0) / (np.radians(fov_vertical) / 2.0)
         cx = width / 2.0
         cy = height / 2.0
 

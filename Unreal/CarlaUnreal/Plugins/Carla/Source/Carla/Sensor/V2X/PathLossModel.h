@@ -43,19 +43,19 @@ enum EScenario
 class PathLossModel
 {
 public:
-    PathLossModel(URandomEngine *random_engine, AActor *Owner);
-    void SetScenario(EScenario scenario);
+    PathLossModel(URandomEngine *random_engine, AActor *InOwner);
+    void SetScenario(EScenario InScenario);
     void Simulate(const std::vector<ActorPowerPair> ActorList, UCarlaEpisode *CarlaEpisode, UWorld *World);
     ActorPowerMap GetReceiveActorPowerList();
-    void SetParams(const float TransmitPower,
-                   const float ReceiverSensitivity,
-                   const float Frequency,
-                   const float combined_antenna_gain,
-                   const float path_loss_exponent,
-                   const float reference_distance_fspl,
-                   const float filter_distance,
-                   const bool use_etsi_fading,
-                   const float custom_fading_stddev);
+    void SetParams(const float InTransmitPower,
+                   const float InReceiverSensitivity,
+                   const float InFrequency,
+                   const float InCombinedAntennaGain,
+                   const float InPathLossExponent,
+                   const float InReferenceDistanceFspl,
+                   const float InFilterDistance,
+                   const bool InUseEtsiFading,
+                   const float InCustomFadingStddev);
     float GetTransmitPower() { return TransmitPower; }
     void SetPathLossModel(const EPathLossModel path_loss_model);
 
@@ -115,7 +115,7 @@ protected:
 
     float ComputeLoss(AActor *OtherActor, FVector Source, FVector Destination, double Distance3d, double TxHeight, double RxHeight, double reference_z);
     bool IsVehicle(const FHitResult &HitInfo);
-    bool GetLocationIfVehicle(const FVector CurrentActorLocation, const FHitResult &HitInfo, const double reference_z, FVector &location);
+    bool GetLocationIfVehicle(const FVector InCurrentActorLocation, const FHitResult &HitInfo, const double reference_z, FVector &location);
     bool HitIsSelfOrOther(const FHitResult &HitInfo, AActor *OtherActor);
     float CalculatePathLoss_WINNER(EPathState state, double Distance);
     double CalculateNLOSvLoss(const FVector Source, const FVector Destination, const double TxHeight, const double RxHeight, const double RxDistance3d, std::vector<FVector> &vehicle_obstacles);

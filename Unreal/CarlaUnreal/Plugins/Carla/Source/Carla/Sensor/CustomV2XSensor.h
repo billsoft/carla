@@ -60,7 +60,7 @@ public:
     
     virtual void PrePhysTick(float DeltaSeconds) override;
     virtual void PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime) override;
-    void SetOwner(AActor *Owner) override;
+    void SetOwner(AActor *InOwner) override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
     void Send(const carla::rpc::CustomV2XBytes &data);

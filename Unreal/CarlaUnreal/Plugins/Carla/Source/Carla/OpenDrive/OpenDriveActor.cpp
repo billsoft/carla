@@ -32,16 +32,21 @@ AOpenDriveActor::AOpenDriveActor(const FObjectInitializer &ObjectInitializer)
   PrimaryActorTick.bCanEverTick = false;
 
   // Structure to hold one-time initialization
+  // NOTE: previously used ConstructorHelpers::FObjectFinderOptional<UTexture2D>
+  // here. That API is documented as constructor-only, but on this engine
+  // version it reliably crashes with an access violation (reentrant asset
+  // load inside UClass::InternalCreateDefaultObjectWrapper, triggered while
+  // this actor's CDO is constructed at boot via
+  // UObjectLoadAllCompiledInDefaultProperties). FSoftObjectPath::TryLoad is
+  // the runtime-safe equivalent already used elsewhere in this plugin (see
+  // AShaderBasedSensor::AddPostProcessingMaterial).
   static struct FConstructorStatics
   {
-    // A helper class object we use to find target UTexture2D object in resource
-    // package
-    ConstructorHelpers::FObjectFinderOptional<UTexture2D> TextureObject;
+    TObjectPtr<UTexture2D> TextureObject;
     FName Category;
     FText Name;
     FConstructorStatics()
-    // Use helper class object to find the texture resource path
-      : TextureObject(TEXT("/Carla/Icons/OpenDriveActorIcon")),
+      : TextureObject(Cast<UTexture2D>(FSoftObjectPath(TEXT("/Carla/Icons/OpenDriveActorIcon")).TryLoad())),
         Category(TEXT("OpenDriveActor")),
         Name(NSLOCTEXT("SpriteCategory", "OpenDriveActor", "OpenDriveActor"))
     {}

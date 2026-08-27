@@ -30,13 +30,13 @@ ACustomV2XSensor::ACustomV2XSensor(const FObjectInitializer &ObjectInitializer)
     PathLossModelObj = std::make_unique<PathLossModel>(RandomEngine, this);
 }
 
-void ACustomV2XSensor::SetOwner(AActor *Owner)
+void ACustomV2XSensor::SetOwner(AActor *InOwner)
 {
-    Super::SetOwner(Owner);
+    Super::SetOwner(InOwner);
 
-    if(Owner != nullptr) {
+    if(InOwner != nullptr) {
         UCarlaEpisode* CarlaEpisode = UCarlaStatics::GetCurrentEpisode(GetWorld());
-        FCarlaActor* CarlaActor = CarlaEpisode->FindCarlaActor(Owner);
+        FCarlaActor* CarlaActor = CarlaEpisode->FindCarlaActor(InOwner);
         if (CarlaActor != nullptr) {
             mStationId = static_cast<long>(CarlaActor->GetActorId());
         }

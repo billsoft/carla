@@ -25,117 +25,146 @@
 
 #include <string>
 
+namespace
+{
+  // ConstructorHelpers::FClassFinder is documented as constructor-only, but
+  // on this engine version it reliably crashes with an access violation
+  // (reentrant Blueprint compilation inside UClass::InternalCreateDefaultObjectWrapper,
+  // triggered while the CDO for this actor is being constructed at boot via
+  // UObjectLoadAllCompiledInDefaultProperties). FSoftObjectPath::TryLoad is
+  // the runtime-safe equivalent already used elsewhere in this plugin (see
+  // AShaderBasedSensor::AddPostProcessingMaterial); this helper reproduces
+  // FClassFinder's own path resolution (append ".<ObjectName>_C") on top of it.
+  TSubclassOf<AActor> LoadActorBlueprintClass(const TCHAR* PackagePath)
+  {
+    FString PathName(PackagePath);
+    int32 ObjectNameStart = INDEX_NONE;
+    PathName.FindLastChar(TCHAR('/'), ObjectNameStart);
+    if (ObjectNameStart != INDEX_NONE)
+    {
+      const FString ObjectName = PathName.Mid(ObjectNameStart + 1);
+      PathName += TEXT(".");
+      PathName += ObjectName;
+      PathName += TEXT("_C");
+    }
+    return TSubclassOf<AActor>(Cast<UClass>(FSoftObjectPath(PathName).TryLoad()));
+  }
+}
+
 ATrafficLightManager::ATrafficLightManager()
 {
   PrimaryActorTick.bCanEverTick = false;
   SceneComponent = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
   RootComponent = SceneComponent;
 
-  // Hard coded default traffic light blueprint
-  static ConstructorHelpers::FClassFinder<AActor> TrafficLightRHTFinder(
-      TEXT( "/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_RHT" ) );
-  if (TrafficLightRHTFinder.Succeeded())
+  // NOTE: the default traffic light/sign Blueprint classes used to be loaded
+  // right here via LoadActorBlueprintClass(). Unlike plain asset loads
+  // (materials, textures), loading a Blueprint-generated _C class can
+  // trigger Blueprint *compilation* if it isn't cached yet — and doing that
+  // while this actor's own CDO is being constructed at boot (via
+  // UObjectLoadAllCompiledInDefaultProperties) reliably crashed with an
+  // access violation (reentrant compile inside
+  // UClass::InternalCreateDefaultObjectWrapper), regardless of which loading
+  // API was used (this was true for both ConstructorHelpers::FClassFinder
+  // and FSoftObjectPath::TryLoad). These fields are also UPROPERTY(EditAnywhere),
+  // so a map/blueprint author may deliberately override them — loading is
+  // now deferred to EnsureDefaultModelsLoaded(), called lazily right before
+  // SpawnTrafficLights()/SpawnSignals() actually need them (both BeginPlay
+  // and the CallInEditor entry points funnel through those), which is always
+  // well after boot.
+  TrafficLightGroupMissingId = -2;
+}
+
+void ATrafficLightManager::EnsureDefaultModelsLoaded()
+{
+  if (bDefaultModelsLoaded)
   {
-    TSubclassOf<AActor> Model = TrafficLightRHTFinder.Class;
-    TrafficLightModel_RHT = Model;
+    return;
+  }
+  bDefaultModelsLoaded = true;
+
+  // Hard coded default traffic light blueprint
+  if (!TrafficLightModel_RHT)
+  {
+    if (TSubclassOf<AActor> Model = LoadActorBlueprintClass(
+        TEXT( "/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_RHT" ) ))
+    {
+      TrafficLightModel_RHT = Model;
+    }
   }
 
   // Hard coded default traffic light blueprint
-  static ConstructorHelpers::FClassFinder<AActor> TrafficLightLHTFinder(
-    TEXT( "/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_LHT" ) );
-  if (TrafficLightLHTFinder.Succeeded())
+  if (!TrafficLightModel_LHT)
   {
-    TSubclassOf<AActor> Model = TrafficLightLHTFinder.Class;
-    TrafficLightModel_LHT = Model;
+    if (TSubclassOf<AActor> Model = LoadActorBlueprintClass(
+        TEXT( "/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_LHT" ) ))
+    {
+      TrafficLightModel_LHT = Model;
+    }
   }
   // Default traffic signs models
-  static ConstructorHelpers::FClassFinder<AActor> StopFinder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_Stop01" ) );
-  if (StopFinder.Succeeded())
+  if (TSubclassOf<AActor> StopSignModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_Stop01" ) ))
   {
-    TSubclassOf<AActor> StopSignModel = StopFinder.Class;
     TrafficSignsModels.Add(carla::road::SignalType::StopSign().c_str(), StopSignModel);
     SignComponentModels.Add(carla::road::SignalType::StopSign().c_str(), UStopSignComponent::StaticClass());
   }
-  static ConstructorHelpers::FClassFinder<AActor> YieldFinder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_Yield01" ) );
-  if (YieldFinder.Succeeded())
+  if (TSubclassOf<AActor> YieldSignModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_Yield01" ) ))
   {
-    TSubclassOf<AActor> YieldSignModel = YieldFinder.Class;
     TrafficSignsModels.Add(carla::road::SignalType::YieldSign().c_str(), YieldSignModel);
     SignComponentModels.Add(carla::road::SignalType::YieldSign().c_str(), UYieldSignComponent::StaticClass());
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit30Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit30" ) );
-  if (SpeedLimit30Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit30" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit30Finder.Class;
     SpeedLimitModels.Add("30", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit40Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit40" ) );
-  if (SpeedLimit40Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit40" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit40Finder.Class;
     SpeedLimitModels.Add("40", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit50Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit50" ) );
-  if (SpeedLimit50Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit50" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit50Finder.Class;
     SpeedLimitModels.Add("50", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit60Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit60" ) );
-  if (SpeedLimit60Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit60" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit60Finder.Class;
     SpeedLimitModels.Add("60", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit70Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit70" ) );
-  if (SpeedLimit70Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit70" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit70Finder.Class;
     SpeedLimitModels.Add("70", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit80Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit80" ) );
-  if (SpeedLimit80Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit80" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit80Finder.Class;
     SpeedLimitModels.Add("80", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit90Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit90" ) );
-  if (SpeedLimit90Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit90" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit90Finder.Class;
     SpeedLimitModels.Add("90", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit100Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit100" ) );
-  if (SpeedLimit100Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit100" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit100Finder.Class;
     SpeedLimitModels.Add("100", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit110Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit110" ) );
-  if (SpeedLimit110Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit110" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit110Finder.Class;
     SpeedLimitModels.Add("110", SpeedLimitModel);
   }
-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit120Finder(
-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit120" ) );
-  if (SpeedLimit120Finder.Succeeded())
+  if (TSubclassOf<AActor> SpeedLimitModel = LoadActorBlueprintClass(
+      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit120" ) ))
   {
-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit120Finder.Class;
     SpeedLimitModels.Add("120", SpeedLimitModel);
   }
-  TrafficLightGroupMissingId = -2;
 }
 
 void ATrafficLightManager::RegisterLightComponentFromOpenDRIVE(UTrafficLightComponent * TrafficLightComponent)
@@ -264,6 +293,8 @@ void ATrafficLightManager::GenerateSignalsAndTrafficLights()
 {
   if(!TrafficLightsGenerated)
   {
+    EnsureDefaultModelsLoaded();
+
     if(!TrafficLightModel_RHT || !TrafficLightModel_LHT )
     {
       UE_LOG(LogCarla, Error, TEXT("Missing TrafficLightModel"));
@@ -514,6 +545,8 @@ T * GetClosestTrafficSignActor(const carla::road::Signal &Signal, UWorld* World)
 
 void ATrafficLightManager::SpawnTrafficLights()
 {
+  EnsureDefaultModelsLoaded();
+
   namespace cr = carla::road;
   const auto& Signals = GetMap()->GetSignals();
   std::unordered_set<std::string> SignalsToSpawn;
@@ -640,6 +673,8 @@ void ATrafficLightManager::SpawnTrafficLights()
 
 void ATrafficLightManager::SpawnSignals()
 {
+  EnsureDefaultModelsLoaded();
+
   ACarlaGameModeBase *GM = UCarlaStatics::GetGameMode(GetWorld());
   check(GM);
 

@@ -69,7 +69,8 @@ python test_connection.py
 
 | 文件 | 说明 |
 |------|------|
-| `GUIDE.md` | 本文档 - 完整指南 |
+| `GUIDE.md` | 本文档 - 运行/排障指南 |
+| `CARLA_BUILD_NOTES.md` | 引擎获取、编译流程、踩坑记录 |
 | `CLAUDE.md` | Claude Code 项目配置说明 |
 
 ---
@@ -112,49 +113,13 @@ python test_connection.py
 
 ## 构建指南
 
-### 前置条件
+编译流程、CARLA 仓库和 UE5 引擎 fork 的关系、开发环境搭建、以及具体踩过哪些坑
+（`/wd4723`、V2X 编译错误、`ConstructorHelpers` 崩溃等），完整记录见
+[`CARLA_BUILD_NOTES.md`](./CARLA_BUILD_NOTES.md)，本文档只保留"编译完之后怎么跑起来
+用"这部分，不再重复维护构建细节。
 
-1. **Visual Studio 2026 (v18)** 已安装
-2. **Anaconda** 环境 `carla` 已创建
-3. **Unreal Engine 5.5** 源代码已编译
-
-### 构建步骤
-
-#### 步骤 1: 打开 VS 命令提示符
-
-- 按 Windows 键
-- 搜索 "x64 Native Tools Command Prompt for VS 18"
-- 打开它
-
-#### 步骤 2: 运行构建脚本
-
-```cmd
-cd D:\code\carla
-BUILD_FINAL.bat
-```
-
-此脚本会：
-1. 加载 VS 2026 环境
-2. 激活 `carla` conda 环境
-3. 配置 CMake（包含 /wd4723 修复）
-4. 编译 Editor 插件
-
-#### 步骤 3: 启动服务器
-
-```cmd
-start_carla_server.bat
-```
-
-等待着色器编译完成，然后点击 Play 按钮
-
-#### 步骤 4: 测试连接
-
-```cmd
-conda activate carla
-python test_connection.py
-```
-
-看到 "Connection Successful!" 表示成功！
+编辑器启动可以加 `-CarlaAutoPlay` 命令行参数，省掉每次手动点绿色 Play 按钮
+（等资产/着色器编译完自动开始，详见 `CARLA_BUILD_NOTES.md` 4.9 节）。
 
 ---
 
@@ -552,20 +517,8 @@ def get_post_process_profile(self, map_name: str) -> str:
 
 ## 构建问题
 
-### cl.exe not found
-
-**错误**: `ERROR: cl.exe not found! VS environment setup failed.`
-
-**解决方案**:
-- 确保 VS 2026 安装在: `C:\Program Files\Microsoft Visual Studio\18\Professional`
-
-### divide by zero (C4723)
-
-**错误**: 编译时出现 C4723 错误
-
-**解决方案**:
-- 确保 `BUILD_FINAL.bat` 的 `CXX_FLAGS` 包含 `/wd4723`
-- 检查 `D:\code\UnrealEngine5_carla\Engine\Source\Runtime\Core\Public\Windows\WindowsPlatformCompilerSetup.h` 是否已修复
+编译相关报错（`cl.exe not found`、C4723 divide-by-zero 等）见
+[`CARLA_BUILD_NOTES.md`](./CARLA_BUILD_NOTES.md)，不在本文档重复。
 
 ---
 

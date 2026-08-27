@@ -46,6 +46,13 @@ class FCarlaModule : public IModuleInterface
 	bool HandleSettingsSaved();
 	void LoadChronoDll();
 
+#if WITH_EDITOR
+	/// 仅在命令行带 -CarlaAutoPlay 参数时生效：注册一个 ticker，等资产/着色器
+	/// 编译全部完成后自动触发一次 Play In Editor，省得每次重启编辑器都要手动
+	/// 等加载完再去点绿色 Play 按钮。不影响正常手动使用编辑器的行为。
+	void RegisterAutoPlayWatcher();
+#endif // WITH_EDITOR
+
 public:
 
 	/** IModuleInterface implementation */

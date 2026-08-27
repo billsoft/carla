@@ -367,6 +367,8 @@ def main():
     parser.add_argument('--scene', default='scene', help='场景名称前缀')
     parser.add_argument('--num-vehicles', type=int, default=30, help='NPC车辆数量')
     parser.add_argument('--num-walkers', type=int, default=10, help='NPC行人数量')
+    parser.add_argument('--raw-bit-depth', type=int, default=12, choices=[8, 10, 12, 14, 16],
+                         help='DNG 保存时模拟的传感器 ADC 位深 (默认: 12-bit)')
     parser.add_argument('--clear-output', action='store_true', default=True, help='生成前清空输出目录 (默认: True)')
     args = parser.parse_args()
 
@@ -426,7 +428,7 @@ def main():
             resolution=RESOLUTION
         )
         visibility_filter = VisibilityFilterSimple() # ⭐ 新增
-        data_saver = OccNetDataSaver(args.output, args.scene)
+        data_saver = OccNetDataSaver(args.output, args.scene, raw_bit_depth=args.raw_bit_depth)
         print(f"  ✓ 体素生成器和数据保存器")
 
         # 6. 保存相机标定

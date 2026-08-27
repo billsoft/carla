@@ -21,11 +21,19 @@
 AWeather::AWeather(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
-    PrecipitationPostProcessMaterial = ConstructorHelpers::FObjectFinder<UMaterial>(
-        TEXT("Material'/Game/Carla/Static/GenericMaterials/FX/ScreenDust/M_screenDrops.M_screenDrops'")).Object;
+    // NOTE: previously used ConstructorHelpers::FObjectFinder here. That API
+    // is documented as constructor-only, but on this engine version it
+    // reliably crashes with an access violation (reentrant asset load inside
+    // UClass::InternalCreateDefaultObjectWrapper, triggered while this
+    // actor's CDO is constructed at boot via
+    // UObjectLoadAllCompiledInDefaultProperties). FSoftObjectPath::TryLoad is
+    // the runtime-safe equivalent already used elsewhere in this plugin (see
+    // AShaderBasedSensor::AddPostProcessingMaterial).
+    PrecipitationPostProcessMaterial = Cast<UMaterial>(FSoftObjectPath(
+        TEXT("Material'/Game/Carla/Static/GenericMaterials/FX/ScreenDust/M_screenDrops.M_screenDrops'")).TryLoad());
 
-    DustStormPostProcessMaterial = ConstructorHelpers::FObjectFinder<UMaterial>(
-        TEXT("Material'/Game/Carla/Static/GenericMaterials/FX/ScreenDust/M_screenDust_wind.M_screenDust_wind'")).Object;
+    DustStormPostProcessMaterial = Cast<UMaterial>(FSoftObjectPath(
+        TEXT("Material'/Game/Carla/Static/GenericMaterials/FX/ScreenDust/M_screenDust_wind.M_screenDust_wind'")).TryLoad());
 
     PrimaryActorTick.bCanEverTick = false;
     RootComponent = ObjectInitializer.CreateDefaultSubobject<USceneComponent>(this, TEXT("RootComponent"));

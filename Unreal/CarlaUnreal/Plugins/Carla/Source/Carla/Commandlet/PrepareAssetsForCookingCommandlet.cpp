@@ -58,34 +58,43 @@ UPrepareAssetsForCookingCommandlet::UPrepareAssetsForCookingCommandlet()
   IsServer = false;
   LogToConsole = true;
 
-#if WITH_EDITORONLY_DATA
-  // Get Carla Default materials, these will be used for maps that need to use
-  // Carla materials
-  static ConstructorHelpers::FObjectFinder<UMaterialInstanceConstant> MarkingNodeYellowMaterial(TEXT(
-    "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Roads/MI_Road_Asphalt_A.MI_Road_Asphalt_A'"));
-  static ConstructorHelpers::FObjectFinder<UMaterialInstanceConstant> MarkingNodeWhiteMaterial(TEXT(
-    "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Roads/MI_Road_Asphalt_B_LaneMarkingWhite.MI_Road_Asphalt_B_LaneMarkingWhite'"));
-  static ConstructorHelpers::FObjectFinder<UMaterialInstanceConstant> RoadNode(TEXT(
-      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Roads/MI_Road_Rural_A.MI_Road_Rural_A'"));
-  static ConstructorHelpers::FObjectFinder<UMaterialInstanceConstant> TerrainNodeMaterial(TEXT(
-      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Ground/MI_LargeLandscape_Interurban.MI_LargeLandscape_Interurban'"));
-  static ConstructorHelpers::FObjectFinder<UMaterialInstanceConstant> CurbNodeMaterial(TEXT(
-      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Gutters_Curbs/largeM_curb/MI_largeM_curb01.MI_largeM_curb01'"));
-  static ConstructorHelpers::FObjectFinder<UMaterialInstanceConstant> GutterNodeMaterial(TEXT(
-      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Gutters_Curbs/largeM_gutter/MI_largeM_gutter01.MI_largeM_gutter01'"));
-  static ConstructorHelpers::FObjectFinder<UMaterialInstanceConstant> SidewalkNode(TEXT(
-      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Sidewalk/MI_Sidewalk_Apartment.MI_Sidewalk_Apartment'"));
-
-  GutterNodeMaterialInstance = (UMaterialInstance *) GutterNodeMaterial.Object;
-  CurbNodeMaterialInstance = (UMaterialInstance *) CurbNodeMaterial.Object;
-  TerrainNodeMaterialInstance = (UMaterialInstance *) TerrainNodeMaterial.Object;
-  MarkingNodeYellow = (UMaterialInstance *)MarkingNodeYellowMaterial.Object;
-  MarkingNodeWhite = (UMaterialInstance *)MarkingNodeWhiteMaterial.Object;
-  RoadNodeMaterial = (UMaterialInstance *) RoadNode.Object;
-  SidewalkNodeMaterialInstance = (UMaterialInstance *) SidewalkNode.Object;
-#endif
+  // NOTE: the default Carla materials (MarkingNodeYellow, RoadNodeMaterial,
+  // etc.) used to be loaded here via ConstructorHelpers::FObjectFinder. That
+  // API is documented as constructor-only, but on this engine version
+  // loading assets during CDO construction (which happens unconditionally at
+  // boot via UObjectLoadAllCompiledInDefaultProperties, regardless of
+  // whether the commandlet is ever run) is unreliable — it has caused both
+  // hard crashes (reentrant Blueprint compilation) and hangs (loading a
+  // material whose dependency chain pulls in a not-yet-mounted plugin
+  // content package) elsewhere in this plugin. These materials are only
+  // actually needed while the commandlet is running (see
+  // PrepareMapsForCooking/PreparePropsForCooking below), so loading is
+  // deferred to LoadCarlaDefaultMaterials(), called once at the top of
+  // Main() — well after boot, when the asset/plugin system is fully ready.
 }
 #if WITH_EDITORONLY_DATA
+
+void UPrepareAssetsForCookingCommandlet::LoadCarlaDefaultMaterials()
+{
+  // Get Carla Default materials, these will be used for maps that need to
+  // use Carla materials. FSoftObjectPath::TryLoad is the runtime-safe
+  // loader (see AShaderBasedSensor::AddPostProcessingMaterial); it accepts
+  // the same class-prefixed export-text path strings FObjectFinder did.
+  MarkingNodeYellow = Cast<UMaterialInstance>(FSoftObjectPath(TEXT(
+    "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Roads/MI_Road_Asphalt_A.MI_Road_Asphalt_A'")).TryLoad());
+  MarkingNodeWhite = Cast<UMaterialInstance>(FSoftObjectPath(TEXT(
+    "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Roads/MI_Road_Asphalt_B_LaneMarkingWhite.MI_Road_Asphalt_B_LaneMarkingWhite'")).TryLoad());
+  RoadNodeMaterial = Cast<UMaterialInstance>(FSoftObjectPath(TEXT(
+      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Roads/MI_Road_Rural_A.MI_Road_Rural_A'")).TryLoad());
+  TerrainNodeMaterialInstance = Cast<UMaterialInstance>(FSoftObjectPath(TEXT(
+      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Ground/MI_LargeLandscape_Interurban.MI_LargeLandscape_Interurban'")).TryLoad());
+  CurbNodeMaterialInstance = Cast<UMaterialInstance>(FSoftObjectPath(TEXT(
+      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Gutters_Curbs/largeM_curb/MI_largeM_curb01.MI_largeM_curb01'")).TryLoad());
+  GutterNodeMaterialInstance = Cast<UMaterialInstance>(FSoftObjectPath(TEXT(
+      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Gutters_Curbs/largeM_gutter/MI_largeM_gutter01.MI_largeM_gutter01'")).TryLoad());
+  SidewalkNodeMaterialInstance = Cast<UMaterialInstance>(FSoftObjectPath(TEXT(
+      "MaterialInstanceConstant'/Game/Carla/Static/GenericMaterials/Sidewalk/MI_Sidewalk_Apartment.MI_Sidewalk_Apartment'")).TryLoad());
+}
 
 FPackageParams UPrepareAssetsForCookingCommandlet::ParseParams(const FString &InParams) const
 {
@@ -729,6 +738,8 @@ void UPrepareAssetsForCookingCommandlet::PreparePropsForCooking(
 
 int32 UPrepareAssetsForCookingCommandlet::Main(const FString &Params)
 {
+  LoadCarlaDefaultMaterials();
+
   FPackageParams PackageParams = ParseParams(Params);
 
   // Get Props and Maps Path

@@ -7,6 +7,7 @@
 #include "Carla/Sensor/SceneCaptureCamera.h"
 #include "Carla.h"
 #include "Carla/Game/CarlaEngine.h"
+#include "Carla/Sensor/ImageUtil.h"
 
 // ========== 新增头文件 ==========
 #include <carla/sensor/s11n/ImageSerializer.h>  // HDR 序列化支持
@@ -94,59 +95,6 @@ void ASceneCaptureCamera::SendGBufferTextures(FGBufferRequest& GBuffer)
 }
 #endif
 
-// ========== 新增: RGB → Bayer RGGB 转换 ==========
-/**
- * 将 RGB 图像转换为单通道 Bayer RGGB 模式
- *
- * Bayer Pattern (RGGB):
- *   R G R G ...
- *   G B G B ...
- *   R G R G ...
- *   G B G B ...
- *
- * @param Pixels RGB 像素数组 (FLinearColor)
- * @param Width 图像宽度
- * @param Height 图像高度
- * @param OutBayerData 输出 Bayer 数据 (uint16, 单通道)
- */
-static void ConvertRGBToBayerRGGB(
-  const TArrayView<const FLinearColor>& Pixels,
-  int32 Width,
-  int32 Height,
-  TArray<uint16>& OutBayerData)
-{
-  OutBayerData.SetNumUninitialized(Width * Height);
-
-  for (int32 y = 0; y < Height; ++y)
-  {
-    for (int32 x = 0; x < Width; ++x)
-    {
-      const int32 idx = y * Width + x;
-      const FLinearColor& Pixel = Pixels[idx];
-
-      uint16 BayerValue = 0;
-
-      // RGGB 模式判断
-      if (y % 2 == 0)  // 偶数行
-      {
-        if (x % 2 == 0)
-          BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.R, 0.0f, 1.0f) * 65535.0f);  // R
-        else
-          BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f);  // G
-      }
-      else  // 奇数行
-      {
-        if (x % 2 == 0)
-          BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f);  // G
-        else
-          BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.B, 0.0f, 1.0f) * 65535.0f);  // B
-      }
-
-      OutBayerData[idx] = BayerValue;
-    }
-  }
-}
-
 void ASceneCaptureCamera::SendHDRDataToClient(
   const TArrayView<const FLinearColor>& Pixels,
   uint64 FrameIndex)
@@ -164,7 +112,7 @@ void ASceneCaptureCamera::SendHDRDataToClient(
   {
     // 模式 3: 转换为单通道 Bayer RGGB (0-65535)
     TArray<uint16> BayerData;
-    ConvertRGBToBayerRGGB(Pixels, Width, Height, BayerData);
+    ImageUtil::ConvertRGBToBayerRGGB(Pixels, Width, Height, BayerData);
 
     // 发送数据
     auto DataStream = GetDataStream(*this);

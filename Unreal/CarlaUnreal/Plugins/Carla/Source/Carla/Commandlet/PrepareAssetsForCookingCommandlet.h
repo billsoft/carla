@@ -73,6 +73,12 @@ public:
   UPrepareAssetsForCookingCommandlet();
 #if WITH_EDITORONLY_DATA
 
+  /// Loads the default Carla materials (MarkingNodeYellow, RoadNodeMaterial,
+  /// etc.) used by PrepareMapsForCooking/PreparePropsForCooking. Deferred
+  /// out of the constructor (see UPrepareAssetsForCookingCommandlet::
+  /// UPrepareAssetsForCookingCommandlet) — call this once at the top of Main().
+  void LoadCarlaDefaultMaterials();
+
   /// Parses the command line parameters provided through @a InParams
   FPackageParams ParseParams(const FString &InParams) const;
 

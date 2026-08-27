@@ -63,6 +63,18 @@ public:
     bEnablePostProcessingEffects = Enable;
   }
 
+  UFUNCTION(BlueprintCallable)
+  void Enable16BitFormat(bool Enable = true)
+  {
+    bEnable16BitFormat = Enable;
+  }
+
+  UFUNCTION(BlueprintCallable, BlueprintPure)
+  bool Is16BitFormatEnabled() const
+  {
+    return bEnable16BitFormat;
+  }
+
   UFUNCTION(BlueprintCallable, BlueprintPure)
   ECameraModel GetCameraModel() const;
 

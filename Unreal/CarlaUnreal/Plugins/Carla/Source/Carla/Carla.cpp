@@ -9,6 +9,14 @@
 #include "Developer/Settings/Public/ISettingsContainer.h"
 #include "Interfaces/IPluginManager.h"
 #include "ShaderCore.h"
+#if WITH_EDITOR
+#include "Editor/EditorEngine.h"
+#include "AssetCompilingManager.h"
+#include "ShaderCompiler.h"
+#include "Containers/Ticker.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#endif // WITH_EDITOR
 #include <util/ue-header-guard-end.h>
 
 #define LOCTEXT_NAMESPACE "FCarlaModule"
@@ -21,7 +29,59 @@ void FCarlaModule::StartupModule()
 	AddShaderSearchPaths();
 	RegisterSettings();
 	LoadChronoDll();
+#if WITH_EDITOR
+	RegisterAutoPlayWatcher();
+#endif // WITH_EDITOR
 }
+
+#if WITH_EDITOR
+
+extern UNREALED_API UEditorEngine* GEditor;
+
+void FCarlaModule::RegisterAutoPlayWatcher()
+{
+	if (!FParse::Param(FCommandLine::Get(), TEXT("CarlaAutoPlay")))
+		return;
+
+	UE_LOG(LogCarla, Log, TEXT("CarlaAutoPlay: enabled, waiting for asset/shader compilation to finish before auto-starting Play"));
+
+	const double StartTime = FPlatformTime::Seconds();
+	// Safety net so a stuck/unexpected editor state doesn't tick forever.
+	constexpr double TimeoutSeconds = 30.0 * 60.0;
+
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([StartTime](float) -> bool
+	{
+		if (GEditor == nullptr)
+			return true;
+
+		// Someone already started (or queued) a session manually; nothing left to do.
+		if (GEditor->IsPlayingSessionInEditor() || GEditor->GetPlaySessionRequest().IsSet())
+			return false;
+
+		if (FPlatformTime::Seconds() - StartTime > TimeoutSeconds)
+		{
+			UE_LOG(LogCarla, Warning, TEXT("CarlaAutoPlay: gave up after %.0f seconds without meeting the auto-play conditions"), TimeoutSeconds);
+			return false;
+		}
+
+		if (GEditor->GetEditorWorldContext().World() == nullptr)
+			return true;
+
+		if (FAssetCompilingManager::Get().GetNumRemainingAssets() > 0)
+			return true;
+
+		if (GShaderCompilingManager != nullptr && GShaderCompilingManager->GetNumRemainingJobs() > 0)
+			return true;
+
+		UE_LOG(LogCarla, Log, TEXT("CarlaAutoPlay: asset/shader compilation finished, auto-starting Play"));
+		GEditor->RequestPlaySession(FRequestPlaySessionParams());
+		return false;
+	}),
+	1.0f);
+}
+
+#endif // WITH_EDITOR
 
 void FCarlaModule::AddShaderSearchPaths()
 {

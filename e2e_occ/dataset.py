@@ -35,6 +35,20 @@ class OccupancyDataset(Dataset):
         # 用于：①相机内参（恒定）②当逐帧绝对外参不可用时的退化备用
         self._cached_intrinsics, self._cached_extrinsics = self._load_static_calibration()
 
+        # DNG 保存时的位深（occnetv3_data_generator --raw-bit-depth，默认 12）。
+        # 从 calibration/intrinsics.json 的顶层 'raw_bit_depth' 字段读取；旧数据集
+        # （采集时代码还没有这个字段）没有就退化为 12，和当时唯一的实际行为一致。
+        self.raw_bit_depth = self._load_raw_bit_depth()
+
+    def _load_raw_bit_depth(self):
+        int_path = os.path.join(self.data_root, 'calibration', 'intrinsics.json')
+        if os.path.exists(int_path):
+            with open(int_path, 'r') as f:
+                data = json.load(f)
+            if 'raw_bit_depth' in data:
+                return int(data['raw_bit_depth'])
+        return 12
+
     # ------------------------------------------------------------------
     # 样本列表加载
     # ------------------------------------------------------------------
@@ -181,7 +195,7 @@ class OccupancyDataset(Dataset):
         try:
             with rawpy.imread(dng_path) as raw:
                 img = raw.raw_image_visible.astype(np.float32)
-                img = img / 4095.0  # 12-bit normalize to [0, 1]
+                img = img / float((1 << self.raw_bit_depth) - 1)  # 归一化到 [0, 1]，位深见 self.raw_bit_depth
                 img = img[np.newaxis, :, :]  # [1, H, W]
                 return torch.from_numpy(img)
         except Exception as e:

@@ -30,6 +30,32 @@ class SineCosinePositionEncoding3D(nn.Module):
             pe = F.pad(pe, (0, self.dim - pe.shape[-1]))
         return pe.view(-1, self.dim)
 
+def rescale_focal_to_feature_map(intrinsics, H, W):
+    """
+    intrinsics: [B, N, 3, 3]，等距投影相机的内参（各向同性，fx=fy=f），按"原始图像分辨率"标定
+                (对应 occnetv3_data_generator camera_manager.py::get_intrinsics 的等距分支：
+                f = (height/2) / (vertical_fov_rad/2)，与 CARLA CameraModelUtil::ComputeDistance
+                的 Equidistant 分支一致)
+    H, W: 本次调用对应的（可能降采样的）特征图高宽
+
+    等距/针孔都需要这一步：intrinsics 是按原图分辨率标定的，但射线编码 / 可变形注意力的
+    参考点投影都在下采样后的特征图分辨率上做逐像素运算，直接用原图焦距会让像素偏移量
+    (特征图尺度，量级几十) 除以原图焦距 (原图尺度，量级几百上千)，把入射角压缩到几乎全部
+    指向正前方。这里用 intrinsics 自带的主点 (cx_orig, cy_orig) 和实际的 (H, W) 推出降采样
+    比例，把焦距换算到特征图像素单位。
+
+    返回 f: [B, N]（无额外的尾随单位维度，调用方按自己的广播需求 unsqueeze）。
+    """
+    cx_orig = intrinsics[..., 0, 2]  # [B, N]
+    cy_orig = intrinsics[..., 1, 2]  # [B, N]
+    scale_x = (W / 2.0) / cx_orig.clamp_min(1e-6)
+    scale_y = (H / 2.0) / cy_orig.clamp_min(1e-6)
+    # 等距投影各向同性，scale_x 理论上等于 scale_y；取平均以稳健应对 H/W 取整带来的误差
+    scale = (scale_x + scale_y) * 0.5
+    f = intrinsics[..., 0, 0] * scale  # [B, N]
+    return f
+
+
 class RayDirectionEncoding(nn.Module):
     """
     射线方向编码 (Restored)
@@ -70,58 +96,49 @@ class RayDirectionEncoding(nn.Module):
 
     def get_rays_from_params(self, intrinsics, extrinsics, H, W):
         """
-        intrinsics: [B, N, 3, 3]
+        intrinsics: [B, N, 3, 3]，焦距/主点是相对"原始图像分辨率"标定的（等距投影，fx=fy=f）
         extrinsics: [B, N, 4, 4]
-        
-        Updated to use equidistant projection model: theta = r / f
-        to match d:/code/carla/occ_network/models/position_encoding.py
+        H, W: 本次调用对应的特征图高宽（可能是原始图像的降采样版本）
+
+        等距投影（equidistant）反投影模型：theta = r/f，phi = atan2(dy, dx)，
+        与 CARLA sensor.camera.rgb_fisheye（camera_model=equidistant）采集时用的投影模型
+        完全一致（Unreal/.../Util/CameraModelUtil.cpp 的 ComputeDistance/ComputeAngle
+        Equidistant 分支：F=(Height/2)/(FOV/2), theta=Distance），焦距换算见
+        rescale_focal_to_feature_map。
         """
-        B, N, _, _ = intrinsics.shape
         device = intrinsics.device
-        
-        # 1. Pixel Coordinates
+
+        # 1. 特征图像素坐标（以主点为原点）
         y, x = torch.meshgrid(
             torch.linspace(0, H-1, H, device=device),
             torch.linspace(0, W-1, W, device=device),
             indexing='ij'
         )
-        # Shift to center
         cx = W / 2.0
         cy = H / 2.0
         dx = x - cx
         dy = y - cy
-        
-        # 2. Radius in image plane
-        r = torch.sqrt(dx**2 + dy**2)
-        phi = torch.atan2(dy, dx)
-        
-        # 3. Equidistant Projection: theta = r / f
-        # We need focal length f. Intrinsics[0,0] is fx.
-        # Assuming fx approx fy approx f
-        # [B, N, 1, 1]
-        f = intrinsics[..., 0, 0].unsqueeze(-1).unsqueeze(-1) 
-        
-        theta = r.unsqueeze(0).unsqueeze(0) / f
-        
-        # 4. Spherical to Cartesian (Camera Frame)
-        # Z is forward, X right, Y down
-        # sin(theta) is the radial component
+
+        # 2. 焦距换算到特征图像素单位（原图→特征图，见函数说明）
+        f = rescale_focal_to_feature_map(intrinsics, H, W).unsqueeze(-1).unsqueeze(-1)  # [B, N, 1, 1]
+
+        # 3. 等距投影反投影：theta = r/f
+        r = torch.sqrt(dx ** 2 + dy ** 2).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        phi = torch.atan2(dy, dx).unsqueeze(0).unsqueeze(0)
+
+        theta = r / f  # [B, N, H, W]
+
         sin_theta = torch.sin(theta)
         cam_z = torch.cos(theta)
-        cam_x = sin_theta * torch.cos(phi.unsqueeze(0).unsqueeze(0))
-        cam_y = sin_theta * torch.sin(phi.unsqueeze(0).unsqueeze(0))
-        
-        cam_dirs = torch.stack([cam_x, cam_y, cam_z], dim=-1) # [B, N, H, W, 3]
-        
-        # 5. Camera to World
-        # cam_dirs is [B, N, H, W, 3]
-        # R is [B, N, 3, 3]
+        cam_x = sin_theta * torch.cos(phi)
+        cam_y = sin_theta * torch.sin(phi)
+
+        cam_dirs = torch.stack([cam_x, cam_y, cam_z], dim=-1)  # [B, N, H, W, 3]
+
+        # 4. Camera to World
         R = extrinsics[..., :3, :3]
-        
-        # Rotate: (R @ dir^T)^T = dir @ R^T
-        # [B, N, H, W, 3] @ [B, N, 3, 3]^T
         world_dirs = torch.einsum('bnij,bnhwj->bnhwi', R, cam_dirs)
-        
+
         return world_dirs
 
     def forward(self, x, intrinsics=None, extrinsics=None):

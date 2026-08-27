@@ -55,6 +55,21 @@ namespace ImageUtil
 
 
 
+  // Converts an FLinearColor image into a single-channel Bayer RGGB mosaic
+  // (uint16 per pixel, full 0-65535 range):
+  //   R G R G ...
+  //   G B G B ...
+  // Shared by Bayer RAW-capable camera sensors (SceneCaptureCamera,
+  // SceneCaptureCamera_WideAngleLens).
+  void ConvertRGBToBayerRGGB(
+    TArrayView<const FLinearColor> Pixels,
+    int32 Width,
+    int32 Height,
+    TArray<uint16>& OutBayerData
+  );
+
+
+
   // Reads pixels in the specified format from a region of memory
   // into an FColor array.
   bool DecodePixelsByFormat(

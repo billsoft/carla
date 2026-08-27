@@ -27,6 +27,10 @@ public:
 
   ASceneCaptureCamera_WideAngleLens(const FObjectInitializer& ObjectInitializer);
 
+  /// 像素格式（"uint8"/"uint16"/"float32"/"bayer_rggb"），和 ASceneCaptureCamera::RawType 语义一致
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera Settings")
+  FString RawType = TEXT("uint8");
+
 protected:
 
   void BeginPlay() override;
@@ -35,6 +39,14 @@ protected:
 
   virtual void OnFirstClientConnected() override;
   virtual void OnLastClientDisconnected() override;
+
+  /// HDR（RawType != "uint8"）数据发送函数，逻辑与 ASceneCaptureCamera::SendHDRDataToClient 一致。
+  /// Size 是读回回调报告的实际纹理尺寸（不是 GetImageWidth()/GetImageHeight()），
+  /// 避免两者不一致时越界读取 Pixels。
+  void SendHDRDataToClient(
+    const TArrayView<const FLinearColor>& Pixels,
+    FIntPoint Size,
+    uint64 FrameIndex);
 
 private:
 };
