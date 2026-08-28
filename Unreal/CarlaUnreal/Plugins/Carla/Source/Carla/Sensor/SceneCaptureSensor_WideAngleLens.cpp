@@ -680,7 +680,44 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
     const bool bInForceLinearGamma = !bEnablePostProcessingEffects;
 
     const auto Format = bEnable16BitFormat ? PF_FloatRGBA : PF_B8G8R8A8;
-    const auto Side = std::max(GetImageWidth(), GetImageHeight());
+
+    // Cube faces are captured at a fixed "Side" resolution and then resampled
+    // into the final image by WideAngleLens.usf. A cube face covers ~90° of
+    // view natively, so a camera configured with a narrower FOV than that is
+    // effectively cropping-and-magnifying a small slice of a fixed-resolution
+    // face — the narrower the FOV, the softer the output, independent of
+    // scene detail or render quality. Confirmed empirically (2026-08-28,
+    // matched-FOV pinhole-vs-fisheye A/B): a 37.5°-vertical fisheye camera
+    // scored ~217 vs. ~1399 (Laplacian variance, a sharpness proxy) for an
+    // otherwise-identical pinhole camera at the same angular extent — this
+    // is why the two narrowest cameras in the 8-camera rig (front_main 37.5°,
+    // front_narrow 26.25°, see occnetv3_data_generator/config/camera_config.py)
+    // come out visibly blurrier than the wide ones (front_wide/rear 90°) even
+    // though all 8 share the same 1280x960 output resolution.
+    //
+    // 2026-08-28: attempted an FOV-scaled Side (narrower lens -> proportionally
+    // larger cube face) to fix this. Under the full 8-camera production rig,
+    // cap=2560 hard-crashed on a freshly relaunched editor before a single
+    // frame was captured: CreateDescriptorHeap(E_INVALIDARG) while rendering
+    // SceneCaptureCamera_WideAngleLens6, WS observed 44-46 GB (4090 has 24 GB
+    // VRAM). Tried lowering the cap to 1536 next, but that retest is NOT
+    // trustworthy: the rebuild between the two attempts silently no-op'd
+    // (cmd.exe invoked through the Bash-tool-driven BUILD_FINAL.bat printed a
+    // banner and returned in <1s without touching CMakeCache.txt or spawning
+    // cl.exe/ninja — confirmed reproducible 3x), so the "cap=1536" run almost
+    // certainly re-tested the same already-crashed 2560 binary and just
+    // happened to fail as a 60s world.tick() timeout instead of a hard crash
+    // (that run was also under a CPU-pinning background process, a second
+    // confound). No cap between BaseSide and 2560 has actually been verified.
+    // Reverted to the original fixed Side (no FOV scaling) below — verified
+    // stable with a real rebuild (PowerShell + `cmake --build Build --target
+    // carla-unreal-editor`, DLL timestamp delta confirmed, not exit code) and
+    // a full 10-frame / 8-camera production collection completing cleanly.
+    // If revisiting the FOV-scaling idea: (1) verify every rebuild by DLL
+    // timestamp delta, not exit code — BUILD_FINAL.bat run through the Bash
+    // tool's cmd.exe is not reliable here; (2) retest a modest cap (e.g.
+    // ~1536) in isolation before assuming 2560's failure mode generalizes.
+    const int32 Side = static_cast<int32>(std::max(GetImageWidth(), GetImageHeight()));
 
     CaptureRenderTarget->InitCustomFormat(
         GetImageWidth(),

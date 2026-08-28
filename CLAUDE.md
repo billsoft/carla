@@ -36,7 +36,12 @@ BUILD_FINAL.bat
 - `/wd4723` 编译选项，抑制 UE5 ChaosVehicles 代码里的 "potential divide by 0" 报错（否则编译失败）
 - 编译目标固定为 `carla-unreal-editor`
 
-构建产物验证：检查 `Unreal\CarlaUnreal\Plugins\Carla\Binaries\Win64\*.dll` 是否存在。
+构建产物验证：**必须对比重编译前后目标 DLL（如 `UnrealEditor-Carla.dll`）的
+`LastWriteTime`，不要只看退出码 0**——`BUILD_FINAL.bat` 通过 Claude Code 的 Bash
+工具（Git Bash/`cmd.exe`）调用时，已确认会静默空跑（打印一行 `cmd.exe` 交互式
+banner 就退出，`CMakeCache.txt` 不变、没有任何 `cl.exe`/`ninja` 进程启动，退出码
+却是 0），复现 3 次，具体分析和验证有效的 PowerShell 替代调用方式见
+[`CARLA_BUILD_NOTES.md` §4.13](./CARLA_BUILD_NOTES.md#413-buildfinalbat-通过-claude-code-的-bash-工具调用会静默空跑)。
 
 ### 通用命令（Linux，以及 Windows 上手动排障时使用）
 
@@ -63,6 +68,17 @@ start_carla_server.bat
 ```
 
 编辑器打开后必须点击绿色 Play 按钮场景才会开始 tick，Python 客户端连接（port 2000）才不会超时；命令行加 `-CarlaAutoPlay` 可以让编辑器在资产/着色器编译完成后自动开始 Play，不需要手动点（`Carla.cpp::FCarlaModule::RegisterAutoPlayWatcher`，详见 `CARLA_BUILD_NOTES.md` 4.9 节）。常见问题（光照过暗、Traffic Manager port 8000 绑定冲突、`time-out while waiting for the simulator` 等）及修复方式见 `GUIDE.md` 的"问题排查"章节。
+
+**⚠️ `-quality-level=Low` 只适合快速冒烟测试，不要用它采集/对比任何要评估画质的数据**：
+同位置同相机对照实测确认，Low 档位下纹理明显糊成一片发灰发糊的"水墨画"质感（尤其是
+带精细网格/文字的贴图，如脚手架、广告牌），Epic 档位下同一相机同一帧清晰锐利——这是
+纹理流送/mip 精度随 Scalability 档位变化的正常行为，跟等距鱼眼相机、Bayer RAW 管线
+完全无关（同一现象在官方 `sensor.camera.rgb` 针孔相机上一模一样地出现，见
+`CARLA_BUILD_NOTES.md` §4.14）。正式无头生产启动脚本 `start_carla_server_headless.bat`
+本身已经用的是 `-quality-level=Epic`，`main_collection.py`/`start_carla_server.bat` 都
+不引用 `quality-level`——只有在手动直接起 `UnrealEditor.exe`/`CarlaUE5.exe` 做调试
+（比如这次崩溃排查）时才可能被人为带上 `Low`。**任何用于评估图像清晰度/画质、或作为
+"最终验证"用途的采集，启动前务必确认没有带 `-quality-level=Low`**。
 
 ---
 

@@ -353,6 +353,168 @@ bug 存在于加这次改动之前，只是原来没人会去读 `XFocalLength`�
 取值后比较哨兵的方式判断，不能用 `Contains()`——这是这次 4.10 新加功能自己引入的
 回归，不是本来就有的坑，加新的可选属性覆盖开关时要按这个模式检查一遍。
 
+### 4.12 等距鱼眼相机固定分辨率 cubemap 中间层：窄 FOV 相机天生模糊
+
+2026-08-28 用户反馈 8 路相机图片（无论缩略图还是查看器里点开的原图）清晰度/质感
+远不如 UE 编辑器里肉眼看到的效果，怀疑是渲染质量或采集流水线的问题。排查过程见
+`occnetv3_data_generator/README.md`"物理镜头仿真层"一节，这里只记录 C++ 侧的根因
+和修复。
+
+**排除过程**（每一步都用对照实验验证，不是猜测）：连续 30 tick 固定机位测 TSR/Lumen
+收敛——第 1 帧就已经很锐利，不是时域收敛问题；空场景 vs 20 车流场景对比——纹理流送/
+Nanite 负载几乎不影响清晰度；真实驾驶 vs 冻结物理对比——不是运动模糊；`post_process_
+profile`（`Town10HD_Opt.json`，带 `depthOfFieldFocalDistance=250` 即聚焦 2.5m 的
+强景深）实测在没重编译前根本没注册进当前运行的二进制，说明这次的模糊和它无关。
+
+**真正根因**：等距鱼眼相机（`ASceneCaptureSensor_WideAngleLens`）内部渲染 6 张
+`Side x Side` 的 cubemap 面（`SceneCaptureSensor_WideAngleLens.cpp::BeginPlay()`
+里 `Side = std::max(GetImageWidth(), GetImageHeight())`，固定等于输出分辨率，
+和相机 FOV 无关），再用 `WideAngleLens.usf` 的 `SampleCubemap()` 重采样成最终
+等距投影图像。cube face 天然覆盖约 90°/面，相机配置的 FOV 越窄，等于在这张固定
+分辨率的图里截取放大一小块——FOV 越窄，输出像素密度需求越高，但源纹素密度不变，
+必然更模糊，和渲染质量、光追、Lumen 无关。
+
+用排除了"视场角本身改变可比较内容"这个混淆变量的对照实验坐实：同一位置、同一
+角度范围(37.5°)，分别用 `sensor.camera.rgb` (pinhole，无 cubemap 中间层) 和
+`sensor.camera.rgb_fisheye` (camera_model=equidistant) 采集：
+
+| | Laplacian 方差(清晰度代理指标) |
+|---|---|
+| pinhole | 1399 |
+| 等距鱼眼(cubemap重采样) | 217 |
+
+同一 FOV 下 6.5 倍的差距，只能来自 cubemap 重采样这一步。8 个相机里 `front_main`
+(37.5°) 和 `front_narrow`(26.25°，见 `occnetv3_data_generator/config/camera_config.py`)
+FOV 最窄，受损最重；`front_wide`/`rear`(90°) 受损最小但也没有余量——cube face 在
+90° 时原生密度和输出需求刚好打平，没有安全边际。
+
+**尝试的修复（已回退，未进入生产）**：`Side` 按相机 FOV 反向缩放，`ScaledSide =
+BaseSide * (90° / 相机最窄的 X/Y FOV)`，下限钳在原来的 `BaseSide`（宽 FOV 相机不
+倒退）。孤立单相机测试确认有效：同一测试位置，`front_main` 实际配置 (37.5°) 清晰度
+从 180 涨到 532（约 3 倍）。
+
+**但在完整 8 相机生产阵列下，上限钳 2560（`front_narrow` 理论需求 ~4400px 的合理
+折中）在全新启动的 editor 进程上、采集第一帧之前就直接硬崩溃**：
+`Device->GetDevice()->CreateDescriptorHeap(...)` 报 `E_INVALIDARG`，崩溃时进程
+WS 44-46GB（4090 只有 24GB 显存）。
+
+随后把上限降到 1536（只让 8 台相机里的 2 台窄 FOV 相机线性边长提升约 20%）复测，
+表面上"不再硬崩溃，但 `world.tick()` 卡死超过 60 秒触发客户端超时"。**但这个
+1536 复测结果不可信，不能作为"两个不同 cap 都失败"的证据**：两次尝试之间的重
+编译用 `BUILD_FINAL.bat`（通过 Bash 工具的 cmd.exe 调用）——事后确认这个调用
+方式在本环境下会静默空跑：只打印一行 `cmd.exe` 交互式 banner 就在 1 秒内退出，
+既没有删除重建 `CMakeCache.txt`，也没有任何 `cl.exe`/`ninja` 进程被启动过（复现
+3 次，是可复现的工具问题，不是偶发）。也就是说 1536 这次复测大概率跑的还是那份
+已经崩溃过的 2560 二进制，只是这次表现为超时而不是硬崩溃（当时后台还有一个占满
+CPU 的进程在跑，这是第二个混淆变量）。**`BaseSide` 到 2560 之间没有任何一个 cap
+值被真正验证过、也没有证据支撑"这不是简单的调低显存上限能解决的问题"这个结论
+——已经从两篇文档和代码注释里删除了这个过度推断。**
+
+**最终决定：完全回退**，`Side` 恢复为原始固定值（不随 FOV 缩放），见
+`SceneCaptureSensor_WideAngleLens.cpp::BeginPlay()` 里保留的详细代码注释。回退
+后用真正确认生效的重编译方式（PowerShell + `cmake --build Build --target
+carla-unreal-editor`，用 DLL 时间戳而非退出码确认）验证：10 帧 × 8 相机生产采集
+可以稳定跑完。**结论：`front_main`/`front_narrow` 这两台窄 FOV 相机目前仍然天生
+比广角相机模糊，是已知但未解决的架构限制**——如果以后要重新尝试这个方向：①每次
+重编译务必用 DLL 时间戳确认生效，不要信任 `BUILD_FINAL.bat` 通过 Bash 工具跑出来
+的退出码（见下面"关联坑"之后新增的构建工具说明）；②先在隔离场景下单独验证一个
+比较保守的 cap（如 1536），不要假设 2560 的失败模式就一定适用于更小的 cap。
+
+**顺带处理的一个关联坑**：本节排查过程中确认 `post_process_profile` 这个属性
+（会给 `Town10HD_Opt` 地图自动套用同名 JSON 档位）当时还没注册到鱼眼相机类
+（`sensor.camera.rgb_fisheye`，生产 8 相机全部是这个类型）上——这是真实的 C++
+缺口（只注册在普通针孔相机类上），已在 `ActorBlueprintFunctionLibrary.cpp` 里给
+`SetCamera(..., ASceneCaptureSensor_WideAngleLens*)` 补上同款注册+加载逻辑，
+重编译后 `bp.has_attribute('post_process_profile')` 从 `False` 变 `True`，缺口
+本身已修好并保留。但补上后实测：`Town10HD_Opt.json` 那份档位（2.5m 强制景深 +
+0.7 暗角 + 1.6 对比度调色 + `autoExposureBias=+1.2EV`）套用后，同点位对照反而比
+不套用更糊更发灰——判断是白天场景下 `autoExposureBias` 过曝，不只是景深一处
+问题。最终 `occnetv3_data_generator/sensors/camera_manager.py` 保持不设置这个
+属性，训练相机维持不带暗角/浅景深/过曝的默认渲染。这个属性以后如果要重新启用，
+先把 `autoExposureBias` 归零、重新做同点位对照，不要假设"官方同款档位"就一定
+更好。
+
+### 4.13 `BUILD_FINAL.bat` 通过 Claude Code 的 Bash 工具调用会静默空跑
+
+2026-08-28 排查 4.12 的过程中撞见：`cmd.exe /c "BUILD_FINAL.bat" > log 2>&1` 这种
+调用方式（Bash 工具，即 Git Bash 环境）看起来"成功"（exit code 0），但实际什么
+都没编译——日志只有 `cmd.exe` 的交互式启动 banner（`Microsoft Windows [版本...]`
++ 版权行 + `D:\code\carla>` 提示符）三行，脚本本身 `@echo off` 之后的任何 `echo`
+都没打印过。复现 3 次，规律一致：
+- `Build\CMakeCache.txt` 时间戳完全不变（`BUILD_FINAL.bat` 第 44 行本该每次都
+  `del /f` 后由 cmake 重新生成）。
+- 空跑期间 `Get-Process`/`Get-CimInstance Win32_Process` 查不到任何 `cl.exe`、
+  `cmake.exe`、`ninja.exe` 进程，说明连 CMake 配置阶段都没进入。
+- 从调用到 "completed" 通知只有几秒钟，远不够真实构建（哪怕是增量构建也要几
+  分钟起）。
+
+**后果**：这次debug 期间，第一次"看起来成功"的重编译实际上是前一次会话（compact
+之前）遗留的旧 DLL，被误判为"已经带上了本次改动"，导致后续基于它做的一次压力
+测试结论完全不成立（见 4.12 里 cap=1536 复测那段的更正说明）——静默失败比报错
+更危险，因为它会让人带着错误前提继续往下推理。
+
+**验证有效的替代方式**（PowerShell 工具，不是 Bash 工具）：
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars64.bat" | Out-Null
+cmake --build Build --target carla-unreal-editor
+```
+这条路径真实调用了 `UnrealBuildTool`，会打印 `[N/M] Compile ...`/`Link ...` 这些
+实际的编译器动作，且会依次构建 `CarlaUnreal`（-game）和 `CarlaUnrealEditor`
+（-editor）两个子 target（一次 `cmake --build --target carla-unreal-editor`
+调用触发两次 UBT 调用，纯增量场景下大约 6 分钟，未出现空跑问题）。跳过了
+`BUILD_FINAL.bat` 里每次都 `del /f Build\CMakeCache.txt` 强制全量重新 configure
+的步骤（增量改动不需要重新 configure，`Build/` 下已有的 CMakeCache 直接可以用）。
+
+**不管用哪种方式发起构建，都不要用退出码判断是否真的编译了** ——退出码 0 只说明
+进程正常退出，不说明它做了什么。可靠的验证方式是重编译前后对比目标 DLL（例如
+`Unreal\CarlaUnreal\Plugins\Carla\Binaries\Win64\UnrealEditor-Carla.dll`）的
+`LastWriteTime` 是否发生了变化、且变化时间晚于源码编辑时间。
+
+根因没有深挖（Git Bash/MSYS 的 pty 模拟和 `cmd.exe` 这类原生 Win32 控制台程序
+交互本身有已知的兼容性问题，`BUILD_FINAL.bat` 内部 `call vcvars64.bat` /
+`call conda activate` 这类嵌套 `call` 链可能触发了某种重新拉起控制台的路径），
+没必要修——直接换成上面验证过的 PowerShell 调用方式即可。
+
+### 4.14 `-quality-level=Low` 会把纹理糊成"水墨画"，跟等距鱼眼/Bayer RAW 无关
+
+2026-08-28，4.12/4.13 都排查完、`final_verify2` 数据集也验证过"能稳定采集"之后，
+用户看着 `dataset_viewer_v2` 里的图反馈"画质像水墨画一样发糊，怀疑是不是我们自己
+封装的等距投影相机的问题"，并建议做同车同点位同 FOV 的鱼眼 vs 官方针孔对照实验。
+
+**对照实验**（脚本见 `outputs/camera_comparison/compare_fisheye_vs_pinhole.py`）：
+在同一辆车上，按 `occnetv3_data_generator/config/camera_config.py` 里 `TESLA_CAMERAS`
+的 8 个真实点位，同时挂 8 个 `sensor.camera.rgb_fisheye`（等距投影，同 FOV/分辨率）
+和 8 个官方 `sensor.camera.rgb`（针孔，`fov` 用同一份配置里历史上的水平 FOV 字段），
+两组都用标准 `image.save_to_disk()` 输出 uint8 PNG（不经过我们自己的 Bayer/DNG raw
+管线），排除 raw 管线这个变量。分别在 `-quality-level=Low` 和不带该参数（默认 Epic）
+两种编辑器进程下各跑一次，四组图都在 `outputs/camera_comparison/`
+（Epic）和 `outputs/camera_comparison/low_quality/`（Low）下留档。
+
+**结果**：`front_narrow`（26.25° 垂直 FOV，受 4.12 提到的 cubemap 分辨率影响最大的
+相机）在 Low 档位下，无论鱼眼还是官方针孔，同一栋脚手架建筑的立面纹理都是一片
+发灰发糊的噪点状色块，边缘、文字广告牌完全糊成一团；同一位置 Epic 档位下两种相机
+的纹理都变得清晰锐利、噪点消失、文字可辨。**鱼眼和针孔在同一档位下表现一致，说明
+这个"水墨画"观感是纹理流送/mip 精度随 Scalability 档位整体下降导致的，和等距投影
+实现、cubemap 重采样、Bayer RAW 管线都没有关系**——4.12 里"鱼眼比针孔更糊"的结论
+（同 FOV Laplacian 差 6.5 倍）依然成立，但那是另一个独立问题，不要混为一谈。
+
+**根因**：本次崩溃排查（4.12/4.13）期间，为了让编辑器重启更快，我在每次手动
+`UnrealEditor.exe ... -CarlaAutoPlay` relaunch 时都加上了 `-quality-level=Low`——
+包括生成 `final_verify2`（之前汇报"稳定性验证通过"的那份数据集）的那次编辑器进程。
+也就是说 `final_verify2` 虽然证明了"回退 cube face FOV 缩放后能稳定采集完 10 帧"，
+但画质本身是 Low 档位、不代表真实生产质量，已经用 Epic 档位重新采了一份
+`outputs/final_verify_epic/` 替代它。
+
+**这不是项目原有工作流的问题**：正式的无头生产启动脚本
+`start_carla_server_headless.bat` 本身就写的是 `-quality-level=Epic`
+（注释明确写着 "Sets the highest graphical quality for powerful GPUs"），
+`start_carla_server.bat`、`main_collection.py` 都完全不引用 `quality-level`
+这个参数——`Low` 只会在有人手动直接起 `UnrealEditor.exe`/`CarlaUE5.exe` 时
+被人为带上（`CLAUDE.md` 的"直接启动"备选命令里就有这一条，本意是给快速冒烟
+测试用，容易被误用到需要评估画质的场景）。**结论：以后任何要评估图像清晰度/
+画质，或者作为"最终验证"用途的采集，启动编辑器前必须确认没有带
+`-quality-level=Low`**，见 `CLAUDE.md` 对应位置补充的警告。
+
 ## 5. 相关文档
 
 - 构建命令、目录结构速览：根目录 [`CLAUDE.md`](./CLAUDE.md)

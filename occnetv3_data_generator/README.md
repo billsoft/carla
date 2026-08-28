@@ -180,6 +180,61 @@ CARLA 引擎侧（`ActorBlueprintFunctionLibrary.cpp`）判断"该属性是否�
    `cx/cy`），等真的有物理镜头标定出的 k1-k4 数据要接入时再做，不要在没有真实
    标定数据驱动的情况下现在就加。
 
+### 图像清晰度问题（2026-08-28，部分修复；鱼眼分辨率问题因稳定性原因已回退）
+
+用户反馈 8 路相机图片（缩略图和查看器原图都一样）清晰度/质感明显不如 UE 编辑器里
+肉眼看到的效果。排查过程见 [`CARLA_BUILD_NOTES.md` §4.12](../CARLA_BUILD_NOTES.md#412-等距鱼眼相机固定分辨率-cubemap-中间层窄-fov-相机天生模糊)，
+根因确认：等距鱼眼相机内部先渲染成固定分辨率的 cubemap 再重采样成最终图像，cube
+face 分辨率不随相机 FOV 变化，FOV 越窄的相机（`front_main` 37.5°、`front_narrow`
+26.25°）等于在固定分辨率的图里截取放大一小块，天然更模糊，和渲染质量/光追/Lumen
+无关（同点位针孔相机对照测试证实 Lumen GI/反射/阴影渲染完全正常，问题只出在鱼眼
+cubemap 重采样这一层）。
+
+**cube face 分辨率随 FOV 反向缩放的修复已回退，未进入生产**：孤立单相机测试中该
+方案确实有效（`front_main` 37.5° 配置 Laplacian 方差 180→532）。但在完整 8 相机
+生产阵列下，cap=2560 于全新启动的编辑器进程上，在采集出第一帧之前就硬崩溃——
+`CreateDescriptorHeap` 报 `E_INVALIDARG`，崩溃时 WS 44-46GB（4090 只有 24GB 显存）。
+随后把 cap 降到 1536 复测时表面上"没崩溃、但 `world.tick()` 60 秒超时卡死"，**但
+这次复测本身不可信**：两次尝试之间的重编译，用的 `BUILD_FINAL.bat`（通过本工具
+的 Bash/cmd.exe 调用）静默空跑了——只打印一行 banner 就在 1 秒内退出，`CMakeCache.txt`
+没被删除重建、也没有任何 `cl.exe`/`ninja` 进程启动过（复现 3 次，确认是可复现的
+工具问题，不是偶发）。也就是说 cap=1536 的复测大概率跑的仍然是那份已经崩溃过的
+2560 二进制，只是这次因为超时而不是硬崩溃收场（外加当时后台有一个占满 CPU 的进程
+在跑，这也是个混淆变量）——`BaseSide` 和 2560 之间没有任何一个 cap 值被真正验证过。
+最终**完全回退到原始固定 `Side`（不随 FOV 缩放）**，用真正确认生效的重编译方式
+（PowerShell + `cmake --build Build --target carla-unreal-editor`，用 DLL 时间戳
+而非退出码确认）验证：10 帧×8相机生产采集可以稳定跑完。**结论：`front_main`/
+`front_narrow` 这两台窄 FOV 相机目前仍然天生比广角相机模糊，是已知但未解决的
+架构限制**。如果以后要重新尝试这个方向：①每次重编译都要用 DLL 时间戳确认，不要
+信任 `BUILD_FINAL.bat` 通过本工具跑出来的退出码；②先在隔离场景下单独验证一个
+比较保守的 cap（如 1536）,不要假设 2560 的失败模式就一定适用于更小的 cap。具体
+代码注释见 `SceneCaptureSensor_WideAngleLens.cpp::BeginPlay()`。
+
+排查过程中顺带发现并处理了两个关联问题：
+1. `post_process_profile` 属性会给 `Town10HD_Opt` 地图自动套用同名 JSON 后处理档位，
+   这份档位其实是给人眼预览/电影感录屏调的（2.5m 强制景深 + 暗角 + 大幅调色 +
+   `autoExposureBias=+1.2EV`），不适合训练传感器相机。过程中发现该属性在鱼眼相机
+   类（`sensor.camera.rgb_fisheye`，生产 8 相机全部是这个类型）上其实根本没注册
+   （C++ 缺口，已在 `ActorBlueprintFunctionLibrary.cpp` 补上并验证 `has_attribute`
+   生效），但补上后同点位实测发现"套用档位"反而比"不套用"更糊更发灰（判断是
+   `autoExposureBias` 在白天场景下过曝，不只是景深一处问题）——最终 `camera_manager.py`
+   保持不设置这个属性，训练相机维持处处清晰的默认渲染,不带景深/暗角/调色。C++
+   侧的属性注册缺口本身已经修好并保留，只是不默认启用。
+2. DNG 的 `white_level` 元数据没有跟着 `raw_bit_depth` 走，rawpy 默认按 16-bit
+   (65535) 解析白点，实际数据是 `raw_bit_depth`（默认12-bit，最大4095），会让
+   自动曝光/色调映射算错。这个改动比较小，选择在读取侧修（`dataset_viewer_v2/
+   server.py` 现在会读 `calibration/intrinsics.json` 的 `raw_bit_depth`，传给
+   `rawpy.postprocess(..., user_sat=2**raw_bit_depth-1)`），没有去碰 DNG 写入侧
+   的 TIFF tag 格式（piexif 不支持非标准 DNG tag，改起来成本明显更高）。**注意：
+   直接用 rawpy/其他工具独立解码这批 DNG 时，如果不手动传 `user_sat`，色调/曝光
+   会和 `dataset_viewer_v2` 里看到的不一致**，不是数据本身的问题。
+
+调试专用：`main_collection.py --debug-actor-ids` 开关（默认关闭，训练不需要）会
+额外保存每帧 `debug_actor_ids/*.npy`（每体素对应的 CARLA actor.id 或环境物体虚拟
+ID），配合 `dataset_viewer_v2` 点击体素查看 `actor_id` 的功能，用于精确定位"某个
+体素究竟是哪个 actor/环境物体生成的"这类问题（这次排查 `traffic.traffic_light`
+bounding_box 偏移导致的白块就是靠这个直接定位到的，见下面"语义类别映射"一节）。
+
 ### 深度相机
 
 与 RGB 相机完全重合（相同位置、FOV，标准 `sensor.camera.depth`，针孔投影，UE5

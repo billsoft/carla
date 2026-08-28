@@ -663,6 +663,19 @@ void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
     PostProccess.RecommendedValues = {TEXT("true")};
     PostProccess.bRestrictToRecommended = false;
 
+    // post_process_profile — was never registered here (only in
+    // MakeCameraDefinition, for the non-fisheye sensor.camera.rgb), so
+    // set_attribute("post_process_profile", ...) on sensor.camera.rgb_fisheye
+    // threw "attribute not found" and no per-map JSON profile (Default.json
+    // or a map-specific one) was ever applied to any of the 8 equidistant
+    // cameras — see SetCamera(..., ASceneCaptureSensor_WideAngleLens*) for
+    // the matching load-side fix.
+    FActorVariation WAL_PostProcessProfile;
+    WAL_PostProcessProfile.Id = TEXT("post_process_profile");
+    WAL_PostProcessProfile.Type = EActorAttributeType::String;
+    WAL_PostProcessProfile.RecommendedValues = {TEXT("Default")};
+    WAL_PostProcessProfile.bRestrictToRecommended = false;
+
     // Gamma
     FActorVariation WAL_Gamma;
     WAL_Gamma.Id = TEXT("gamma");
@@ -863,6 +876,7 @@ void UActorBlueprintFunctionLibrary::MakeWideAngleLensCameraDefinition(
       ISO,
       Aperture,
       PostProccess,
+      WAL_PostProcessProfile,
       WAL_Gamma,
       MBIntesity,
       MBMaxDistortion,
@@ -2094,8 +2108,48 @@ void UActorBlueprintFunctionLibrary::SetCamera(
   // fisheye camera adds them); leaving them untouched preserves the
   // post-processing state each derived sensor sets in its constructor.
   if (Variations.Contains("enable_postprocess_effects"))
+  {
     Camera->EnablePostProcessingEffects(
         ActorAttributeToBool(Variations["enable_postprocess_effects"], true));
+
+    // post_process_profile — mirrors SetCamera(..., ASceneCaptureCamera*)'s
+    // logic (see that overload for the full sentinel-value rationale). Was
+    // missing entirely here until 2026-08-28: MakeWideAngleLensCameraDefinition
+    // never registered the attribute, so every one of the 8 equidistant
+    // fisheye cameras rendered with only whatever PostProcessSettings each
+    // face capture's C++ constructor/BeginPlay set up directly, never a
+    // JSON-loaded profile (not even Default.json) — losing the color
+    // grading/sharpen/AO/bloom tuning that gives the scene its "real" look.
+    FString PostProcessProfileName = RetrieveActorAttributeToString(
+        "post_process_profile", Variations, TEXT(""));
+
+    if (PostProcessProfileName.IsEmpty() || PostProcessProfileName == TEXT("default"))
+    {
+      const UWorld *World = Camera->GetWorld();
+      FString MapName{};
+      if (World != nullptr)
+      {
+        MapName = World->GetMapName();
+        MapName.RemoveFromStart(World->StreamingLevelsPrefix);
+      }
+      else
+      {
+        UE_LOG(LogCarla, Warning,
+            TEXT("SetCamera (WideAngleLens): camera has no UWorld; falling back to Default post-process profile."));
+      }
+      const FString MapJsonPath = UPostProcessJsonUtils::GetPostProcessConfigPath(MapName);
+      PostProcessProfileName = FPaths::FileExists(MapJsonPath) ? MapName : TEXT("Default");
+    }
+
+    // Applied to all 6 cube-face captures — the profile has to be consistent
+    // across faces or the seams between them would show a lighting/tone
+    // discontinuity in the final equidistant-projected image.
+    for (USceneCaptureComponent2D_CARLA *FaceCapture : Camera->GetCaptureComponents2D())
+    {
+      UPostProcessJsonUtils::LoadAllPostProcessFromJsonToSceneCapture(
+          FaceCapture, PostProcessProfileName);
+    }
+  }
 
   if (Variations.Contains("gamma"))
     Camera->SetTargetGamma(

@@ -38,17 +38,40 @@ def after_request(response):
     logger.info(f"← {status_icon} {request.method} {request.path} - {response.status_code} ({latency:.1f}ms)")
     return response
 
+@lru_cache(maxsize=4)
+def _get_raw_bit_depth(dataset_dir_str):
+    """
+    读取数据集 calibration/intrinsics.json 顶层的 raw_bit_depth (main_collection.py
+    --raw-bit-depth，默认12)。DNG 里没有正确写 WhiteLevel 标签 (TIFF/DNG 标准标签，
+    piexif 不支持写非标准 DNG tag，这里选择在读取侧修正而不是啃 DNG tag 格式)，
+    rawpy 默认按 65535(16-bit) 当白点解析，但实际数据是 2**raw_bit_depth-1 (12-bit
+    时是4095)，不传 user_sat 手动修正的话，postprocess 的自动曝光/色调映射会按错误
+    的白点跑，图像发灰发暗。找不到 intrinsics.json 或字段缺失时退回 12 (与
+    OccNetDataSaver 的默认值保持一致)。用 lru_cache 是因为每个数据集这个值只有一份，
+    没必要每次请求图片都重新读一次 JSON 文件。
+    """
+    int_path = Path(dataset_dir_str) / 'calibration' / 'intrinsics.json'
+    try:
+        with open(int_path, 'r') as f:
+            data = json.load(f)
+        return int(data.get('raw_bit_depth', 12))
+    except Exception:
+        return 12
+
+
 # LRU Cache for processed images (Max 32 images ~ 4 frames of 8 cams)
 @lru_cache(maxsize=32)
-def process_dng_cached(dng_path_str, half_size):
+def process_dng_cached(dng_path_str, half_size, user_sat):
     """
     缓存的 DNG 处理函数
     输入必须是字符串(hashable)，不能是 Path 对象
     half_size=True: 1/4 分辨率缩略图 (预览网格用)；False: 全分辨率 (lightbox 大图用)
+    user_sat: 正确的白点 (2**raw_bit_depth - 1)，见 _get_raw_bit_depth 的说明
     """
     import rawpy
     with rawpy.imread(dng_path_str) as raw:
-        rgb = raw.postprocess(use_camera_wb=True, half_size=half_size, no_auto_bright=False)
+        rgb = raw.postprocess(use_camera_wb=True, half_size=half_size, no_auto_bright=False,
+                               user_sat=user_sat)
         return rgb
 
 def create_placeholder_image(text="Error", size=(640, 480)):
@@ -263,8 +286,10 @@ def get_image(frame_id, cam_idx):
             if hires:
                 # 高清大图：不落盘缓存 (点开 lightbox 才会请求，量不大)，直接实时解码
                 import rawpy
+                user_sat = 2 ** _get_raw_bit_depth(str(dataset_path)) - 1
                 with rawpy.imread(str(dng_path)) as raw:
-                    rgb = raw.postprocess(use_camera_wb=True, half_size=False, no_auto_bright=False)
+                    rgb = raw.postprocess(use_camera_wb=True, half_size=False, no_auto_bright=False,
+                                           user_sat=user_sat)
                 img_pil = Image.fromarray(rgb)
                 img_io = io.BytesIO()
                 img_pil.save(img_io, 'JPEG', quality=92)
@@ -287,7 +312,8 @@ def get_image(frame_id, cam_idx):
 
             try:
                 import rawpy
-                rgb = process_dng_cached(str(dng_path), True)
+                user_sat = 2 ** _get_raw_bit_depth(str(dataset_path)) - 1
+                rgb = process_dng_cached(str(dng_path), True, user_sat)
                 if rgb is None:
                     process_dng_cached.cache_clear()
                     raise Exception("Cached processing failed")

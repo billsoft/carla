@@ -58,10 +58,27 @@ class CameraManager:
             camera_bp.set_attribute('enable_postprocess_effects',
                                    str(CAMERA_SENSOR_CONFIG['enable_postprocess_effects']))
         
-        # 自动应用 Town10HD_Opt 的后处理配置文件 (解决光照问题)
-        map_name = self.world.get_map().name
-        if 'Town10HD_Opt' in map_name and camera_bp.has_attribute('post_process_profile'):
-            camera_bp.set_attribute('post_process_profile', 'Town10HD_Opt')
+        # 2026-08-28: 不设置 post_process_profile (来回折腾过两次，这里记录最终结论)。
+        #
+        # 排查链路: ① PythonAPI/examples/automatic_control.py 对 Town10HD_Opt 地图会
+        # 套用同名档位，一度以为这是标准做法、该跟着做；② 结果发现鱼眼相机类
+        # (sensor.camera.rgb_fisheye，我们8个相机全部是这个类型) 的 C++ 注册代码里根本
+        # 没有 post_process_profile 这个属性 (只有针孔相机类 sensor.camera.rgb 有)，
+        # set_attribute 直接抛 "attribute not found"——这是真实存在的 C++ 缺口，已经在
+        # ActorBlueprintFunctionLibrary.cpp 里给 SetCamera(...,
+        # ASceneCaptureSensor_WideAngleLens*) 补上了同款注册+加载逻辑 (应用到全部6个
+        # cubemap面)，重编译后 has_attribute 已经返回 True；③ 关掉档位里的景深
+        # (Town10HD_Opt.json 的 bOverride_DepthOfField* 已改成 false) 后重新用同一个
+        # spectator 位置(同一时刻/同一建筑)做直接对照——套用这个档位反而比不套用更糊、
+        # 更发灰发白 ("ZARA"招牌文字、出租车顶灯字样清晰度明显下降)，判断是档位里
+        # autoExposureBias=1.2 (bOverride_AutoExposureBias=true，+1.2EV 曝光补偿) 在
+        # ClearNoon 这种大白天场景下过曝，不是只有景深一处问题。
+        #
+        # 结论: C++ 侧的属性缺口已经修好、基础设施是好的，但 Town10HD_Opt.json 这份
+        # 档位本身（去掉景深之后）依然不适合训练用的传感器相机，不设置这个属性 (保持
+        # 未设置/引擎默认) 实测反而是目前最清晰的版本。如果以后要重新启用，先把
+        # autoExposureBias 归零、重新对着同一个位置做前后对比，不要假设"用了官方同款
+        # 档位"就一定更好。
 
         if camera_bp.has_attribute('gamma'):
             camera_bp.set_attribute('gamma', str(CAMERA_SENSOR_CONFIG['gamma']))
