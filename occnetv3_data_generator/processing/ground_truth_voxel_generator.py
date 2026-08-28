@@ -220,22 +220,32 @@ class GroundTruthVoxelGenerator:
         # 1. 填充静态环境 (地面、道路)
         self._fill_static_environment(occupancy, actor_ids, world, ego_transform, grid_to_world_matrix)
 
-        # 2. 获取动态 Actors (车辆、行人、静态道具、交通设施)
+        # 2. 获取动态 Actors (车辆、行人、静态道具)
         actors = world.get_actors()
         vehicles = actors.filter('vehicle.*')
         walkers = actors.filter('walker.pedestrian.*')
         props = actors.filter('static.prop.*')
-        traffic = actors.filter('traffic.*')  # ⭐ 新增：获取红绿灯、交通标志等 Actor
+        traffic = []  # 见下方 2026-08-28 说明: 不再把 traffic.* 当动态 Actor 光栅化
 
-        # 2026-08-27 排除 traffic.unknown: 这是 CarlaEpisode.cpp::UCarlaEpisode_GetTrafficSignId
-        # 对"不认识的 ETrafficSignState"的兜底 type_id（非红绿灯/限速/停车让行），实测
-        # (survey_actor_types.py) 发现这类 actor 的 semantic_tags 是空的——CARLA的语义
-        # 分割没有给它们打过标签，即没有可渲染/可见的Tag mesh。已核实的3个样本里有一个
-        # 是14m×11.2m的巨大扁平包围盒(z范围仅0~0.64m)，形状上明显是路口/触发区域用的
-        # 逻辑体，不是真实可见的路牌。这类 actor 一旦被光栅化进体素，会被 Z<=1.0m 的
-        # 地面高度保护规则强制保留 (visibility_filter_simple.py)，完全绕开可见性过滤，
-        # 在体素真值里凭空多出一大块不存在的 general_object——直接排除，不参与光栅化。
-        traffic = [a for a in traffic if a.type_id != 'traffic.unknown']
+        # 2026-08-28 不再把 `traffic.*` (traffic_light/traffic_sign/stop/yield/...)
+        # 当普通动态 Actor 用它们的 actor.bounding_box 光栅化。根因排查 (用户报告"车
+        # 左后方路面出现一个图片里没有的白块"，加了 --debug-actor-ids 调试开关直接
+        # 定位到是哪个 actor)：traffic.traffic_light 的 bounding_box 实测和它自己的
+        # transform.location 偏移达 9~12m（例如 id=9: loc=(-34.4,-51.0,0.3) 但
+        # bb.location=(-9.0,8.5,1.0)，换算到世界系中心在 (-43.4,-42.5,1.3)，离
+        # actor 自己的位置十几米远），这是 CARLA 给红绿灯用的控制/触发体积，不是
+        # 贴合灯杆网格的可见几何——光栅化出来就是一个凭空出现、和任何可见物体都对不上
+        # 的方块。而且 traffic.* 的 type_id 在 actor_occupancy_mapping.py 里没有任何
+        # 精确匹配 (VEHICLE_MAPPING/PROP_MAPPING 都没有 'traffic.' 前缀的兜底规则)，
+        # 会一路掉到 semantic_tag 兜底，用 CITY_OBJECT_MAPPING[Pole]=15(manmade)，
+        # 跟 _fill_static_environment() 那边 TrafficLight/TrafficSigns 环境物体统一
+        # 映射到 8(traffic_cone) 还对不上，是两条并行、互相矛盾的分类路径。
+        # 真实可见的红绿灯/路牌几何，本来就已经由 world.get_environment_objects() 的
+        # TrafficLight/TrafficSigns/Poles 类别在 _fill_static_environment() 里用贴合
+        # mesh 的世界系 AABB 正确光栅化了 (映射到 8/manmade 视具体类型)，traffic.*
+        # 动态 Actor 这条路径纯属重复且不可靠，直接不参与光栅化，不产生覆盖缺口。
+        # (traffic.unknown 之前单独排除过的写法已经不需要了，因为整个 traffic.* 都不
+        # 再进入这条光栅化路径。)
 
         all_actors = list(vehicles) + list(walkers) + list(props) + list(traffic)
 
@@ -591,25 +601,24 @@ class GroundTruthVoxelGenerator:
         # 4. 生成填充掩码: Z < surface_z 且 occupancy == 0
         fill_mask = (Z_grid < surface_z_3d) & (occupancy == 0) & has_surface[:, :, None]
 
-        # 5. 向量化填充 (广播操作)
-        # 将 surface_labels 和 surface_aids 广播到 3D
-        # surface_labels_3d = surface_labels[:, :, None]  # (400, 400, 1)
-        # surface_aids_3d = surface_aids[:, :, None]
+        # 5. 向量化填充 (广播操作): 向下复制本列的地表标签，而不是统一填成 Terrain。
+        # 2026-08-27 改回"复制地表"这个原始方案 (按用户要求): 相机/LiDAR 只能看到
+        # 地表这一层，看不到地下埋了什么，与其瞎猜/统一填一个和实际地表毫无关系的
+        # Terrain，不如假设"往下也是同一种东西"——这样同一位置在不同帧里地下内容
+        # 稳定不变，不会给训练引入和真实场景无关的噪声。
+        # 这条只在这个函数里、这个时间点安全: 此时 occupancy 里只有地面层的结果
+        # (driveable_surface/sidewalk/terrain/barrier/traffic_cone车道线, 见上面
+        # ground_cache 的取值范围)，_fill_static_environment 的建筑/杆/Actor光栅化
+        # 都还没跑，所以不会把建筑/车辆的标签误往下拖成一根柱子。
+        # 之前(2026-08-27之前)改成统一 Terrain 是因为"如果地表是 Barrier，地下会
+        # 形成一堵灰色的墙，视觉效果突兀"——这是审美顾虑，不是正确性问题，柱子状的
+        # 地下内容对训练没有坏处，反而比"和地表毫无关系的固定材质"更符合"我们看不到
+        # 地下、只能假设它和地表一致"这个原则。
+        surface_labels_3d = surface_labels[:, :, None]  # (400, 400, 1)
+        surface_aids_3d = surface_aids[:, :, None]
 
-        # ⭐⭐⭐ FIX: 地下填充统一使用 Terrain (泥土) ⭐⭐⭐
-        # 原逻辑: 向下复制地表材质 (occupancy[fill_mask] = surface_labels...)
-        # 问题: 如果地表是 Barrier (灰色)，地下会形成一堵灰色的墙，视觉效果突兀
-        # 解决: 统一填充为 Terrain (14, 棕色)，模拟路基/泥土
-        
-        UNDERGROUND_LABEL = 14 # Terrain
-        UNDERGROUND_ID = -(1000 + UNDERGROUND_LABEL)
-        
-        # 应用填充
-        # occupancy[fill_mask] = np.broadcast_to(surface_labels_3d, occupancy.shape)[fill_mask]
-        # actor_ids[fill_mask] = np.broadcast_to(surface_aids_3d, actor_ids.shape)[fill_mask]
-        
-        occupancy[fill_mask] = UNDERGROUND_LABEL
-        actor_ids[fill_mask] = UNDERGROUND_ID
+        occupancy[fill_mask] = np.broadcast_to(surface_labels_3d, occupancy.shape)[fill_mask]
+        actor_ids[fill_mask] = np.broadcast_to(surface_aids_3d, actor_ids.shape)[fill_mask]
 
         total_filled = np.count_nonzero(fill_mask)
         filled_columns = np.count_nonzero(has_surface)

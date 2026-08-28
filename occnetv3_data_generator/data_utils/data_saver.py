@@ -67,7 +67,8 @@ class OccNetDataSaver:
         └── test.txt
     """
 
-    def __init__(self, output_dir: str, scene_name: str = 'scene', raw_bit_depth: int = 12):
+    def __init__(self, output_dir: str, scene_name: str = 'scene', raw_bit_depth: int = 12,
+                 save_actor_ids: bool = False):
         """
         Args:
             output_dir: 输出根目录 (如 D:/code/carla/dataset_10k_bak)
@@ -76,6 +77,13 @@ class OccNetDataSaver:
                 默认 12-bit（常见 CMOS 传感器精度）。相机管线内部始终以 16-bit
                 (0-65535) 传输，这里只是保存前的量化位深，越大保留的细节越多、
                 文件也略大。必须是 8-16 之间的整数。
+            save_actor_ids: 调试开关 (默认关闭)。开启后额外保存每帧的 actor_ids
+                (400,400,32) int32 到 debug_actor_ids/ 目录——真实 actor 是正数
+                CARLA actor.id，静态环境物体是负数虚拟ID (-(i+10000)，i 是
+                ground_truth_voxel_generator.py 里 world.get_environment_objects()
+                返回列表的下标)。仅用于排查体素归属问题 (点一个体素查它是哪个
+                actor/环境物体生成的)，训练不需要这份数据，默认不生成，避免
+                每帧多出一个 400*400*32*4 字节 (~20MB) 的文件拖慢正常采集。
         """
         if not (8 <= raw_bit_depth <= 16):
             raise ValueError(f"raw_bit_depth 必须在 8-16 之间，收到: {raw_bit_depth}")
@@ -83,6 +91,7 @@ class OccNetDataSaver:
         self.output_dir = Path(output_dir)
         self.scene_name = scene_name
         self.raw_bit_depth = raw_bit_depth
+        self.save_actor_ids = save_actor_ids
         self.scene_counter = 0
         self.frame_counter = 0
 
@@ -114,7 +123,10 @@ class OccNetDataSaver:
         for d in dirs:
             (self.output_dir / d).mkdir(parents=True, exist_ok=True)
 
-        print(f"  ✓ 目录结构已创建 (含 depth 目录)")
+        if self.save_actor_ids:
+            (self.output_dir / 'debug_actor_ids').mkdir(parents=True, exist_ok=True)
+
+        print(f"  ✓ 目录结构已创建 (含 depth 目录{', 含 debug_actor_ids 目录' if self.save_actor_ids else ''})")
 
     def save_calibration(
         self,
@@ -202,6 +214,7 @@ class OccNetDataSaver:
         ego_pose: np.ndarray = None,
         ego_motion: np.ndarray = None,
         depth: Dict[str, np.ndarray] = None, # ⭐ 新增
+        actor_ids: np.ndarray = None,  # 调试用，仅 save_actor_ids=True 时写盘
     ):
         """
         保存一个训练样本
@@ -217,6 +230,7 @@ class OccNetDataSaver:
             ego_pose: (4, 4) float32 全局位姿 (可选)
             ego_motion: (4, 4) float32 帧间运动 (可选)
             depth: {cam_id: (H, W) float32} 深度图 (可选, meters)
+            actor_ids: (400, 400, 32) int32，只在 self.save_actor_ids 为 True 时才写盘 (可选)
         """
         # 1. 保存图像
         img_dir = self.output_dir / 'images' / sample_id
@@ -276,6 +290,11 @@ class OccNetDataSaver:
                 cam_index = self._get_cam_index(cam_id)
                 # 保存为 float32 npy (单位: 米)
                 np.save(depth_dir / f'cam_{cam_index}.npy', depth_data.astype(np.float32))
+
+        # 6. 保存 actor_ids (可选，调试用)
+        if self.save_actor_ids and actor_ids is not None:
+            assert actor_ids.shape == GRID_SIZE, f"actor_ids形状错误: {actor_ids.shape} (expected {GRID_SIZE})"
+            np.save(self.output_dir / 'debug_actor_ids' / f'{sample_id}.npy', actor_ids.astype(np.int32))
 
         # 记录sample_id
         self.sample_ids.append(sample_id)

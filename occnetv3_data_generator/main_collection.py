@@ -370,6 +370,10 @@ def main():
     parser.add_argument('--raw-bit-depth', type=int, default=12, choices=[8, 10, 12, 14, 16],
                          help='DNG 保存时模拟的传感器 ADC 位深 (默认: 12-bit)')
     parser.add_argument('--clear-output', action='store_true', default=True, help='生成前清空输出目录 (默认: True)')
+    parser.add_argument('--debug-actor-ids', action='store_true', default=False,
+                         help='调试开关: 额外保存每帧 actor_ids (400,400,32) 到 debug_actor_ids/ '
+                              '目录，用于配合 dataset_viewer_v2 点击体素查具体是哪个 actor/环境物体 '
+                              '生成的。训练不需要，默认关闭。')
     args = parser.parse_args()
 
     # 清空输出目录
@@ -428,7 +432,8 @@ def main():
             resolution=RESOLUTION
         )
         visibility_filter = VisibilityFilterSimple() # ⭐ 新增
-        data_saver = OccNetDataSaver(args.output, args.scene, raw_bit_depth=args.raw_bit_depth)
+        data_saver = OccNetDataSaver(args.output, args.scene, raw_bit_depth=args.raw_bit_depth,
+                                      save_actor_ids=args.debug_actor_ids)
         print(f"  ✓ 体素生成器和数据保存器")
 
         # 6. 保存相机标定
@@ -560,6 +565,7 @@ def main():
                 ego_pose=ego_pose,
                 ego_motion=ego_motion,
                 depth=depth_dict,  # ⭐ 保存深度图
+                actor_ids=actor_ids if args.debug_actor_ids else None,
             )
             save_time = (time.time() - step_start) * 1000
             depth_info = "+ 8 Depth" if depth_dict else ""

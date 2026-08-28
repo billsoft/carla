@@ -231,15 +231,18 @@ class Viewer {
         const data = meta.voxelData;
 
         let html;
+        let vx, vy, vz;
         if (meta.isDiff) {
-            html = `x=${data.x[srcIdx]} y=${data.y[srcIdx]} z=${data.z[srcIdx]}<br>`
+            vx = data.x[srcIdx]; vy = data.y[srcIdx]; vz = data.z[srcIdx];
+            html = `x=${vx} y=${vy} z=${vz}<br>`
                 + `GT: ${OCCUPANCY_NAMES[data.gt[srcIdx]] || '?'} | Pred: ${OCCUPANCY_NAMES[data.pred[srcIdx]] || '?'}<br>`
                 + `${DIFF_NAMES[data.cat[srcIdx]]}`;
         } else {
-            const wx = (VOXEL_X_MIN + data.x[srcIdx] * VOXEL_RES + VOXEL_RES / 2).toFixed(1);
-            const wy = (VOXEL_Y_MIN + data.y[srcIdx] * VOXEL_RES + VOXEL_RES / 2).toFixed(1);
-            const wz = (VOXEL_Z_MIN + data.z[srcIdx] * VOXEL_RES + VOXEL_RES / 2).toFixed(1);
-            html = `voxel (${data.x[srcIdx]}, ${data.y[srcIdx]}, ${data.z[srcIdx]})<br>`
+            vx = data.x[srcIdx]; vy = data.y[srcIdx]; vz = data.z[srcIdx];
+            const wx = (VOXEL_X_MIN + vx * VOXEL_RES + VOXEL_RES / 2).toFixed(1);
+            const wy = (VOXEL_Y_MIN + vy * VOXEL_RES + VOXEL_RES / 2).toFixed(1);
+            const wz = (VOXEL_Z_MIN + vz * VOXEL_RES + VOXEL_RES / 2).toFixed(1);
+            html = `voxel (${vx}, ${vy}, ${vz})<br>`
                 + `world (${wx}m, ${wy}m, ${wz}m)<br>`
                 + `<b>${OCCUPANCY_NAMES[data.label[srcIdx]] || '?'}</b>`;
         }
@@ -249,6 +252,21 @@ class Viewer {
         tip.style.left = (e.clientX - rect.left + 12) + 'px';
         tip.style.top = (e.clientY - rect.top + 12) + 'px';
         tip.classList.remove('hidden');
+
+        // 调试用: 附加查询 actor_id (需要数据集有 debug_actor_ids/ 目录，见
+        // main_collection.py --debug-actor-ids)。异步返回，用 token 防止慢响应
+        // 覆盖到用户点击的下一个体素的 tooltip 上。
+        const frameId = this.frames[this.currentFrameIdx];
+        const clickToken = (this._voxelClickToken = (this._voxelClickToken || 0) + 1);
+        fetch(`/api/actor_id/${frameId}?x=${vx}&y=${vy}&z=${vz}`)
+            .then(r => r.json())
+            .then(info => {
+                if (clickToken !== this._voxelClickToken || tip.classList.contains('hidden')) return;
+                if (info.available) {
+                    tip.innerHTML = html + `<br>actor_id: ${info.actor_id}`;
+                }
+            })
+            .catch(() => {});
     }
 
     hideVoxelTooltip() {

@@ -269,6 +269,33 @@ Cache 命中率接近 100%）+ NumPy 向量化批量赋值替代逐体素 Python
 导致所有摩托车被地面保护逻辑无条件强制保留，绕开了"不可见就归 free"的可见性过滤。
 已修复为 `[11, 12, 13, 14]`。
 
+**`traffic.*` 动态 Actor 不应该用 `actor.bounding_box` 光栅化**：2026-08-28 用户报告
+"车左后方路面出现一个图片里没有的白块"，给 `main_collection.py` 加了 `--debug-actor-ids`
+调试开关（保存每帧 `debug_actor_ids/*.npy`，即 `generate()` 内部用的
+`(400,400,32) int32` actor_id 网格：正数是真实 CARLA `actor.id`，负数是
+`_fill_static_environment()` 给环境物体分配的虚拟ID `-(i+10000)`，`i` 是
+`world.get_environment_objects(carla.CityObjectLabel.Any)` 返回列表的下标，可以
+反查回具体是哪个环境物体。默认不生成，训练不需要。`dataset_viewer_v2` 配了对应的
+`GET /api/actor_id/<frame_id>?x=&y=&z=` 端点，点体素时如果数据集有这个目录会在
+tooltip 里附带显示 actor_id）直接定位到具体 actor：`traffic.traffic_light`。
+实测 (`world.get_actors().filter('traffic.traffic_light')`) 它的 `bounding_box` 和
+自己的 `transform.location` 能差 9~12 米（例如某个灯 `loc=(-34.4,-51.0,0.3)` 但
+`bb.location=(-9.0,8.5,1.0)`，换算世界系中心在 `(-43.4,-42.5,1.3)`）——这是 CARLA
+给红绿灯用的控制/触发体积，不是贴合灯杆网格的可见几何，光栅化出来就是一个和任何
+可见物体都对不上的悬浮方块。而且 `traffic.*` 的 `type_id` 在
+`actor_occupancy_mapping.py` 里没有精确匹配规则，会掉到 `semantic_tag` 兜底得到
+`manmade(15)`，跟 `_fill_static_environment()` 那边 `TrafficLight`/`TrafficSigns`
+环境物体统一映射到 `traffic_cone(8)` 还对不上，是两条互相矛盾的分类路径。真实可见的
+红绿灯/路牌几何本来就已经由 `world.get_environment_objects()` 的
+`TrafficLight`/`TrafficSigns`/`Poles` 类别在 `_fill_static_environment()` 里用贴合
+mesh 的世界系 AABB 正确光栅化了，`traffic.*` 动态 Actor 这条路径纯属重复且不可靠。
+修复：`ground_truth_voxel_generator.py` 的 `generate()` 不再把 `traffic.*` 塞进
+`all_actors` 参与光栅化（之前 `traffic.unknown` 的单独排除写法已经不需要了，整个
+`traffic.*` 都不再走这条路径）。用 `find_floating_manmade.py` 风格的连通分量扫描
+(按 `debug_actor_ids` 反查虚拟/真实ID) 验证：修复前 15 帧里能扫到 151 个孤立小型
+`manmade` 连通分量，修复后只剩 2 个，且反查到的是一个真实 `Buildings` 环境物体、
+AABB 数值正常（没有离谱偏移），判定为真实建筑基座边缘，不是 bug。
+
 ## 使用方法
 
 ```bash

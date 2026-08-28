@@ -493,6 +493,34 @@ def get_occupancy(frame_id):
     return resp
 
 
+@app.route('/api/actor_id/<frame_id>')
+def get_actor_id(frame_id):
+    """
+    查询单个体素的 actor_id (调试用，配合 main_collection.py --debug-actor-ids 生成的
+    debug_actor_ids/ 目录)。正数 = 真实 CARLA actor.id；负数 = 静态环境物体虚拟ID
+    (-(i+10000)，i 是 world.get_environment_objects() 返回列表的下标，可以用这个 i
+    反查具体是哪个建筑/道具，见 ground_truth_voxel_generator.py _fill_static_environment)；
+    0 = 空体素或该体素没有关联 actor。
+    查询参数: x, y, z (体素网格坐标，整数)
+    数据集没有 debug_actor_ids/ 目录时返回 available=false，不是错误。
+    """
+    x = request.args.get('x', type=int)
+    y = request.args.get('y', type=int)
+    z = request.args.get('z', type=int)
+    if x is None or y is None or z is None:
+        return abort(400, description="缺少 x/y/z 查询参数")
+
+    path = Path(CURRENT_DATASET_DIR) / 'debug_actor_ids' / f"{frame_id}.npy"
+    if not path.exists():
+        return jsonify({'available': False})
+
+    grid = np.load(path)
+    if not (0 <= x < grid.shape[0] and 0 <= y < grid.shape[1] and 0 <= z < grid.shape[2]):
+        return abort(400, description="坐标超出体素网格范围")
+
+    return jsonify({'available': True, 'actor_id': int(grid[x, y, z])})
+
+
 @app.route('/api/occupancy_diff/<frame_id>')
 def get_occupancy_diff(frame_id):
     """

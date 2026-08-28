@@ -319,9 +319,16 @@ def get_occupancy_label_from_actor(actor):
         for sem_tag in actor.semantic_tags:
             sem_tag_int = int(sem_tag)
             if sem_tag_int in CITY_OBJECT_MAPPING:
-                return CITY_OBJECT_MAPPING[sem_tag_int]
+                fallback_label = CITY_OBJECT_MAPPING[sem_tag_int]
+                print(f"[调试/type_id未映射] type_id={actor.type_id!r} id={actor.id} "
+                      f"semantic_tags={list(actor.semantic_tags)} -> 用 semantic_tag={sem_tag_int} "
+                      f"兜底得到 label={fallback_label} ({OCCUPANCY_LABELS.get(fallback_label, '?')})")
+                return fallback_label
 
     # 3. 最终兜底
+    print(f"[调试/type_id未映射] type_id={actor.type_id!r} id={actor.id} "
+          f"semantic_tags={list(getattr(actor, 'semantic_tags', []))} -> 无任何匹配, "
+          f"兜底 label=17 (general_object)")
     return 17  # general_object
 
 
