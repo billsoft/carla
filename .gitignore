@@ -59,3 +59,6 @@ occ_network_lite/checkpoints_lite/
 code_summary_for_ai.txt
 voxel_mapping.log
 e2e_occ_code_summary.txt
+
+# UE5 引擎目录联接（指向 D:\code\UnrealEngine5_carla，避免被 git 索引）
+ue5carla/
