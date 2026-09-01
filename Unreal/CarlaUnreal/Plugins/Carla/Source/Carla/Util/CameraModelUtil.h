@@ -57,6 +57,15 @@ namespace CameraModelUtil
         FVector2D PrincipalPointOffset;
         float LongitudeOffset;
         float FOVFadeSize;
+        // tan() of the front cube face's actual captured half-FOV. 1.0 (i.e.
+        // tan(45 deg)) reproduces the original fixed-90-degree face; a caller
+        // that narrows the front face's CustomProjectionMatrix (see
+        // ASceneCaptureSensor_WideAngleLens::UpdateFrontFaceProjection) must
+        // pass the matching tan(HalfFOV) here so SampleCubemap() samples the
+        // narrowed face's UV range correctly. Must always be set explicitly —
+        // this struct is aggregate-initialized (`= { }`) elsewhere, which
+        // zero-inits this field rather than defaulting it to 1.0.
+        float FrontFaceTanHalfFOV;
         ECameraModel CameraModel;
         bool bRenderEquirectangular : 1;
         bool bFOVMaskEnable : 1;

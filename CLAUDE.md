@@ -69,16 +69,21 @@ start_carla_server.bat
 
 编辑器打开后必须点击绿色 Play 按钮场景才会开始 tick，Python 客户端连接（port 2000）才不会超时；命令行加 `-CarlaAutoPlay` 可以让编辑器在资产/着色器编译完成后自动开始 Play，不需要手动点（`Carla.cpp::FCarlaModule::RegisterAutoPlayWatcher`，详见 `CARLA_BUILD_NOTES.md` 4.9 节）。常见问题（光照过暗、Traffic Manager port 8000 绑定冲突、`time-out while waiting for the simulator` 等）及修复方式见 `GUIDE.md` 的"问题排查"章节。
 
-**⚠️ `-quality-level=Low` 只适合快速冒烟测试，不要用它采集/对比任何要评估画质的数据**：
-同位置同相机对照实测确认，Low 档位下纹理明显糊成一片发灰发糊的"水墨画"质感（尤其是
-带精细网格/文字的贴图，如脚手架、广告牌），Epic 档位下同一相机同一帧清晰锐利——这是
-纹理流送/mip 精度随 Scalability 档位变化的正常行为，跟等距鱼眼相机、Bayer RAW 管线
-完全无关（同一现象在官方 `sensor.camera.rgb` 针孔相机上一模一样地出现，见
-`CARLA_BUILD_NOTES.md` §4.14）。正式无头生产启动脚本 `start_carla_server_headless.bat`
+**`-quality-level=` 有 4 档：`Low`/`Medium`/`High`/`Epic`**（不传时默认 `Epic`），
+是本仓库自己实现的选择器（`CarlaDeviceProfileSelectorModule.cpp`），不是 UE5 原版
+Scalability 预设。**⚠️ `Low` 只适合快速冒烟测试，不要用它采集/对比任何要评估画质的
+数据**：同位置同相机对照实测确认，Low 档位下画面明显糊成一片发灰发糊的"水墨画"
+质感（尤其是带精细网格/文字的贴图，如脚手架、广告牌），Epic 档位下同一相机同一帧
+清晰锐利，跟等距鱼眼相机、Bayer RAW 管线完全无关（同一现象在官方 `sensor.camera.rgb`
+针孔相机上一模一样地出现）。**具体机制不是纹理 mip/流送精度**（`Low` 档的
+`TextureQuality` 实际是满档，和 `Epic` 一样）——读源码确认更可能是
+`ReflectionQuality=0`（Lumen 反射整个关掉）+ `r.Nanite.Streaming.PoolSize` 从
+512MB 砍到 128MB（复杂几何体如脚手架被迫退化成低精度代理网格）共同导致，细节见
+`CARLA_BUILD_NOTES.md` §4.14。正式无头生产启动脚本 `start_carla_server_headless.bat`
 本身已经用的是 `-quality-level=Epic`，`main_collection.py`/`start_carla_server.bat` 都
 不引用 `quality-level`——只有在手动直接起 `UnrealEditor.exe`/`CarlaUE5.exe` 做调试
-（比如这次崩溃排查）时才可能被人为带上 `Low`。**任何用于评估图像清晰度/画质、或作为
-"最终验证"用途的采集，启动前务必确认没有带 `-quality-level=Low`**。
+时才可能被人为带上 `Low`。**任何用于评估图像清晰度/画质、或作为"最终验证"用途的
+采集，启动前务必确认没有带 `-quality-level=Low`**。
 
 ---
 
@@ -172,6 +177,14 @@ Python np.frombuffer → DNG`。改这部分代码需要走上面"构建 CARLA"�
 GPU 读回没等完成、客户端反序列化按错误格式解析、16-bit 格式没启用），完整记录和
 每一处的根因见 `CARLA_BUILD_NOTES.md` 4.8 节**，实现细节（数据采集侧怎么用）见
 `occnetv3_data_generator/README.md`。
+
+**窄 FOV 相机（`front_main`/`front_narrow`）曾经天生比广角相机模糊，2026-08-29 已修复**：
+根因是每个 cube face 的拍摄视场角写死 90°，与相机自己配置的 FOV 无关——FOV 越窄，
+等于在这张固定分辨率的图里截取放大一小块，源纹素密度不变而输出像素密度需求越高，
+必然模糊。修复不是放大纹理分辨率（那个方向试过 4 次，3 次卡死，已确认是错误方向），
+而是让"仅需 1 张 face 就够"的单面相机直接按自己的真实 FOV 拍摄这张 face（复用已有
+的 `CustomProjectionMatrix` 机制，只是角度从写死改成动态计算），纹理分配大小完全
+不变。完整原理、代码改动点、验证过程见 `CARLA_BUILD_NOTES.md` 4.15 节。
 
 ---
 

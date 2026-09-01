@@ -28,6 +28,12 @@ float YFOVAngle;
 float4 CameraParams;
 float LongitudeOffset;
 float FOVFadeSize;
+// tan() of the front cube face's actual captured half-FOV. 1.0 (tan(45 deg))
+// reproduces the original fixed-90-degree face; narrower when the C++ side
+// (ASceneCaptureSensor_WideAngleLens::UpdateFrontFaceProjection) captured
+// that single face across a smaller cone to raise its angular sampling
+// density instead of always spanning the full 90 degrees.
+float FrontFaceTanHalfFOV;
 uint Flags;
 
 
@@ -63,7 +69,16 @@ float4 SampleCubemap(float3 Direction)
 	};
 
 	const float3 Key = Lookup[FaceIndex];
-	const float2 UV = (Key.xy / Key.z + float2(1, 1)) * 0.5F;
+
+	// Face 0 (front) may have been captured across a narrower cone than the
+	// other five faces' fixed +/-45 degree extent (see FrontFaceTanHalfFOV
+	// above) — rescale its tangent-plane coordinate to that actual extent
+	// before mapping to [0,1] UV. Every other face still spans the standard
+	// +/-45 degrees, where this is an identity divide (FrontFaceTanHalfFOV
+	// is only ever narrowed together with a CubemapRenderMask that guarantees
+	// those faces are never sampled at all).
+	const float2 Tangent = FaceIndex == 0 ? Key.xy / Key.z / FrontFaceTanHalfFOV : Key.xy / Key.z;
+	const float2 UV = (Tangent + float2(1, 1)) * 0.5F;
 	
 	switch (FaceIndex)
 	{

@@ -414,11 +414,17 @@ CPU 的进程在跑，这是第二个混淆变量）。**`BaseSide` 到 2560 之
 `SceneCaptureSensor_WideAngleLens.cpp::BeginPlay()` 里保留的详细代码注释。回退
 后用真正确认生效的重编译方式（PowerShell + `cmake --build Build --target
 carla-unreal-editor`，用 DLL 时间戳而非退出码确认）验证：10 帧 × 8 相机生产采集
-可以稳定跑完。**结论：`front_main`/`front_narrow` 这两台窄 FOV 相机目前仍然天生
+可以稳定跑完。**结论（当时）：`front_main`/`front_narrow` 这两台窄 FOV 相机天生
 比广角相机模糊，是已知但未解决的架构限制**——如果以后要重新尝试这个方向：①每次
 重编译务必用 DLL 时间戳确认生效，不要信任 `BUILD_FINAL.bat` 通过 Bash 工具跑出来
 的退出码（见下面"关联坑"之后新增的构建工具说明）；②先在隔离场景下单独验证一个
 比较保守的 cap（如 1536），不要假设 2560 的失败模式就一定适用于更小的 cap。
+
+**2026-08-29 更新：问题已用完全不同的思路解决，见 §4.15**——本节这次失败的改动
+改的是 cube face 的**纹理分配尺寸**（`InitCustomFormat` 的 `Side`），§4.15 改的是
+cube face 的**实际拍摄视场角**（`CustomProjectionMatrix` 的 `HalfFOV`），两者是
+完全不同的变量，前者的 3 次卡死教训不适用于后者——不要因为看到这节的失败结论就
+放弃 §4.15 描述的方向。
 
 **顺带处理的一个关联坑**：本节排查过程中确认 `post_process_profile` 这个属性
 （会给 `Town10HD_Opt` 地图自动套用同名 JSON 档位）当时还没注册到鱼眼相机类
@@ -494,9 +500,21 @@ cmake --build Build --target carla-unreal-editor
 相机）在 Low 档位下，无论鱼眼还是官方针孔，同一栋脚手架建筑的立面纹理都是一片
 发灰发糊的噪点状色块，边缘、文字广告牌完全糊成一团；同一位置 Epic 档位下两种相机
 的纹理都变得清晰锐利、噪点消失、文字可辨。**鱼眼和针孔在同一档位下表现一致，说明
-这个"水墨画"观感是纹理流送/mip 精度随 Scalability 档位整体下降导致的，和等距投影
-实现、cubemap 重采样、Bayer RAW 管线都没有关系**——4.12 里"鱼眼比针孔更糊"的结论
-（同 FOV Laplacian 差 6.5 倍）依然成立，但那是另一个独立问题，不要混为一谈。
+这个"水墨画"观感是 Scalability 档位整体下降导致的，和等距投影实现、cubemap 重采样、
+Bayer RAW 管线都没有关系**——4.12 里"鱼眼比针孔更糊"的结论（同 FOV Laplacian 差
+6.5 倍）依然成立，但那是另一个独立问题，不要混为一谈。
+
+**（2026-08-28 事后更正）具体机制不是"纹理 mip/流送精度"**：当时只做了黑盒对照
+测试就下了"纹理流送/mip 精度"这个结论，没有去读 `CarlaDeviceProfileSelectorModule.cpp`
+的实际实现。后来读了源码（这是项目自己写的一套 4 档 `Low/Medium/High/Epic` 选择器，
+不是 UE5 原版 Scalability 预设，见该文件），发现 **`Low` 档的 `TextureQuality` 其实
+是满档 3（和 Epic 一样），根本不存在纹理降采样**。真正的差异更可能来自：
+①`ReflectionQuality=0`（Lumen 反射整个关掉，只留固定反射探针，玻璃幕墙没有倒影）；
+②`r.Nanite.Streaming.PoolSize` 从 512MB 砍到 128MB（缩小4倍——脚手架这类复杂几何体
+如果流送池装不下,会被迫退化成低精度代理网格，产生噪点状发糊，这是几何精度问题不是
+纹理采样问题）；③`r.LumenScene.SurfaceCache.AtlasSize` 从 4096 砍到 2048（GI 精度
+打折）。以后再遇到类似"发糊"问题，先读这个模块的源码确认具体是哪个 CVar 的锅，
+不要停留在黑盒对照就下结论。
 
 **根因**：本次崩溃排查（4.12/4.13）期间，为了让编辑器重启更快，我在每次手动
 `UnrealEditor.exe ... -CarlaAutoPlay` relaunch 时都加上了 `-quality-level=Low`——
@@ -514,6 +532,77 @@ cmake --build Build --target carla-unreal-editor
 测试用，容易被误用到需要评估画质的场景）。**结论：以后任何要评估图像清晰度/
 画质，或者作为"最终验证"用途的采集，启动编辑器前必须确认没有带
 `-quality-level=Low`**，见 `CLAUDE.md` 对应位置补充的警告。
+
+### 4.15 窄 FOV 等距鱼眼相机模糊：真正修好了（per-face 原生 FOV 捕获，非纹理缩放）
+
+2026-08-29，用户没有接受 §4.12"已知但未解决"的结论，提出了关键反问：真实长焦镜头/
+狙击枪瞄准镜看得清楚是因为它本来就只用感光元件的全部像素采样一个小角度范围，不是
+先拍一张宽幅照片再数字裁剪放大——同样 1280×960 像素，如果只用来采样窄 FOV 那一小块
+角度范围，密度天然就够，根本不需要把纹理分辨率抬到 2560/4096。
+
+**这句话精确指出了 §4.12 那次失败尝试从一开始就选错了修复对象**：cube face 的
+**纹理分配尺寸**（`FaceRenderTargets[i]->InitCustomFormat` 的 `Side`）从来都不是
+根因的正确修复点——真正的根因是 `SceneCaptureSensor_WideAngleLens.cpp` 构造函数里
+硬编码 `constexpr auto FOV = 90.0F * Deg2Rad;`，**不管相机自己配置的 FOV 是多少，
+每个 cube face 永远按 90° 视场角拍摄**，再靠 `WideAngleLens.usf` 的 `SampleCubemap()`
+从这张固定 90° 的图里截取一小块重采样成窄 FOV 输出——这才是"先拍宽幅再数字裁剪"的
+真正含义。§4.12 的修复思路（放大纹理分辨率）只是给这个天生就更"糊"的裁剪结果做
+超采样补偿，方向就不对，也难怪会在 UE5 RDG/descriptor pool 层面撞出 3 次卡死。
+
+**新方案**：让单面相机（`front_main`/`front_narrow`，`CubemapRenderMask` 只有
+`CubeFace_PosX` 一位）的那一张 cube face，直接按相机自己的真实 FOV（乘上和
+`ComputeCubemapRenderMask()` 自身判定"单面够用"完全同源的安全余量：`bFOVMaskEnable`
+关闭时 √2，开启时 1.0）拍摄，而不是永远 90°——复用的还是原有的
+`bUseCustomProjectionMatrix`/`CustomProjectionMatrix` 机制（构造函数里本来就在用，
+只是把写死的角度换成动态算出来的角度），**完全不碰纹理分配那一行代码**，这正是
+和 §4.12 那次失败尝试在架构上的本质区别：改的是"这张图拍多大范围"，不是"这张图占
+多少显存"。
+
+具体改动（都在 `Unreal/CarlaUnreal/Plugins/Carla/`）：
+- `Source/Carla/Sensor/SceneCaptureSensor_WideAngleLens.h/.cpp`：新增
+  `UpdateFrontFaceProjection()`，在每处 `CubemapRenderMask` 被重新计算的地方
+  （FOV/分辨率/相机模型/FOV mask 开关变化时，含构造函数）之后调用一次；只有
+  `CubemapRenderMask` 精确等于"仅 front face"时才收窄，否则保持原来的 45°
+  半视场角（即 90° 整面）不变，未使用到这个优化的相机（`front_wide`/B柱/翼子板/
+  后视，都需要多面）行为和之前完全一致。
+- `Source/Carla/Util/CameraModelUtil.h/.cpp`：`FDistortCubemapToImageOptions`
+  新增 `FrontFaceTanHalfFOV` 字段，一路透传到 `WideAngleLensShader` 的 shader
+  parameter struct（两个模板特化都要改）。
+- `Shaders/WideAngleLens.usf`：`SampleCubemap()` 原来的 UV 映射
+  `(Key.xy/Key.z + 1) * 0.5` 隐含假设每张 face 精确覆盖 ±45°（`tan(45°)=1`）——
+  只有 `FaceIndex==0` 时改成先除以 `FrontFaceTanHalfFOV` 再映射，其余 5 张面
+  （在单面相机场景下本来就不会被采样到）保持原样不变。
+
+**验证过程**（按用户要求的"先 1 个相机、确认好使再上 8 个"协议）：
+1. 单相机隔离测试：`front_narrow`（26.25° 垂直/35° 水平 FOV）同点位同 tick 分别用
+   `sensor.camera.rgb_fisheye`（新代码）和官方 `sensor.camera.rgb`（针孔，几何
+   ground truth）各拍一张，脚本见
+   `outputs/native_fov_face_test/test_narrow_vs_pinhole.py`。裁剪放大对比确认
+   两者内容像素级对齐（脚手架/路灯/广告牌位置分毫不差，排除"内容整体搬移/错误
+   缩放"这个最危险的失败模式），且清晰度已经和针孔参照基本一致——相比修复前的
+   基线图（`outputs/single_camera_test/single_front_narrow.png`）肉眼可见的
+   发灰噪点/模糊边缘，提升非常明显。
+2. C++ 侧新增一条 `UE_LOG(LogCarla, Log, ...)` 打印实际生效的 half-FOV，日志
+   证实：`front_narrow` 收窄到 24.75°（90° 面收窄到 49.5°，约 1.8 倍密度），
+   `front_main` 收窄到 35.36°（约 1.3 倍密度）——和手算完全一致，证明修复
+   路径确实按预期执行，不是"看着顺眼"这种主观判断。
+3. 真实 8 相机生产管线 `main_collection.py` 跑 10 帧，10 帧 × 8 相机全部成功
+   （`outputs/native_fov_face_test/prod8_test/`），无卡死。用 `rawpy` 解码全部
+   8 路 DNG 目视核查：`front_narrow`/`front_main` 文字广告牌清晰可辨，
+   `front_wide`/B柱/后视等多面相机画面正常、无接缝/黑块等新缺陷。
+
+**过程中踩到一个和这次修复完全无关的坑，一并记录**：`main_collection.py --town`
+默认值是 `'Town10HD'`，但这个工程实际只有 `Town10HD_Opt`（`client.get_available_maps()`
+确认，没有不带 `_Opt` 后缀的版本）。`client.load_world('Town10HD')` 在服务端报
+`Map 'Town10HD' not found`，虽然客户端 Python 层有 `try/except` 正确捕获并回退到
+`client.get_world()`，但**服务端 UE5 进程本身在这次失败的 `load_world` 之后就没再
+正常响应**（`Get-Process` 显示 `Responding: False`，WS 45GB+），下一条 RPC
+（`world.apply_settings()`）直接超时——**卡死发生在任何相机被创建之前**，和这次
+的 per-face FOV 改动无关（甚至和鱼眼相机整体都无关），是 `load_world` 失败路径
+本身的引擎健壮性问题。以后调用 `main_collection.py`/`setup_carla()` 一律显式传
+`--town Town10HD_Opt`，不要用默认值；如果编辑器已经手动加载了某张地图，最稳妥
+的做法是先用 `client.get_world().get_map().name` 确认真实地图名再决定要不要传
+`--town`。
 
 ## 5. 相关文档
 

@@ -100,6 +100,7 @@ ASceneCaptureSensor_WideAngleLens::ASceneCaptureSensor_WideAngleLens(const FObje
     LongitudeOffset(),
     FOVFadeSize(),
     CubemapRenderMask(0),
+    FrontFaceHalfFOV(PI * 0.25F),
     CubemapSampler(CameraModelUtil::GetSampler(SF_AnisotropicLinear)),
     bUseRayTracing(true),
     bEnablePostProcessingEffects(true),
@@ -199,6 +200,13 @@ ASceneCaptureSensor_WideAngleLens::ASceneCaptureSensor_WideAngleLens(const FObje
         FaceCapture->bUseRayTracingIfEnabled = bUseRayTracing;
         SceneCaptureSensorWideAngleLens_local_ns::SetCameraDefaultOverrides(*FaceCapture);
     }
+
+    // FaceCaptures now exist (loop above); safe to narrow the front face's
+    // capture angle if this camera's default FOV (90 deg) already qualifies
+    // as single-face. Real narrowing normally happens later once SetFOVAngle
+    // is called via Set()/UActorBlueprintFunctionLibrary::SetCamera, which
+    // re-invokes this same update.
+    UpdateFrontFaceProjection();
 }
 
 void ASceneCaptureSensor_WideAngleLens::Set(const FActorDescription& Description)
@@ -223,7 +231,10 @@ void ASceneCaptureSensor_WideAngleLens::SetImageSize(uint32 InWidth, uint32 InHe
     PrincipalPointY = ImageHeight * 0.5F;
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 void ASceneCaptureSensor_WideAngleLens::SetImageSize(int32 Width, int32 Height)
@@ -247,7 +258,10 @@ void ASceneCaptureSensor_WideAngleLens::SetCameraModel(ECameraModel NewCameraMod
     CameraModel = NewCameraModel;
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 float ASceneCaptureSensor_WideAngleLens::GetFOVAngle() const
@@ -293,7 +307,10 @@ void ASceneCaptureSensor_WideAngleLens::SetFOVAngle(float NewFOV)
         KannalaBrandtCameraCoefficients);
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 void ASceneCaptureSensor_WideAngleLens::SetFOVAngleX(float NewFOV)
@@ -311,7 +328,10 @@ void ASceneCaptureSensor_WideAngleLens::SetFOVAngleX(float NewFOV)
         KannalaBrandtCameraCoefficients);
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 void ASceneCaptureSensor_WideAngleLens::SetPrincipalPoint(float Cx, float Cy)
@@ -347,7 +367,10 @@ void ASceneCaptureSensor_WideAngleLens::SetFocalLength(float NewFocalLength)
     YFocalLength = NewFocalLength;
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 void ASceneCaptureSensor_WideAngleLens::SetCameraCoefficients(TArrayView<const float> Coefficients)
@@ -360,7 +383,10 @@ void ASceneCaptureSensor_WideAngleLens::SetCameraCoefficients(TArrayView<const f
     KannalaBrandtCameraCoefficients = TArray<float>(Coefficients);
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 void ASceneCaptureSensor_WideAngleLens::SetCameraCoefficients(const TArray<float>& Coefficients)
@@ -395,7 +421,10 @@ void ASceneCaptureSensor_WideAngleLens::SetRenderPerspective(bool bEnable)
     bRenderPerspective = bEnable;
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 bool ASceneCaptureSensor_WideAngleLens::GetRenderEquirectangular() const
@@ -410,7 +439,10 @@ void ASceneCaptureSensor_WideAngleLens::SetRenderEquirectangular(bool bEnable)
     bRenderEquirectangular = bEnable;
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 bool ASceneCaptureSensor_WideAngleLens::GetFOVMaskEnable() const
@@ -425,7 +457,10 @@ void ASceneCaptureSensor_WideAngleLens::SetFOVMaskEnable(bool bEnable)
     bFOVMaskEnable = bEnable;
 
     if (UpdateRenderMask)
+    {
         CubemapRenderMask = ComputeCubemapRenderMask();
+        UpdateFrontFaceProjection();
+    }
 }
 
 float ASceneCaptureSensor_WideAngleLens::GetFOVFadeSize() const
@@ -531,6 +566,57 @@ uint8 ASceneCaptureSensor_WideAngleLens::ComputeCubemapRenderMask() const
     return (uint8)Mask;
 }
 
+void ASceneCaptureSensor_WideAngleLens::UpdateFrontFaceProjection()
+{
+    using ProjectionMatrixType = std::conditional_t<
+        (bool)ERHIZBuffer::IsInverted,
+        FReversedZPerspectiveMatrix,
+        FPerspectiveMatrix>;
+
+    constexpr float DefaultHalfFOV = PI * 0.25F; // 45 deg: the original fixed 90 deg face.
+    constexpr float MinHalfFOV = 1.0F * (PI / 180.0F); // 1 deg floor, avoid a degenerate projection.
+    static const float Sqrt2 = sqrtf(2.0f);
+
+    float NewHalfFOV = DefaultHalfFOV;
+
+    // Narrowing the face is only valid when SampleCubemap() (WideAngleLens.usf)
+    // is guaranteed to only ever look up FaceIndex 0 for this camera — every
+    // other face's UV math still assumes the untouched +/-45 deg convention.
+    const bool bSingleFace = CubemapRenderMask == (1U << CubeFace_PosX);
+
+    if (bSingleFace)
+    {
+        // Mirrors ComputeCubemapRenderMask()'s own safety margin exactly, so
+        // the captured cone is never narrower than what that mask decision
+        // already assumed was sufficient to cover.
+        const float Margin = GetFOVMaskEnable() ? 1.0F : Sqrt2;
+        const float CandidateHalfFOV = FMath::Max(XFOVAngle, YFOVAngle) * 0.5F * Margin;
+
+        // Only narrow when it buys a meaningful density gain; otherwise keep
+        // the original behavior untouched rather than churn the projection
+        // matrix for a negligible difference.
+        if (CandidateHalfFOV < DefaultHalfFOV * 0.95F)
+            NewHalfFOV = FMath::Max(CandidateHalfFOV, MinHalfFOV);
+    }
+
+    if (FMath::IsNearlyEqual(NewHalfFOV, FrontFaceHalfFOV, 1e-5F))
+        return;
+
+    FrontFaceHalfFOV = NewHalfFOV;
+
+    auto* FrontFaceCapture = FaceCaptures[CubeFace_PosX];
+    if (FrontFaceCapture != nullptr)
+    {
+        FrontFaceCapture->CustomProjectionMatrix =
+            ProjectionMatrixType(FrontFaceHalfFOV, 1.0F, 1.0F, GNearClippingPlane);
+    }
+
+    UE_LOG(LogCarla, Log,
+        TEXT("[WideAngleLens] %s: front face capture half-FOV -> %.2f deg (bSingleFace=%d, XFOV=%.2f, YFOV=%.2f)"),
+        *GetName(), FMath::RadiansToDegrees(FrontFaceHalfFOV), bSingleFace,
+        FMath::RadiansToDegrees(XFOVAngle), FMath::RadiansToDegrees(YFOVAngle));
+}
+
 void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended);
@@ -590,6 +676,7 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
     DistortedOptions.bRenderEquirectangular = bRenderEquirectangular;
     DistortedOptions.bFOVMaskEnable = bFOVMaskEnable;
     DistortedOptions.bRenderPerspective = bRenderPerspective;
+    DistortedOptions.FrontFaceTanHalfFOV = FMath::Tan(FrontFaceHalfFOV);
 
     ENQUEUE_RENDER_COMMAND(WideAngleLensCommand)(
         [WeakSelf,
@@ -695,28 +782,75 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
     // come out visibly blurrier than the wide ones (front_wide/rear 90°) even
     // though all 8 share the same 1280x960 output resolution.
     //
-    // 2026-08-28: attempted an FOV-scaled Side (narrower lens -> proportionally
-    // larger cube face) to fix this. Under the full 8-camera production rig,
-    // cap=2560 hard-crashed on a freshly relaunched editor before a single
-    // frame was captured: CreateDescriptorHeap(E_INVALIDARG) while rendering
-    // SceneCaptureCamera_WideAngleLens6, WS observed 44-46 GB (4090 has 24 GB
-    // VRAM). Tried lowering the cap to 1536 next, but that retest is NOT
-    // trustworthy: the rebuild between the two attempts silently no-op'd
-    // (cmd.exe invoked through the Bash-tool-driven BUILD_FINAL.bat printed a
-    // banner and returned in <1s without touching CMakeCache.txt or spawning
-    // cl.exe/ninja — confirmed reproducible 3x), so the "cap=1536" run almost
-    // certainly re-tested the same already-crashed 2560 binary and just
-    // happened to fail as a 60s world.tick() timeout instead of a hard crash
-    // (that run was also under a CPU-pinning background process, a second
-    // confound). No cap between BaseSide and 2560 has actually been verified.
-    // Reverted to the original fixed Side (no FOV scaling) below — verified
-    // stable with a real rebuild (PowerShell + `cmake --build Build --target
-    // carla-unreal-editor`, DLL timestamp delta confirmed, not exit code) and
-    // a full 10-frame / 8-camera production collection completing cleanly.
-    // If revisiting the FOV-scaling idea: (1) verify every rebuild by DLL
-    // timestamp delta, not exit code — BUILD_FINAL.bat run through the Bash
-    // tool's cmd.exe is not reliable here; (2) retest a modest cap (e.g.
-    // ~1536) in isolation before assuming 2560's failure mode generalizes.
+    // 2026-08-28, first attempt (reverted): scaled Side for ALL 6
+    // FaceRenderTargets uniformly, regardless of which faces
+    // ComputeCubemapRenderMask() would actually render into. Under the full
+    // 8-camera rig this hard-crashed at cap=2560 (CreateDescriptorHeap
+    // E_INVALIDARG, WS 44-46 GB) and a cap=1536 retest was inconclusive (a
+    // silently no-op'd rebuild meant it likely re-tested the already-crashed
+    // 2560 binary; that run also had an unrelated CPU-pinning background
+    // process running, a second confound now removed). Reverted to a single
+    // fixed Side for a while — see git history on this file for that
+    // intermediate state.
+    //
+    // 2026-08-28, second attempt (reverted): re-examined
+    // ComputeCubemapRenderMask() and found front_main/front_narrow's FOV
+    // stays under 90 degrees even after the sqrt(2) safety margin, so their
+    // mask is CubeFace_PosX only (1 of 6 faces) — WideAngleLens.usf's
+    // SampleCubemap() never samples the other 5 for these cameras. Scaling
+    // only the mask-selected face (instead of all 6, as the first attempt
+    // did) should have cost under 250 MB total across both narrow cameras
+    // even at a 4096 cap — but memory-budget math turned out not to predict
+    // this pipeline's actual behavior at all. Tested twice:
+    //   - First test: GPU VRAM was independently discovered afterward to
+    //     have been at 23.1/24.6 GB from ~20 unrelated background desktop
+    //     apps. Hung on the first world.tick(); WS climbed 1.5->55 GB with
+    //     near-zero CPU and never recovered (had to force-kill).
+    //   - Retested the fully-reverted (no scaling) code under that same
+    //     near-full VRAM and got a similar WS-ballooning symptom (52 GB) —
+    //     so that first failure alone wasn't clean evidence against this
+    //     code specifically.
+    //   - Third test, after closing the background apps (nvidia-smi
+    //     confirmed 1.9-2.2/24.6 GB used both before spawning and again
+    //     right after the process recovered): spawning the 16-camera A/B
+    //     rig still failed the first world.tick() (30s timeout), WS
+    //     spiked to ~42 GB then dropped back to ~1.5 GB — the Windows
+    //     process itself recovered and looked idle/healthy (low WS,
+    //     "Responding: true"), but the CARLA RPC server inside it stayed
+    //     dead: even a trivial client.get_world() call timed out
+    //     repeatedly afterward (20s+), requiring another force-kill.
+    // Two independent hangs on the exact same operation (first tick after
+    // spawning these two per-face-enlarged cameras), the second with VRAM
+    // headroom confirmed both before and after, rules out VRAM contention
+    // as the sole explanation. This is real evidence of a defect in the
+    // per-face approach itself, not a memory-budget problem — most likely
+    // something about a camera's cube faces having non-uniform sizes
+    // breaks an assumption in the RDG/descriptor pipeline (a shared pool
+    // keyed without size, a synchronization primitive one of the newly
+    // large faces never signals, etc.). Reverted to a single fixed Side
+    // for all 6 faces after that.
+    //
+    // 2026-08-28, fourth attempt (also reverted — STOP retrying without a
+    // GPU/RDG profiler): both prior hangs were observed under a 16-camera
+    // A/B rig (8 fisheye + 8 pinhole test cameras) at an aggressive cap
+    // (4096, ~3.4x BaseSide for front_narrow). This attempt controlled for
+    // both variables at once: tested against the REAL production 8-camera
+    // pipeline (main_collection.py, no extra pinhole cameras) with the cap
+    // cut to 2048 (~1.6x BaseSide). Result: hung again, at the identical
+    // checkpoint (first world.tick() after spawning, 60s timeout this
+    // time since production uses a longer client timeout than the A/B
+    // script), WS climbed to ~48 GB, and this time the Windows process
+    // itself reported "Responding: False" (not just the CARLA RPC layer —
+    // worse than the third attempt's symptom). Three independent hangs now,
+    // each with a different risk factor removed (CPU contention, VRAM
+    // contention, extra test cameras, aggressive cap) and the failure
+    // still reproduces identically every time. This rules out "too much
+    // load" or "too aggressive a scale factor" as the explanation — it is
+    // the non-uniform face size itself, at any scale, under any camera
+    // count. Do not attempt a fifth variant of this idea without actually
+    // attaching RenderDoc or PIX to see what the first tick's GPU timeline
+    // looks like; further guessing at cap values or camera counts is not
+    // going to find this bug.
     const int32 Side = static_cast<int32>(std::max(GetImageWidth(), GetImageHeight()));
 
     CaptureRenderTarget->InitCustomFormat(

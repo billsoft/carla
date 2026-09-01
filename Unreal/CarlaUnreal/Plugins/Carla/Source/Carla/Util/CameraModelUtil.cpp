@@ -64,6 +64,7 @@ struct FWideAngleLensShaderBase
         SHADER_PARAMETER(uint32, Flags)
         SHADER_PARAMETER(float, LongitudeOffset)
         SHADER_PARAMETER(float, FOVFadeSize)
+        SHADER_PARAMETER(float, FrontFaceTanHalfFOV)
     END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -84,6 +85,7 @@ struct FWideAngleLensShaderBase<ECameraModel::KannalaBrandt>
         SHADER_PARAMETER(uint32, Flags)
         SHADER_PARAMETER(float, LongitudeOffset)
         SHADER_PARAMETER(float, FOVFadeSize)
+        SHADER_PARAMETER(float, FrontFaceTanHalfFOV)
         SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, Coefficients)
     END_SHADER_PARAMETER_STRUCT()
 };
@@ -204,7 +206,8 @@ static auto CreateDistortionParameters(
     float LongitudeOffset,
     float FOVFadeSize,
     bool RenderEquirectangular,
-    bool FovMaskEnable)
+    bool FovMaskEnable,
+    float FrontFaceTanHalfFOV)
 {
     const auto Center = FVector2D(Size) * 0.5 + PrincipalPointOffset;
     auto Parameters = GraphBuilder.AllocParameters<typename FShaderType::FParameters>();
@@ -220,6 +223,7 @@ static auto CreateDistortionParameters(
     Parameters->YFOVAngle = YFOVAngle;
     Parameters->LongitudeOffset = LongitudeOffset;
     Parameters->FOVFadeSize = FOVFadeSize;
+    Parameters->FrontFaceTanHalfFOV = FrontFaceTanHalfFOV;
     Parameters->Flags = 0;
     if (RenderEquirectangular)
         Parameters->Flags |= WAL_SHADER_FLAGS_EQUIRECTANGULAR;
@@ -242,7 +246,8 @@ static void ApplyDistortion(
     float LongitudeOffset,
     float FOVFadeSize,
     bool RenderEquirectangular,
-    bool FovMaskEnable)
+    bool FovMaskEnable,
+    float FrontFaceTanHalfFOV)
 {
     auto Parameters = CreateDistortionParameters<FShaderType>(
         GraphBuilder,
@@ -257,7 +262,8 @@ static void ApplyDistortion(
         LongitudeOffset,
         FOVFadeSize,
         RenderEquirectangular,
-        FovMaskEnable);
+        FovMaskEnable,
+        FrontFaceTanHalfFOV);
 
     GraphBuilder.AddPass(
         RDG_EVENT_NAME("WideAngleLens-Dispatch"),
@@ -292,6 +298,7 @@ static void ApplyDistortion(
     float FOVFadeSize,
     bool RenderEquirectangular,
     bool FovMaskEnable,
+    float FrontFaceTanHalfFOV,
     TArrayView<const float> KannalaBrandtCoefficients)
 {
     using FShaderType = FWideAngleLensShader_Custom;
@@ -309,7 +316,8 @@ static void ApplyDistortion(
         LongitudeOffset,
         FOVFadeSize,
         RenderEquirectangular,
-        FovMaskEnable);
+        FovMaskEnable,
+        FrontFaceTanHalfFOV);
 
     auto CoefficientBuffer = CreateStructuredBuffer(
         GraphBuilder,
@@ -574,7 +582,8 @@ namespace CameraModelUtil
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
                 Options.bRenderEquirectangular,
-                Options.bFOVMaskEnable);
+                Options.bFOVMaskEnable,
+                Options.FrontFaceTanHalfFOV);
             break;
         case ECameraModel::Stereographic:
             ApplyDistortion<FWideAngleLensShader_Stereographic>(
@@ -590,7 +599,8 @@ namespace CameraModelUtil
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
                 Options.bRenderEquirectangular,
-                Options.bFOVMaskEnable);
+                Options.bFOVMaskEnable,
+                Options.FrontFaceTanHalfFOV);
             break;
         case ECameraModel::Equidistant:
             ApplyDistortion<FWideAngleLensShader_Equidistance>(
@@ -606,7 +616,8 @@ namespace CameraModelUtil
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
                 Options.bRenderEquirectangular,
-                Options.bFOVMaskEnable);
+                Options.bFOVMaskEnable,
+                Options.FrontFaceTanHalfFOV);
             break;
         case ECameraModel::Equisolid:
             ApplyDistortion<FWideAngleLensShader_Equisolid>(
@@ -622,7 +633,8 @@ namespace CameraModelUtil
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
                 Options.bRenderEquirectangular,
-                Options.bFOVMaskEnable);
+                Options.bFOVMaskEnable,
+                Options.FrontFaceTanHalfFOV);
             break;
         case ECameraModel::Orthographic:
             ApplyDistortion<FWideAngleLensShader_Orthogonal>(
@@ -638,7 +650,8 @@ namespace CameraModelUtil
                 Options.LongitudeOffset,
                 Options.FOVFadeSize,
                 Options.bRenderEquirectangular,
-                Options.bFOVMaskEnable);
+                Options.bFOVMaskEnable,
+                Options.FrontFaceTanHalfFOV);
             break;
         case ECameraModel::KannalaBrandt:
             ApplyDistortion(
@@ -655,6 +668,7 @@ namespace CameraModelUtil
                 Options.FOVFadeSize,
                 Options.bRenderEquirectangular,
                 Options.bFOVMaskEnable,
+                Options.FrontFaceTanHalfFOV,
                 Options.KannalaBrandtCoefficients);
             break;
         default:

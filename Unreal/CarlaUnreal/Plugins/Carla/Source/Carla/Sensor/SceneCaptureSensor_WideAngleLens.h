@@ -214,6 +214,18 @@ protected:
   UFUNCTION(BlueprintCallable, BlueprintPure)
   uint8 ComputeCubemapRenderMask() const;
 
+  /// Re-derives FrontFaceHalfFOV from the camera's current FOV/mask state and,
+  /// when CubemapRenderMask selects the front face only, narrows that face's
+  /// CustomProjectionMatrix to match — so a telephoto-range equidistant camera
+  /// samples its (fixed-size) face render target across its own real angular
+  /// extent instead of always across a fixed 90 deg, trading away angular
+  /// resolution it never uses. Falls back to the original 90 deg/45 deg
+  /// half-FOV whenever more than one face is needed, since every other face's
+  /// SampleCubemap() UV math in WideAngleLens.usf still assumes the
+  /// untouched +/-45 deg convention. Call anywhere CubemapRenderMask is
+  /// recomputed (FOV, image size, camera model, FOV mask toggle...).
+  void UpdateFrontFaceProjection();
+
   void CaptureSceneExtended();
 
   virtual void BeginPlay() override;
@@ -279,6 +291,12 @@ protected:
   float FOVFadeSize;
 
   uint8 CubemapRenderMask;
+
+  /// Half-FOV (radians) currently baked into FaceCaptures[CubeFace_PosX]'s
+  /// CustomProjectionMatrix. PI/4 (45 deg, i.e. the original fixed 90 deg
+  /// face) whenever more than the front face is in use; otherwise narrowed to
+  /// match the camera's own FOV — see UpdateFrontFaceProjection().
+  float FrontFaceHalfFOV;
 
   FRHISamplerState* CubemapSampler;
 
