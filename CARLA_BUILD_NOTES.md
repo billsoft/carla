@@ -606,6 +606,9 @@ Bayer RAW 管线都没有关系**——4.12 里"鱼眼比针孔更糊"的结论�
 
 ## 5. 相关文档
 
+- **从零开始的线性搭建/部署 SOP（账号→两个仓库→引擎编译→补丁→CARLA 编译→
+  Python API→启动→打包）：[`ENVIRONMENT_SETUP.md`](./ENVIRONMENT_SETUP.md)**。
+  本文是按时间线组织的踩坑详册，两者配套使用。
 - 构建命令、目录结构速览：根目录 [`CLAUDE.md`](./CLAUDE.md)
 - 等距鱼眼 Bayer RAW 相机的完整实现细节：[`occnetv3_data_generator/README.md`](./occnetv3_data_generator/README.md)
 - 消费采集数据的网络：[`e2e_occ/README.md`](./e2e_occ/README.md)

@@ -69,6 +69,7 @@ python test_connection.py
 
 | 文件 | 说明 |
 |------|------|
+| `ENVIRONMENT_SETUP.md` | **从零搭建 carla + UE5 引擎开发环境的线性 SOP**（获取/编译/安装/启动/打包）|
 | `GUIDE.md` | 本文档 - 运行/排障指南 |
 | `CARLA_BUILD_NOTES.md` | 引擎获取、编译流程、踩坑记录 |
 | `CLAUDE.md` | Claude Code 项目配置说明 |

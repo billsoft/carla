@@ -34,7 +34,9 @@ call conda activate carla
 rem Verify Python
 for /f "tokens=*" %%i in ('python -c "import sys; print(sys.executable)"') do set PYTHON_EXE=%%i
 echo Using Python: %PYTHON_EXE%
-set PYTHON_ROOT=C:\Users\bills\.conda\envs\carla
+rem 2026-09-20: 旧路径 C:\Users\bills\.conda\envs\carla 已不存在，
+rem conda 环境实际在 C:\ProgramData\anaconda3\envs\carla（Python 3.10.19）。
+set PYTHON_ROOT=C:\ProgramData\anaconda3\envs\carla
 
 cd /d D:\code\carla
 

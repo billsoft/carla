@@ -58,7 +58,7 @@ cmake --build Build --target carla-help                  # 输出完整 target/o
 
 主要 CMake target：`carla-server`、`carla-client`、`carla-python-api(-install)`、`carla-unreal`、`carla-unreal-editor`、`carla-unreal-package[-shipping|-debug|-debuggame|-development|-test]`、`launch`、`launch-only`。完整列表见 `Build/Help.md`（由 `carla-help` target 生成）。
 
-初始环境搭建（首次，需要 GitHub 账号已关联 Epic Games 账号才能 clone UE5 fork，225GB+ 磁盘，3 小时+）：`CarlaSetup.bat`（Windows）/ `./CarlaSetup.sh --interactive`（Linux）。CARLA 仓库和 UE5 引擎 fork 是两个独立仓库、如何关联、编译时踩过的坑，完整记录见 `CARLA_BUILD_NOTES.md`。
+初始环境搭建（首次，需要 GitHub 账号已关联 Epic Games 账号才能 clone UE5 fork，225GB+ 磁盘，3 小时+）：`CarlaSetup.bat`（Windows）/ `./CarlaSetup.sh --interactive`（Linux）。**从零开始的完整线性搭建/打包部署 SOP 见 `ENVIRONMENT_SETUP.md`（含引擎 Setup/编译、2 处引擎本地补丁、Python API 安装、打包 target，换机器/重新 clone 时优先读它）**。CARLA 仓库和 UE5 引擎 fork 是两个独立仓库、如何关联、编译时踩过的坑，完整记录见 `CARLA_BUILD_NOTES.md`。
 
 ### 启动服务器 / 排障
 
