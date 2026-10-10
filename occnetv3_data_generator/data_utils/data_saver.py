@@ -307,7 +307,15 @@ class OccNetDataSaver:
         # 相机管线内部始终以 16-bit (0-65535) 传输，这里右移到目标位深模拟
         # 真实传感器的 ADC 精度，例如 12-bit: [0, 65535] → [0, 4095]。
         shift = 16 - self.raw_bit_depth
-        bayer_quantized = (bayer_u16 >> shift).astype(np.uint16) if shift > 0 else bayer_u16
+        # 四舍五入而不是直接右移截断（截断会让整幅图系统性偏暗约 0.5 LSB），
+        # 并限幅到目标位深的最大值，避免 65535 舍入后溢出到 2^bits。
+        if shift > 0:
+            max_val = (1 << self.raw_bit_depth) - 1
+            bayer_quantized = np.minimum(
+                (bayer_u16.astype(np.uint32) + (1 << (shift - 1))) >> shift, max_val
+            ).astype(np.uint16)
+        else:
+            bayer_quantized = bayer_u16
 
         try:
             # 使用 PIL/Pillow 保存单通道 16-bit TIFF（DNG 兼容）

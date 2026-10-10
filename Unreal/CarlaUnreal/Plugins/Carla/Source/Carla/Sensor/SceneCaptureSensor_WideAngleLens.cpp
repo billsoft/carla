@@ -286,10 +286,16 @@ void ASceneCaptureSensor_WideAngleLens::SetFOVAngle(float NewFOV)
 {
     NewFOV *= DegToRad;
 
-    bool UpdateRenderMask = NewFOV != YFOVAngle;
+    // XFOVAngle is derived from the aspect ratio, which SetImageSize() may have
+    // changed since the last call. Compare it too: otherwise a vertical FOV that
+    // happens to equal the previous one (e.g. the 90 deg default used by
+    // front_wide/rear) skips the mask / front-face refresh even though the
+    // horizontal FOV just changed.
+    const float NewXFOV = VerticalToHorizontal(NewFOV);
+    bool UpdateRenderMask = NewFOV != YFOVAngle || NewXFOV != XFOVAngle;
 
     YFOVAngle = NewFOV;
-    XFOVAngle = VerticalToHorizontal(NewFOV);
+    XFOVAngle = NewXFOV;
 
     YFocalLength = CameraModelUtil::ComputeDistance(
         CameraModel,

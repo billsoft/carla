@@ -54,16 +54,16 @@ namespace ImageUtil
         if (y % 2 == 0)  // 偶数行
         {
           if (x % 2 == 0)
-            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.R, 0.0f, 1.0f) * 65535.0f);  // R
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.R, 0.0f, 1.0f) * 65535.0f + 0.5f);  // R
           else
-            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f);  // G
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f + 0.5f);  // G
         }
         else  // 奇数行
         {
           if (x % 2 == 0)
-            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f);  // G
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.G, 0.0f, 1.0f) * 65535.0f + 0.5f);  // G
           else
-            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.B, 0.0f, 1.0f) * 65535.0f);  // B
+            BayerValue = static_cast<uint16>(FMath::Clamp(Pixel.B, 0.0f, 1.0f) * 65535.0f + 0.5f);  // B
         }
 
         OutBayerData[idx] = BayerValue;
