@@ -1,156 +1,118 @@
-# e2e_occ 训练算法
+# e2e_occ 训练
 
-> 对照 `train.py` / `loss.py` / `dataset.py` 实际代码核对过（2026-08-27）。网络结构见
-> [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
+> 2026-10 重构后版本，对照 `train.py` / `loss.py` / `dataset.py` / `pretrain_mae.py` 实际代码编写。
+> 网络结构见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。**重构前的 checkpoint 与新结构不兼容，需要重新训练。**
 
-## 1. 环境与启动
+## 1. 启动
 
 ```bash
 conda activate deepsys
 
-# 单帧训练（不用时序，config.use_temporal=False）
-python e2e_occ/train.py --data_root <dataset_dir> --batch_size 1 --epochs 100 --lr 1e-4 --amp --grad_accum 4
+# 先跑结构/几何自检（几何与时序方向有回归测试）
+python e2e_occ/verify_network.py
 
-# 时序训练（config.use_temporal=True，见 config.py，默认就是开的，temporal_frames=2）
-python e2e_occ/train.py --data_root <dataset_dir> --batch_size 1 --epochs 100 --amp
+# 训练（默认：时序 T=4、流式训练 tbptt=1、bf16）
+python e2e_occ/train.py --data_root <dataset_dir> --batch_size 1 --epochs 100 --amp --grad_accum 4
 
-# 从 checkpoint 恢复（config 也从 checkpoint 里读，避免结构不匹配）
-python e2e_occ/train.py --resume checkpoints/best_model.pth --data_root <dataset_dir> --amp
+# 消融：任意配置字段都可以在命令行覆盖
+python e2e_occ/train.py --data_root <dataset_dir> --amp --set use_sparse_fine=False temporal_attn_type=global
+
+# 可选：先用无标注 RAW 做 MAE 自监督预训练骨干，再加载
+python e2e_occ/pretrain_mae.py --data_root <dataset_dir> --epochs 20 --amp
+python e2e_occ/train.py --data_root <dataset_dir> --amp --pretrained_backbone checkpoints_mae/backbone.pth
+
+# 恢复（config 从 checkpoint 读取）
+python e2e_occ/train.py --resume checkpoints/last_model.pth --data_root <dataset_dir> --amp
 ```
 
-`--num_workers` 默认 `0`——`dataset.py` 顶部注释明确写了这是为了避开 Windows 下
-`DataLoader` 多进程的已知死锁问题，不要在 Windows 上不假思索地调大。
+Windows 下 `--num_workers` 保持 0（`DataLoader` 多进程死锁的已知问题）。
+**训练时不要同时运行占用 GPU 的程序**（游戏、OBS 录屏等）：显存不够时 Windows 会把显存
+溢出到系统内存，实测速度会慢几十倍且没有任何报错。
 
-## 2. 数据加载与归一化（`dataset.py`）
+## 2. 数据（`dataset.py`）
 
-- DNG 用 `rawpy.imread(...).raw_image_visible` 读取 Bayer RAW（未做去马赛克，网络自己在
-  `raw_embed.py` 里学习 RGGB 分离），归一化除数是 `2^raw_bit_depth - 1`，`raw_bit_depth`
-  从 `calibration/intrinsics.json` 的顶层 `raw_bit_depth` 字段读取（老数据集没有这个字段
-  时退化为 12，历史上唯一实际用过的值）。**这个值必须和采集时 `main_collection.py
-  --raw-bit-depth` 用的值一致**——DNG 的 EXIF `BitsPerSample` 标签靠不住（PIL 的
-  TIFF writer 会按存储容器宽度把它覆盖成 16，不反映真实位深），所以不要指望从 DNG 文件本身
-  反推位深，必须靠 calibration 里这份记录。
-- 相机参数按优先级加载（`_get_frame_params`）：① `camera_params/{sample_id}.npz`
-  （逐帧绝对外参，`dense_occupancy_collection` 格式）→ ② `ego_pose/{sample_id}.npy` +
-  `calibration/extrinsics.json`（`occnetv3_data_generator` 当前格式，`Camera→World =
-  Vehicle→World @ Camera→Vehicle`）→ ③ 纯静态标定退化（时序对齐会失效，仅调试用）。
-- 时序样本：`config.use_temporal=True` 时 `sequence_length = config.temporal_frames`
-  （默认 2），`__getitem__` 返回形状多一个 `T` 维：`images [T,N,1,H,W]`、
-  `voxels [T,X,Y,Z]`、`extrinsics [T,N,4,4]`。`intrinsics` 不含 `T` 维（相机内参恒定）。
+每个样本返回带时间维 `T` 的字典（非时序配置时 `T=1`）：
 
-## 3. 训练循环（`train_epoch`，`train.py`）
-
-### 3.1 单帧分支（`is_sequence=False`，`images.dim()==5`）
-
-标准写法：`autocast → forward → loss → scaler.scale(loss/grad_accum).backward()`，每
-`grad_accum` 步做一次 `unscale_ → clip_grad_norm_(1.0) → scaler.step → scaler.update →
-zero_grad`。
-
-### 3.2 时序分支 + TBPTT（`is_sequence=True`，`images.dim()==6`）
-
-**TBPTT**（Truncated Backpropagation Through Time，`TBPTT_CHUNK_SIZE=2`，硬编码在
-`train_epoch` 里，不是命令行参数）：把长度为 `T` 的序列切成每 2 帧一个 chunk，chunk 之间
-`memory = memory.detach()` 截断计算图，chunk 内部才允许梯度贯穿多帧——这是显存和"时序
-记忆需要跨帧梯度学习"之间的折中，序列越长这个折中越重要。
-
-```python
-for t_start in range(0, T, 2):
-    if memory is not None:
-        memory = memory.detach()          # 截断梯度历史
-
-    chunk_loss, total_weight = 0, 0
-    for t in range(t_start, min(t_start+2, T)):
-        # ego_motion: C_{t-1}→C_t，语义是"上一帧体素坐标系→当前帧体素坐标系"
-        ego_motion = inv(extrinsics[t][:,0]) @ extrinsics[t-1][:,0]   if t > 0 else None
-
-        with autocast:
-            outputs = model(images[t], intrinsics, extrinsics[t], memory=memory, ego_motion=ego_motion)
-            loss_t = criterion(outputs['semantic'], voxels[t])['total']
-            time_weight = 1.0 + t / max(1, T-1)     # 越靠后的帧权重越高
-            chunk_loss += loss_t * time_weight
-            total_weight += time_weight
-
-        memory = outputs['memory']
-
-    # 每个 chunk 结束才 backward 一次；除以 total_weight 消掉时间加权引入的量纲，
-    # 再除以 grad_accum_steps 保持和单帧分支的梯度累积语义一致
-    scaler.scale(chunk_loss / (total_weight * grad_accum_steps)).backward()
-```
-
-**时间加权**（`time_weight = 1.0 + t/(T-1)`，`T=2` 时 t=0 权重 1.0、t=1 权重 2.0）：
-后期帧融合了更多历史信息，理应预测更准，用更高权重逼着模型把时序信息真正用起来，而不是
-学会"忽略 memory 也能把每帧单独做对"这种退化解。
-
-**为什么 chunk 内部 backward，而不是整个序列结束才 backward 一次**：`scaler`（AMP 的
-`GradScaler`）状态在每次 `backward()` 后才明确；如果攒着整个序列的 loss 到最后一次性
-backward，中间每个 chunk 该不该 detach 的边界会和 scaler 的 scale 因子搅在一起，
-容易出细节错误。按 chunk 提交是这份实现里刻意保持的写法。
-
-日志里有个专门的自检：每个 epoch 第 0 个 batch 的 `t=1`（也就是第一次算出
-`ego_motion`）会把 4×4 矩阵原样打印出来——如果矩阵看起来完全不像一个刚性变换（比如平移
-分量是几百几千米，或者旋转子块不是正交阵），基本可以断定是外参来源或 ego_motion 计算方式
-出了问题，不用等一整个 epoch 训练完看 loss 才发现。
-
-### 3.3 混合精度（AMP）
-
-`torch.amp.autocast('cuda', enabled=args.amp)` + `torch.amp.GradScaler('cuda',
-enabled=args.amp)`，`--amp` 不传就是纯 FP32（`GradScaler(enabled=False)` 时
-`scaler.scale()`/`unscale_()`/`step()` 都是无操作直通，代码不用为开关 AMP 写两套分支）。
-
-### 3.4 梯度裁剪与梯度累积
-
-`nn.utils.clip_grad_norm_(model.parameters(), 1.0)`，固定阈值，在 `scaler.unscale_()`
-之后、`scaler.step()` 之前做（AMP 下必须先 unscale 再裁剪，否则裁剪到的是放大过的梯度）。
-梯度累积步数由 `--grad_accum` 控制，单帧/时序两个分支共用同一段"每
-`grad_accum_steps` 步才真正 `step()`"的逻辑。
-
-### 3.5 优化器与学习率
-
-`AdamW(lr=1e-4 默认, weight_decay=0.01 默认)` + `CosineAnnealingLR(T_max=epochs)`，
-每个 epoch 结束 `scheduler.step()` 一次（不是每个 batch）。
-
-## 4. 损失函数（`loss.py`，`OccupancyLoss`）
-
-```python
-total = cross_entropy(pred, target) + lovasz_weight(默认0.5) * lovasz_softmax(pred, target)
-```
-
-- 两项都会先用 `target != ignore_index`（默认 `255`）过滤掉无效体素再算，valid 数量为 0
-  时直接返回全 0 loss（不会报错中断训练，但要留意这种情况在日志里是否频繁出现——频繁出现
-  说明某个 batch 的体素真值整体有问题）。
-- Lovász-Softmax 是逐类别算的：对每个出现过的类别（`fg.sum()>0` 才参与），把预测误差
-  降序排序后配合 Lovász 梯度（`_lovasz_grad`，标准的 Jaccard/IoU 次梯度公式）加权求和，
-  再对所有出现过的类别取平均。它直接优化的是 IoU 而不是逐像素分类准确率，这也是为什么
-  同时保留交叉熵——纯 Lovász 早期训练信号弱（几乎所有类别一开始都预测错，排序后的梯度
-  结构建立较慢），交叉熵负责把训练"启动"起来。
-
-`num_classes=18` 从 `config.num_classes` 传入，和 `voxel_head.py` 输出通道数一致，改
-类别数时两处要一起改（权威定义见
-`occnetv3_data_generator/config/occupancy_config.py`）。
-
-## 5. 显存优化手段一览
-
-| 手段 | 位置 | 作用 |
+| 键 | 形状 | 说明 |
 |---|---|---|
-| 逐相机 + 逐头串行采样 | `deformable_attention.py` | 避免 8 相机并行造成的显存峰值（详见 ARCHITECTURE.md 3.6） |
-| Fine 阶段禁用 Self-Attention | `config.use_fine_self_attention=False` | 102,400 个查询做 `Q×Q` 自注意力会 OOM |
-| Fine 阶段梯度检查点 | `occ_decoder.py` `checkpoint_fine=True` | 用重算换显存，Coarse 阶段（仅 5,000 查询）不需要 |
-| TemporalFusion 梯度检查点 | `temporal_fusion.py` `use_checkpoint=True` | 同上 |
-| TBPTT（chunk=2） | `train.py` | 截断长序列的反传路径，见 3.2 |
-| 混合精度 AMP | `train.py` `--amp` | FP16 前向+反向，FP32 权重更新（`GradScaler`） |
-| 梯度累积 | `train.py` `--grad_accum` | 等效放大 batch size 而不增加单步显存 |
-| Depthwise Conv3D | `occ_decoder.py` fine_spatial_conv | 参数量 `256×3³≈6.9K` vs 标准卷积 `256²×3³≈1.8M` |
+| `images` | `[T,8,1,960,1280]` | DNG 读出的 Bayer RAW / `(2^raw_bit_depth-1)`，位深从 `calibration/intrinsics.json` 读 |
+| `voxels` | `[T,400,400,32]` uint8 | 语义真值（GPU 上转 long） |
+| `ego_motion` | `[T,4,4]` | `inv(pose_t) @ pose_{t-1}`，t=0 为单位阵 |
+| `intrinsics` | `[8,3,3]` | 等距投影内参（原图分辨率） |
+| `extrinsics` | `[8,4,4]` | Camera(OpenCV)→Vehicle 静态标定（见 ARCHITECTURE.md 第 2 节） |
+| `depth` / `has_depth` | `[T,8,120,160]` / `[T]` | 深度监督目标（米，0=无效） |
+| `flow` / `flow_mask` / `has_flow` | `[T,3,400,400,32]` f16 / `[T,400,400,32]` / `[T]` | 场景流目标 |
 
-没有一个是"可有可无"的可选项——这几个手段任意去掉一个，在这台机器的显存（RTX 4090,
-~24GB）上大概率会在 Fine 阶段（102,400 查询）OOM，改代码前先想清楚要动的是哪一层。
+- **序列不跨场景**：按 `scene_XXXX_frame_YYYY` 解析，只有同一场景且帧号连续的 T 帧才组成一个样本。
+  相邻序列起点间隔由 `sequence_stride` 控制，默认 0 = T（不重叠，每帧每 epoch 只处理一次）；
+  设为 1 时序列全部重叠，样本数约 ×T，epoch 耗时也约 ×T。
+- **深度目标的换算**：采集侧深度相机是**针孔** `sensor.camera.depth`（水平 FOV = 配置 `fov`，
+  与 RGB 同位姿），值是平面 z 深度；RGB 是等距鱼眼。对鱼眼 stride-8 的每个特征像素：等距反投影
+  得射线 → 投影到针孔深度图取值 → 除以射线 z 分量得到沿射线距离。针孔覆盖不到的鱼眼边角
+  （广角相机的四角）标为无效。直接按像素下标读深度图是错的。
+- **流场目标语义**：`generate_flow` 写的是**相对自车**速度 × dt（车辆系，米），只在动态物体
+  体素内非零。所以流场损失只在 `flow_mask` 内计算。
+- 已弃用的 `camera_params/*.npz` 格式不再支持。缺 `ego_pose` 时 ego_motion 退化为单位阵并告警。
 
-## 6. 关于性能/精度指标
+## 3. 训练循环（`train.py::run_sequence`）
 
-本文档不列具体的 mIoU / 推理延迟 / 显存占用数字。旧版本文档里有过一批具体数字
-（如"mIoU 38.7%"、"60ms/帧"），那些是等距投影迁移**之前**、相机模型和数据管线都不同
-的一次训练结果，迁移之后没有重新验证过，continuing 引用会误导判断。等
-`dataset_10k` 正式采集完成、跑过一轮完整训练后，把新的实测数字（数据来源、GPU 型号、
-epoch 数、batch size 一并注明）写回本节，不要脱离具体训练配置单独写一个数字。
+逐帧前向一个序列，记忆跨帧携带：
 
-`e2e_occ/verify_network.py` 提供的是**结构正确性**检查（形状、NaN/Inf、显存能否装得下、
-等距投影几何是否自洽），不是性能基准，跑一遍绿灯只说明"网络能跑"，不说明"网络学得好"。
+```python
+for t in range(T):
+    if t % tbptt == 0: memory = memory.detach()
+    out = model(images[:, t], K, E, memory, ego_motion[:, t] if t>0 else None, time_delta)
+    loss_t = E2ELoss(out, targets_t)
+    chunk += loss_t * (1 + t/(T-1))          # 越靠后的帧权重越高
+    if 段结束: backward(chunk / Σ_全序列 w / grad_accum)
+```
+
+时间加权按**整个序列**的权重和归一化，任意 tbptt 下帧间相对权重都保留（若按每段归一化，
+tbptt=1 时 `loss·w/w` 会把加权完全抵消）。
+
+- **`--tbptt 1`（默认）= 流式训练**：每帧单独反向、记忆逐帧 detach，显存与单帧相同
+  （StreamPETR 的做法）。为保证此时 GRU 仍能学习，时序模块把 GRU 新记忆经 `mem_out`
+  回注到当前帧输出（否则 GRU 输出只在被 detach 的下一帧用到，永远没有梯度）。
+  `--tbptt 2+` 让梯度穿过记忆，显存按帧数线性增长。
+- **混合精度**：`--amp_dtype bf16`（默认）不需要 loss scaling；`fp16` 时启用 `GradScaler`。
+- **学习率**：AdamW(lr=2e-4, wd=0.01)，前 `--warmup_steps`(500) 步线性 warmup，之后按优化步
+  余弦退火（不再是每 epoch 一步）。
+- 梯度裁剪 1.0；`--grad_accum` 梯度累积。
+- **验证**：计算各损失项 + **mIoU**（不含 0:free，与 Occ3D 等基准一致）；按 mIoU 保存
+  `best_model.pth`，每个 epoch 另存 `last_model.pth`。
+- 隐式头（`head_type=implicit`）训练时每帧采样 `implicit_train_points`(262,144) 个点：
+  一半来自非空体素，一半均匀随机；验证时对整个网格分块查询。
+
+## 4. 损失（`loss.py::E2ELoss`）
+
+```
+total = CE + 0.5·Lovász                       （语义）
+      + depth_loss_weight · CE(深度 bin)       （64 个对数均匀 bin，1~60m，仅有效像素）
+      + flow_loss_weight · SmoothL1(β=0.1)     （仅 flow_mask 内）
+      + coarse_occ_loss_weight · BCE          （粗格是否含非空体素，max-pool 真值）
+```
+
+- Lovász 在超过 `lovasz_max_points`(100 万) 体素时子采样：保留全部非空体素，空体素随机补足。
+  全量 512 万体素做逐类排序单帧要多占数 GB 显存。
+- 输出层零附近初始化：初始语义 CE ≈ ln18 ≈ 2.89、深度 CE ≈ ln64 ≈ 4.16（重构前初始 CE ≈ 7）。
+- `ignore_index=255` 的体素不参与语义损失与 mIoU。
+
+## 5. 显存手段
+
+| 手段 | 位置 |
+|---|---|
+| 稀疏细化（只对 25% 细体素做交叉注意力） | `occ_decoder.py`，`use_sparse_fine` |
+| 细阶段 / 时序模块 / 稠密头梯度检查点 | `checkpoint_fine`、`use_checkpoint`、`checkpoint_head` |
+| 可变形注意力逐相机循环 + 查询分块（32,768） | `deformable_attention.py` |
+| Lovász 子采样 | `lovasz_max_points` |
+| 流式训练（tbptt=1） | `train.py` |
+| bf16 autocast | `train.py --amp` |
+
+实测训练峰值（默认配置，单帧）约 8.1 GB。作为对照：重构过程中加稠密头梯度检查点和 Lovász
+子采样之前，同一网络单帧约 10.6 GB，两帧共同反向（tbptt=2）超出了当时可用的约 15 GB 显存。
+
+## 6. 指标
+
+本文不写 mIoU / 延迟数字：重构后尚未在真实数据集上完整训练。完整训练后把实测结果（数据集、
+GPU、epoch、batch、配置开关）写回这里。`verify_network.py` 全绿只说明结构、几何、梯度通路正确，
+不说明网络学得好。

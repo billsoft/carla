@@ -451,9 +451,8 @@ class CameraManager:
 
         fx/fy 默认各向同性相等（垂直 FOV 推导，按宽高比换算成水平方向），只有
         camera_config.py 里显式设置了该相机的 'fov_horizontal' 时 fx 才会独立于 fy——
-        这种情况下这个 K 矩阵如实反映了各向异性的焦距，但要注意 e2e_occ 网络当前的
-        射线编码（position_encoding.py）还是假设 fx=fy 的各向同性模型，暂不支持
-        各向异性，用之前需要先确认/升级那边的算法。
+        这种情况下这个 K 矩阵如实反映了各向异性的焦距，e2e_occ/geometry.py 的等距正/反投影
+        按 fx、fy 分别归一化，支持各向异性。
 
         cx/cy 默认精确几何中心，只有显式设置了 'principal_point' 才会是真实光心。
 
@@ -521,12 +520,18 @@ class CameraManager:
         cp, sp = np.cos(pitch), np.sin(pitch)
         cr, sr = np.cos(roll),  np.sin(roll)
 
-        # ZYX 旋转矩阵（Vehicle→Camera 方向，对应 Camera→Vehicle 的转置）
-        # 这里构建的是 Camera→Vehicle（即相机轴在车辆坐标系中的方向）
+        # Camera→Vehicle 旋转（列 = UE 相机局部轴 x前/y右/z上 在车辆坐标系中的方向）。
+        # 必须与 UE 的 FRotationMatrix 逐项一致（pitch 正值=抬头，见引擎 Rotator.h），这才是
+        # 引擎实际渲染的相机朝向。不要改用 carla.Transform.get_matrix()：上游 #9751 把
+        # LibCarla 客户端的 pitch/roll 符号翻转了，但 Rotation→FRotator 是原样传递，UE 端没改，
+        # 二者在 pitch/roll≠0 时不一致（rear 相机 pitch=8° 差 0.28）。2026-10 之前这里第三行
+        # 是 (-sp, cp*sr, cp*cr)，与翻转后的客户端一致、与渲染相反。e2e_occ/dataset.py 通过
+        # extrinsics.json 的 rotation_convention 标记区分新旧数据，旧数据加载时自动修正。
+        # 注意相机轴仍是 UE 约定，转成网络使用的 OpenCV 约定(x右 y下 z前) 由 dataset 完成。
         R = np.array([
-            [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
-            [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
-            [  -sp,            cp*sr,             cp*cr  ]
+            [cp*cy,  cy*sp*sr - sy*cr,  -cy*sp*cr - sy*sr],
+            [cp*sy,  sy*sp*sr + cy*cr,  -sy*sp*cr + cy*sr],
+            [   sp,           -cp*sr,              cp*cr  ]
         ], dtype=np.float32)
 
         T = np.eye(4, dtype=np.float32)

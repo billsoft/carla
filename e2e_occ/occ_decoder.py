@@ -2,137 +2,136 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
 try:
     from .position_encoding import SineCosinePositionEncoding3D
     from .deformable_attention import DeformableDecoderLayer
-except (ImportError, ValueError):
+    from .temporal_fusion import TemporalFusionModule
+    from .geometry import voxel_centers
+    from .layers import FeedForward, make_norm
+except ImportError:
     from position_encoding import SineCosinePositionEncoding3D
     from deformable_attention import DeformableDecoderLayer
+    from temporal_fusion import TemporalFusionModule
+    from geometry import voxel_centers
+    from layers import FeedForward, make_norm
+
 
 class OccupancyDecoder(nn.Module):
+    """粗 → 时序融合 → 细 两阶段 3D 查询解码器。
+
+    查询点 = 体素中心（车辆坐标系，米，由 config.voxel_range 计算），不再是 [0,1] 边界网格。
+    稀疏模式（use_sparse_fine）：粗阶段额外预测每格的占用 logit，细阶段只对上采样后
+    占用概率最高的 fine_keep_ratio 比例细体素做交叉注意力，其余保留粗特征上采样的初值，
+    最后 scatter 回稠密网格。
+    """
+
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.coarse_query = nn.Parameter(torch.randn(1, config.num_coarse_queries, config.embed_dim) * 0.02)
-        self.pos_3d = SineCosinePositionEncoding3D(config.embed_dim)
-        
+        dim = config.embed_dim
+        self.coarse_query = nn.Parameter(torch.randn(1, config.num_coarse_queries, dim) * 0.02)
+        self.pos_3d = SineCosinePositionEncoding3D(dim)
+
         self.coarse_layers = nn.ModuleList([
-            DeformableDecoderLayer(
-                config.embed_dim, config.num_heads, config.num_cameras,
-                config.num_sample_points, dropout=config.dropout,
-                use_self_attn=config.use_self_attention # Use config switch
-            ) for _ in range(config.decoder_layers)
+            DeformableDecoderLayer(config, use_self_attn=config.use_self_attention)
+            for _ in range(config.decoder_layers)
         ])
-        
         self.coarse_to_fine = nn.Sequential(
-            nn.LayerNorm(config.embed_dim),
-            nn.Linear(config.embed_dim, config.embed_dim * 2),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.embed_dim * 2, config.embed_dim),
-            nn.LayerNorm(config.embed_dim),
+            make_norm(dim, config.norm_type),
+            FeedForward(dim, 2.0, config.dropout, config.ffn_type),
         )
-        
+        self.coarse_to_fine_norm = make_norm(dim, config.norm_type)
         self.fine_layers = nn.ModuleList([
-            DeformableDecoderLayer(
-                config.embed_dim, config.num_heads, config.num_cameras,
-                config.num_sample_points, dropout=config.dropout,
-                use_self_attn=config.use_fine_self_attention # Controlled by config (default False, 102K queries 开启会 OOM)
-            ) for _ in range(config.decoder_layers)
+            DeformableDecoderLayer(config, use_self_attn=config.use_fine_self_attention)
+            for _ in range(config.decoder_layers)
         ])
-        
-        self.register_buffer('coarse_ref', self._create_reference_points(config.coarse_size))
-        self.register_buffer('fine_ref', self._create_reference_points(config.fine_size))
-        
-        # Temporal Fusion Module
-        if config.use_temporal:
-            from temporal_fusion import TemporalFusionModule
-            self.temporal_fusion = TemporalFusionModule(
-                dim=config.embed_dim,
-                num_heads=config.num_heads,
-                dropout=config.dropout,
-                use_checkpoint=True,
-                config=config
-            )
 
-        # Fine Stage Spatial Consistency (Option B: Spatial Conv)
+        self.register_buffer('coarse_pts', voxel_centers(config.coarse_size, config.voxel_range), persistent=False)
+        self.register_buffer('fine_pts', voxel_centers(config.fine_size, config.voxel_range), persistent=False)
+
+        if config.use_temporal:
+            self.temporal_fusion = TemporalFusionModule(config, use_checkpoint=True)
+
+        # 粗阶段占用概率：稀疏细化的选择依据（同时作为辅助监督）
+        self.coarse_occ_head = nn.Sequential(
+            make_norm(dim, config.norm_type), nn.Linear(dim, dim // 2), nn.GELU(), nn.Linear(dim // 2, 1))
+
         self.fine_spatial_conv = nn.Sequential(
-            nn.Conv3d(config.embed_dim, config.embed_dim, kernel_size=3, padding=1, groups=config.embed_dim),
-            nn.BatchNorm3d(config.embed_dim),
+            nn.Conv3d(dim, dim, kernel_size=3, padding=1, groups=dim),
+            nn.BatchNorm3d(dim),
             nn.GELU(),
         )
-
-        # Checkpoint Strategy
         self.checkpoint_coarse = False
         self.checkpoint_fine = True
-    
-    def _create_reference_points(self, size):
-        x = torch.linspace(0, 1, size[0])
-        y = torch.linspace(0, 1, size[1])
-        z = torch.linspace(0, 1, size[2])
-        grid_x, grid_y, grid_z = torch.meshgrid(x, y, z, indexing='ij')
-        ref = torch.stack([grid_x, grid_y, grid_z], dim=-1)
-        return ref.view(-1, 3)
-    
-    def forward(self, image_feats, intrinsics=None, extrinsics=None, memory=None, ego_motion=None):
-        B = image_feats.shape[0]
-        device = image_feats.device
+
+    def _run_layers(self, layers, query, pts, image_feats, intrinsics, extrinsics, use_ckpt):
+        for layer in layers:
+            if use_ckpt and self.training:
+                query = checkpoint(layer, query, pts, image_feats, intrinsics, extrinsics, use_reentrant=False)
+            else:
+                query = layer(query, pts, image_feats, intrinsics, extrinsics)
+        return query
+
+    def forward(self, image_feats, intrinsics, extrinsics, memory=None, ego_motion=None, time_delta=None):
+        """
+        image_feats: {stride: [B, N, C, H, W]}
+        返回 dict:
+          fine_feats        [B, fx, fy, fz, C]
+          memory            [B, 5000, C] 或 None
+          coarse_occ_logits [B, cx, cy, cz]
+          fine_selected     [B, K] 稀疏模式下被细化的细体素索引（否则 None）
+        """
+        B = next(iter(image_feats.values())).shape[0]
+        device = self.coarse_query.device
         cx, cy, cz = self.config.coarse_size
-        
-        # Coarse Stage
-        coarse_pos = self.pos_3d(cx, cy, cz, device)
-        query = self.coarse_query.expand(B, -1, -1) + coarse_pos.unsqueeze(0)
-        ref = self.coarse_ref.unsqueeze(0).expand(B, -1, -1)
-        
-        for layer in self.coarse_layers:
-            if self.checkpoint_coarse and self.training:
-                query = checkpoint(layer, query, ref, image_feats, intrinsics, extrinsics, use_reentrant=False)
-            else:
-                query = layer(query, ref, image_feats, intrinsics, extrinsics)
-            
-        coarse_feats = query.view(B, cx, cy, cz, -1).permute(0, 4, 1, 2, 3)
-        
-        # Temporal Fusion (BEV Space)
+        dim = self.config.embed_dim
+
+        # ---- 粗阶段 ----
+        query = self.coarse_query.expand(B, -1, -1) + self.pos_3d(cx, cy, cz, device).unsqueeze(0)
+        pts = self.coarse_pts.unsqueeze(0).expand(B, -1, -1)
+        query = self._run_layers(self.coarse_layers, query, pts, image_feats, intrinsics, extrinsics,
+                                 self.checkpoint_coarse)
+
+        # ---- 时序融合 ----
         new_memory = None
-        if self.config.use_temporal and hasattr(self, 'temporal_fusion'):
-             # [B, C, X, Y, Z] -> [B, X*Y*Z, C]
-             coarse_flat = coarse_feats.permute(0, 2, 3, 4, 1).flatten(1, 3)
-             # Pass ego_motion and spatial shape for alignment
-             fused_flat, new_memory = self.temporal_fusion(
-                 coarse_flat, 
-                 memory, 
-                 ego_motion=ego_motion, 
-                 spatial_shape=(cx, cy, cz)
-             )
-             # Reshape back [B, Q, C] -> [B, X, Y, Z, C] -> [B, C, X, Y, Z]
-             coarse_feats = fused_flat.view(B, cx, cy, cz, self.config.embed_dim).permute(0, 4, 1, 2, 3)
-        
-        # Fine Stage Setup
+        if self.config.use_temporal:
+            query, new_memory = self.temporal_fusion(query, memory, ego_motion=ego_motion, time_delta=time_delta)
+
+        coarse_occ_logits = self.coarse_occ_head(query).view(B, cx, cy, cz)
+        coarse_feats = query.view(B, cx, cy, cz, dim).permute(0, 4, 1, 2, 3)
+
+        # ---- 细阶段初值 ----
         fx, fy, fz = self.config.fine_size
-        fine_feats = F.interpolate(coarse_feats, size=(fx, fy, fz), mode='trilinear', align_corners=False)
-        fine_feats = fine_feats.permute(0, 2, 3, 4, 1).reshape(B, -1, self.config.embed_dim)
-        fine_feats = self.coarse_to_fine(fine_feats)
-        
-        fine_pos = self.pos_3d(fx, fy, fz, device)
-        query = fine_feats + fine_pos.unsqueeze(0)
-        ref = self.fine_ref.unsqueeze(0).expand(B, -1, -1)
-        
-        # Fine Layers with Checkpointing
-        for layer in self.fine_layers:
-            if self.checkpoint_fine and self.training:
-                query = checkpoint(layer, query, ref, image_feats, intrinsics, extrinsics, use_reentrant=False)
-            else:
-                query = layer(query, ref, image_feats, intrinsics, extrinsics)
-                
-        # Fine Stage Spatial Consistency
-        # query is [B, Q, C] -> [B, fx, fy, fz, C]
-        query_reshaped = query.view(B, fx, fy, fz, -1)
-        # Permute to [B, C, fx, fy, fz] for Conv3d
-        query_vol = query_reshaped.permute(0, 4, 1, 2, 3).contiguous()
-        # Apply Conv3d and Residual
-        query_vol_out = self.fine_spatial_conv(query_vol)
-        query_vol = query_vol + query_vol_out
-        # Permute back to [B, fx, fy, fz, C] for output
-        output = query_vol.permute(0, 2, 3, 4, 1)
-        
-        return output, new_memory
+        fine = F.interpolate(coarse_feats, size=(fx, fy, fz), mode='trilinear', align_corners=False)
+        fine = fine.permute(0, 2, 3, 4, 1).reshape(B, -1, dim)
+        fine = self.coarse_to_fine_norm(fine + self.coarse_to_fine(fine))
+        fine = fine + self.pos_3d(fx, fy, fz, device).unsqueeze(0)
+        fine_pts = self.fine_pts.unsqueeze(0).expand(B, -1, -1)
+
+        selected = None
+        if self.config.use_sparse_fine:
+            Qf = fine.shape[1]
+            K = max(1, int(Qf * self.config.fine_keep_ratio))
+            score = F.interpolate(coarse_occ_logits.detach().unsqueeze(1).float(), size=(fx, fy, fz),
+                                  mode='trilinear', align_corners=False).view(B, -1)
+            selected = score.topk(K, dim=1).indices                                    # [B, K]
+            idx_c = selected.unsqueeze(-1).expand(-1, -1, dim)
+            q_sel = fine.gather(1, idx_c)
+            p_sel = fine_pts.gather(1, selected.unsqueeze(-1).expand(-1, -1, 3))
+            q_sel = self._run_layers(self.fine_layers, q_sel, p_sel, image_feats, intrinsics, extrinsics,
+                                     self.checkpoint_fine)
+            fine = fine.scatter(1, idx_c, q_sel.to(fine.dtype))
+        else:
+            fine = self._run_layers(self.fine_layers, fine, fine_pts, image_feats, intrinsics, extrinsics,
+                                    self.checkpoint_fine)
+
+        # ---- 空间一致性（Depthwise Conv3D 残差）----
+        vol = fine.view(B, fx, fy, fz, dim).permute(0, 4, 1, 2, 3).contiguous()
+        vol = vol + self.fine_spatial_conv(vol)
+        return {
+            'fine_feats': vol.permute(0, 2, 3, 4, 1),
+            'memory': new_memory,
+            'coarse_occ_logits': coarse_occ_logits,
+            'fine_selected': selected,
+        }

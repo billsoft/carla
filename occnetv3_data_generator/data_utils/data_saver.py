@@ -185,19 +185,25 @@ class OccNetDataSaver:
             # 分解为平移和旋转
             translation = T[:3, 3].tolist()
 
-            # 从旋转矩阵提取欧拉角 (简化,假设无roll)
             R = T[:3, :3]
             rotation_matrix = R.tolist()
+            # camera_config 的 rotation 顺序是 (pitch, yaw, roll)，单位度
+            pitch, yaw, roll = (float(a) for a in cam_config['rotation'])
 
             extrinsics_data[cam_id] = {
                 'translation': [float(x) for x in translation],
-                'rotation': {
-                    'roll': 0.0,
-                    'pitch': 0.0,
-                    'yaw': float(cam_config['rotation'][2]),  # yaw从config读取
-                },
+                'rotation': {'pitch': pitch, 'yaw': yaw, 'roll': roll},
                 'rotation_matrix': [[float(x) for x in row] for row in rotation_matrix]
             }
+
+        # 约定标记（e2e_occ/dataset.py 据此区分新旧数据）：
+        # rotation_convention='ue_frotator'：rotation_matrix 与 UE FRotationMatrix 一致（pitch 正值=抬头），
+        #   即引擎实际渲染时的相机朝向。注意它和当前 LibCarla 客户端 carla.Transform.get_matrix()
+        #   不同——上游 #9751 改了客户端的 pitch/roll 符号，但 UE 端 FRotator 没改。
+        #   旧数据没有此字段，其 pitch/roll 符号与渲染相反，加载时自动修正。
+        # camera_axes='ue'：矩阵的列是 UE 相机轴（x前 y右 z上），Camera→Vehicle
+        extrinsics_data['rotation_convention'] = 'ue_frotator'
+        extrinsics_data['camera_axes'] = 'ue'
 
         with open(self.output_dir / 'calibration' / 'extrinsics.json', 'w') as f:
             json.dump(extrinsics_data, f, indent=2)

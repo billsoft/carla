@@ -1,9 +1,74 @@
+"""
+OccNetV3 数据集加载（occnetv3_data_generator 格式）。
+
+2026-10 几何约定重构（详见 geometry.py 文件头）：
+- 外参返回 Camera(OpenCV)→Vehicle 静态安装标定，**不再**乘车辆世界位姿；
+  旧代码把 ego_pose @ T_cam_vehicle（含绝对世界位姿）喂给网络，导致 3D 查询被当成
+  世界原点附近的点，投影整体失效。
+- 标定文件里的旋转矩阵是 UE 相机轴（x前 y右 z上），这里统一转换为 OpenCV 轴（x右 y下 z前）；
+  旧版采集代码的旋转公式在 pitch/roll≠0 时与 CARLA 不一致（rear 相机），按标记自动修正。
+- ego_motion 由车辆位姿计算：inv(pose_t) @ pose_{t-1}（上一帧车辆系 → 当前帧车辆系）。
+- 时序序列不跨场景（按 scene_XXXX_frame_YYYY 的场景号和连续帧号切分）。
+- 额外加载深度（深度辅助监督目标）和场景流（流场头目标）。
+
+已弃用的 dense_occupancy_collection 格式（camera_params/*.npz）不再支持。
+"""
+
+import json
+import math
+import os
+import re
+
+import warnings
+
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
-import os
-import json
-import rawpy
+
+try:
+    import rawpy
+except ImportError:          # 允许在没有 rawpy 的环境里做纯网络测试
+    rawpy = None
+
+try:
+    from .geometry import (cam_to_vehicle_from_mount, cam_ue_to_vehicle_to_cv, legacy_rotation_to_carla,
+                           equidistant_unproject, level_pixel_to_image)
+except ImportError:
+    from geometry import (cam_to_vehicle_from_mount, cam_ue_to_vehicle_to_cv, legacy_rotation_to_carla,
+                          equidistant_unproject, level_pixel_to_image)
+
+
+_SAMPLE_RE = re.compile(r'^(?P<scene>.+)_frame_(?P<frame>\d+)$')
+
+
+def default_calibration(num_cameras=8, image_size=(960, 1280)):
+    """从 occnetv3_data_generator/config/camera_config.py 构建标定（无 calibration/ 目录时、
+    以及测试时使用）。返回 K [N,3,3]、T_cam(cv)→vehicle [N,4,4]、pinhole 深度相机水平 FOV(度) [N]。"""
+    # 按文件路径加载，避免与 e2e_occ/config.py 同名模块冲突
+    import importlib.util
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo_root, 'occnetv3_data_generator', 'config', 'camera_config.py')
+    spec = importlib.util.spec_from_file_location('occnetv3_camera_config', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    TESLA_CAMERAS = mod.TESLA_CAMERAS
+
+    H, W = image_size
+    cams = sorted(TESLA_CAMERAS, key=lambda c: c['index'])[:num_cameras]
+    K = np.zeros((len(cams), 3, 3), dtype=np.float32)
+    T = np.zeros((len(cams), 4, 4), dtype=np.float32)
+    hfov = np.zeros(len(cams), dtype=np.float32)
+    for i, c in enumerate(cams):
+        fov_v = c['fov_vertical']
+        fov_h = c.get('fov_horizontal', fov_v * W / H)
+        K[i] = [[(W / 2.0) / (math.radians(fov_h) / 2.0), 0, 0],
+                [0, (H / 2.0) / (math.radians(fov_v) / 2.0), 0],
+                [0, 0, 1]]
+        cx, cy = c.get('principal_point', (W / 2.0, H / 2.0))
+        K[i, 0, 2], K[i, 1, 2] = cx, cy
+        T[i] = cam_to_vehicle_from_mount(c['position'], c['rotation'])
+        hfov[i] = c['fov']
+    return torch.from_numpy(K), torch.from_numpy(T), hfov
 
 
 class OccupancyDataset(Dataset):
@@ -12,33 +77,63 @@ class OccupancyDataset(Dataset):
         self.split = split
         self.config = config
         self.num_cameras = config.num_cameras if config else 8
-        self.image_size = config.image_size if config else (960, 1280)
-        self.voxel_size = config.voxel_size if config else (400, 400, 32)
-
-        # Temporal settings
-        self.sequence_length = 1
-        if config and hasattr(config, 'use_temporal') and config.use_temporal:
-            self.sequence_length = getattr(config, 'temporal_frames', 1)
+        self.image_size = tuple(config.image_size) if config else (960, 1280)
+        self.voxel_size = tuple(config.voxel_size) if config else (400, 400, 32)
+        self.sequence_length = config.temporal_frames if (config and config.use_temporal) else 1
+        self.load_depth = bool(config and config.use_depth_aux)
+        self.load_flow = bool(config and config.use_flow_head)
+        self.depth_stride = config.depth_stride if config else 8
 
         self.samples = self._load_samples()
-
-        # 路径探测：按优先级尝试多种数据来源
-        # 优先级 1：camera_params/{sample_id}.npz（dense_occupancy_collection 格式，含绝对 extrinsics）
-        self._camera_params_dir = os.path.join(data_root, 'camera_params')
-        self._has_per_frame_params = os.path.isdir(self._camera_params_dir)
-
-        # 优先级 2：ego_pose/{sample_id}.npy（occnetv3_data_generator 格式，Vehicle→World 绝对位姿）
-        self._ego_pose_dir = os.path.join(data_root, 'ego_pose')
-        self._has_ego_pose = os.path.isdir(self._ego_pose_dir)
-
-        # 静态标定（calibration/intrinsics.json + extrinsics.json）
-        # 用于：①相机内参（恒定）②当逐帧绝对外参不可用时的退化备用
-        self._cached_intrinsics, self._cached_extrinsics = self._load_static_calibration()
-
-        # DNG 保存时的位深（occnetv3_data_generator --raw-bit-depth，默认 12）。
-        # 从 calibration/intrinsics.json 的顶层 'raw_bit_depth' 字段读取；旧数据集
-        # （采集时代码还没有这个字段）没有就退化为 12，和当时唯一的实际行为一致。
+        self.index = self._build_sequence_index()
+        self.intrinsics, self.extrinsics, self.depth_hfov = self._load_calibration()
         self.raw_bit_depth = self._load_raw_bit_depth()
+        self._depth_maps = {}
+        self._warned = set()
+
+    # ------------------------------------------------------------------
+    # 样本与序列索引
+    # ------------------------------------------------------------------
+
+    def _load_samples(self):
+        split_file = os.path.join(self.data_root, f'{self.split}.txt')
+        if os.path.exists(split_file):
+            with open(split_file, 'r') as f:
+                return [line.strip() for line in f if line.strip()]
+        occ_dir = os.path.join(self.data_root, 'occupancy')
+        if os.path.isdir(occ_dir):
+            return sorted(os.path.splitext(n)[0] for n in os.listdir(occ_dir) if n.endswith('.npy'))
+        return []
+
+    def _build_sequence_index(self):
+        """序列起点列表：T 帧必须属于同一场景且帧号连续。无法解析帧号时退化为按列表顺序。"""
+        T = self.sequence_length
+        if T <= 1:
+            return list(range(len(self.samples)))
+        stride = (self.config.sequence_stride if self.config else 0) or T
+        parsed = [_SAMPLE_RE.match(s) for s in self.samples]
+        starts = []
+        next_allowed = {}                                   # 每个场景下一个允许的起点（实现步长，场景内独立计数）
+        for i in range(len(self.samples) - T + 1):
+            scene = parsed[i]['scene'] if parsed[i] else None
+            if i < next_allowed.get(scene, 0):
+                continue
+            ok = True
+            for t in range(1, T):
+                a, b = parsed[i + t - 1], parsed[i + t]
+                if a is None or b is None:
+                    continue
+                if a['scene'] != b['scene'] or int(b['frame']) != int(a['frame']) + 1:
+                    ok = False
+                    break
+            if ok:
+                starts.append(i)
+                next_allowed[scene] = i + stride
+        return starts
+
+    # ------------------------------------------------------------------
+    # 标定
+    # ------------------------------------------------------------------
 
     def _load_raw_bit_depth(self):
         int_path = os.path.join(self.data_root, 'calibration', 'intrinsics.json')
@@ -49,219 +144,186 @@ class OccupancyDataset(Dataset):
                 return int(data['raw_bit_depth'])
         return 12
 
-    # ------------------------------------------------------------------
-    # 样本列表加载
-    # ------------------------------------------------------------------
-
-    def _load_samples(self):
-        split_file = os.path.join(self.data_root, f'{self.split}.txt')
-        if os.path.exists(split_file):
-            with open(split_file, 'r') as f:
-                return [line.strip() for line in f.readlines()]
-        return []
-
-    # ------------------------------------------------------------------
-    # 静态标定（备用，相机安装参数，所有帧相同）
-    # ------------------------------------------------------------------
-
-    def _load_static_calibration(self):
-        """加载 calibration/ 目录下的静态相机安装参数（备用）。
-        注意：这些参数是固定的相机安装外参，不含车辆位姿，
-        不能用于跨帧 ego_motion 计算。
-        """
+    def _load_calibration(self):
         calib_dir = os.path.join(self.data_root, 'calibration')
         int_path = os.path.join(calib_dir, 'intrinsics.json')
         ext_path = os.path.join(calib_dir, 'extrinsics.json')
-
-        if not os.path.exists(int_path) or not os.path.exists(ext_path):
-            return self._get_default_camera_params()
+        if not (os.path.exists(int_path) and os.path.exists(ext_path)):
+            warnings.warn(f'{calib_dir} 缺少标定文件，改用 occnetv3_data_generator/config/camera_config.py 构建')
+            return default_calibration(self.num_cameras, self.image_size)
 
         with open(int_path, 'r') as f:
             int_data = json.load(f)
         with open(ext_path, 'r') as f:
             ext_data = json.load(f)
+        # 新版采集代码写入的约定标记；旧数据集没有这些字段
+        rot_conv = ext_data.get('rotation_convention', 'legacy')
+        axes = ext_data.get('camera_axes', 'ue')
 
-        K_list, E_list = [], []
+        K_list, T_list, hfov = [], [], []
         for i in range(self.num_cameras):
-            cam_name = f'cam_{i}'
-            cfg_int = int_data[cam_name]
+            ci = int_data[f'cam_{i}']
             K = torch.eye(3)
-            K[0, 0] = cfg_int['fx']
-            K[1, 1] = cfg_int['fy']
-            K[0, 2] = cfg_int['cx']
-            K[1, 2] = cfg_int['cy']
+            K[0, 0], K[1, 1], K[0, 2], K[1, 2] = ci['fx'], ci['fy'], ci['cx'], ci['cy']
             K_list.append(K)
+            hfov.append(float(ci.get('fov', 90.0)))
 
-            cfg_ext = ext_data[cam_name]
-            E = torch.eye(4)
-            E[:3, :3] = torch.tensor(cfg_ext['rotation_matrix'])
-            E[:3, 3] = torch.tensor(cfg_ext['translation'])
-            E_list.append(E)
-
-        return torch.stack(K_list), torch.stack(E_list)
-
-    def _get_default_camera_params(self):
-        intrinsics = torch.eye(3).unsqueeze(0).repeat(self.num_cameras, 1, 1)
-        intrinsics[:, 0, 0] = 800
-        intrinsics[:, 1, 1] = 800
-        intrinsics[:, 0, 2] = self.image_size[1] / 2
-        intrinsics[:, 1, 2] = self.image_size[0] / 2
-        extrinsics = torch.eye(4).unsqueeze(0).repeat(self.num_cameras, 1, 1)
-        return intrinsics, extrinsics
+            ce = ext_data[f'cam_{i}']
+            R = np.array(ce['rotation_matrix'], dtype=np.float64)
+            if rot_conv != 'ue_frotator':
+                R = legacy_rotation_to_carla(R)
+            T_ue = np.eye(4)
+            T_ue[:3, :3] = R
+            T_ue[:3, 3] = ce['translation']
+            T = T_ue if axes == 'opencv' else cam_ue_to_vehicle_to_cv(T_ue)
+            T_list.append(torch.from_numpy(T.astype(np.float32)))
+        return torch.stack(K_list), torch.stack(T_list), np.array(hfov, dtype=np.float32)
 
     # ------------------------------------------------------------------
-    # 逐帧相机参数（含车辆绝对位姿，用于 ego_motion 计算）
+    # 深度监督目标：pinhole 平面深度 → 等距鱼眼特征像素的射线距离
     # ------------------------------------------------------------------
 
-    def _load_per_frame_params(self, sample_id):
-        """加载逐帧相机参数 npz，包含当前帧车辆绝对位姿。
+    def _depth_sampling_map(self, cam, depth_hw):
+        """采集侧深度相机是**针孔** sensor.camera.depth（水平 FOV = 配置里的 'fov'，与 RGB 同位姿），
+        值是平面 z 深度。对鱼眼 depth_stride 层级的每个特征像素：等距反投影得到射线方向 →
+        投影到针孔相机取深度 → 除以方向 z 分量得到沿射线的距离。针孔覆盖不到的鱼眼边角标记无效。"""
+        key = (cam, depth_hw)
+        if key in self._depth_maps:
+            return self._depth_maps[key]
+        s = self.depth_stride
+        h, w = self.image_size[0] // s, self.image_size[1] // s
+        ys = level_pixel_to_image(torch.arange(h, dtype=torch.float32), s)
+        xs = level_pixel_to_image(torch.arange(w, dtype=torch.float32), s)
+        v, u = torch.meshgrid(ys, xs, indexing='ij')
+        K = self.intrinsics[cam]
+        d = equidistant_unproject(u, v, K[0, 0], K[1, 1], K[0, 2], K[1, 2])     # [h, w, 3]
+        Hd, Wd = depth_hw
+        f_p = (Wd / 2.0) / math.tan(math.radians(float(self.depth_hfov[cam])) / 2.0)
+        dz = d[..., 2]
+        safe_z = dz.clamp(min=1e-3)
+        px = f_p * d[..., 0] / safe_z + Wd / 2.0
+        py = f_p * d[..., 1] / safe_z + Hd / 2.0
+        ix, iy = px.floor().long(), py.floor().long()
+        valid = (dz > 1e-3) & (ix >= 0) & (ix < Wd) & (iy >= 0) & (iy < Hd)
+        ix = ix.clamp(0, Wd - 1)
+        iy = iy.clamp(0, Hd - 1)
+        m = (iy * Wd + ix, valid, dz)
+        self._depth_maps[key] = m
+        return m
 
-        npz 格式（由数据采集器 dense_occupancy_collection 生成）：
-            intrinsics: [N, 3, 3]  相机内参
-            extrinsics: [N, 4, 4]  World→Camera 变换（含当前帧车辆绝对位姿）
-
-        相邻帧的 extrinsics 差值即为 ego_motion，这是跨帧时序对齐的关键。
-        """
-        npz_path = os.path.join(self._camera_params_dir, f'{sample_id}.npz')
-        if not os.path.exists(npz_path):
-            return None, None
-
-        data = np.load(npz_path, allow_pickle=False)
-        intrinsics = torch.from_numpy(data['intrinsics'].astype(np.float32))  # [N, 3, 3]
-        extrinsics = torch.from_numpy(data['extrinsics'].astype(np.float32))  # [N, 4, 4]
-        return intrinsics, extrinsics
-
-    # ------------------------------------------------------------------
-    # ego_pose 路径（occnetv3_data_generator 格式）
-    # ------------------------------------------------------------------
-
-    def _load_ego_pose_params(self, sample_id):
-        """从 ego_pose/{sample_id}.npy 和静态 calibration 计算逐帧绝对外参。
-
-        occnetv3_data_generator 格式：
-            ego_pose/{sample_id}.npy  → (4,4) Vehicle→World（每帧不同）
-            calibration/extrinsics.json → Camera→Vehicle（相机安装位姿，恒定）
-
-        组合公式：
-            T_cam_world = ego_pose @ T_cam_vehicle   (Camera→World，每帧不同)
-
-        相邻帧的 T_cam_world 差值即为真实 ego_motion，时序对齐才能正确工作。
-        """
-        ego_pose_path = os.path.join(self._ego_pose_dir, f'{sample_id}.npy')
-        if not os.path.exists(ego_pose_path):
-            return None, None
-
-        ego_pose = np.load(ego_pose_path).astype(np.float32)  # (4,4) Vehicle→World
-
-        # 内参直接用静态标定（内参恒定）
-        K = self._cached_intrinsics  # [N, 3, 3]
-
-        # 外参：ego_pose @ T_cam_vehicle → Camera→World（每帧不同）
-        E_list = []
-        for i in range(self.num_cameras):
-            T_rel = self._cached_extrinsics[i].numpy()  # (4,4) Camera→Vehicle（恒定）
-            T_abs = ego_pose @ T_rel                    # (4,4) Camera→World（逐帧变化）
-            E_list.append(torch.from_numpy(T_abs))
-        E = torch.stack(E_list)  # [N, 4, 4]
-
-        return K, E
-
-    def _get_frame_params(self, sample_id):
-        """获取帧级相机参数（含当前帧车辆绝对位姿的外参）。
-
-        优先级：
-          1. camera_params/{sample_id}.npz（dense_occupancy_collection 格式）
-          2. ego_pose/{sample_id}.npy + calibration/（occnetv3_data_generator 格式）
-          3. 静态 calibration 退化（时序对齐失效，但不崩溃）
-        """
-        # 优先级 1
-        if self._has_per_frame_params:
-            K, E = self._load_per_frame_params(sample_id)
-            if K is not None:
-                return K, E
-        # 优先级 2
-        if self._has_ego_pose:
-            K, E = self._load_ego_pose_params(sample_id)
-            if K is not None:
-                return K, E
-        # 优先级 3（退化：时序对齐失效，记录警告）
-        return self._cached_intrinsics, self._cached_extrinsics
+    def _load_depth(self, sample_id):
+        s = self.depth_stride
+        h, w = self.image_size[0] // s, self.image_size[1] // s
+        out = torch.zeros(self.num_cameras, h, w)
+        found = False
+        for cam in range(self.num_cameras):
+            p = os.path.join(self.data_root, 'depth', sample_id, f'cam_{cam}.npy')
+            if not os.path.exists(p):
+                continue
+            planar = torch.from_numpy(np.load(p).astype(np.float32))
+            flat_idx, valid, dz = self._depth_sampling_map(cam, tuple(planar.shape))
+            rng = planar.view(-1)[flat_idx] / dz.clamp(min=1e-3)
+            out[cam] = torch.where(valid, rng, torch.zeros_like(rng))
+            found = True
+        return out, found
 
     # ------------------------------------------------------------------
-    # 图像加载
+    # 单帧加载
     # ------------------------------------------------------------------
+
+    def _warn_once(self, key, msg):
+        if key not in self._warned:
+            self._warned.add(key)
+            warnings.warn(msg)
 
     def _load_dng_image(self, dng_path):
+        if rawpy is None:
+            self._warn_once('rawpy', '未安装 rawpy，图像以全零代替')
+            return torch.zeros(1, *self.image_size)
         try:
             with rawpy.imread(dng_path) as raw:
                 img = raw.raw_image_visible.astype(np.float32)
-                img = img / float((1 << self.raw_bit_depth) - 1)  # 归一化到 [0, 1]，位深见 self.raw_bit_depth
-                img = img[np.newaxis, :, :]  # [1, H, W]
-                return torch.from_numpy(img)
+            img = img / float((1 << self.raw_bit_depth) - 1)
+            return torch.from_numpy(img[np.newaxis])
         except Exception as e:
-            print(f"Error loading DNG {dng_path}: {e}")
+            print(f'Error loading DNG {dng_path}: {e}')
             return torch.zeros(1, *self.image_size)
+
+    def _load_frame(self, sample_id):
+        images = []
+        for i in range(self.num_cameras):
+            p = os.path.join(self.data_root, 'images', sample_id, f'cam_{i}.dng')
+            if os.path.exists(p):
+                images.append(self._load_dng_image(p))
+            else:
+                self._warn_once('img', f'缺少图像（如 {p}），以全零代替')
+                images.append(torch.zeros(1, *self.image_size))
+
+        occ_path = os.path.join(self.data_root, 'occupancy', f'{sample_id}.npy')
+        voxels = torch.from_numpy(np.load(occ_path).astype(np.uint8)) if os.path.exists(occ_path) \
+            else torch.zeros(self.voxel_size, dtype=torch.uint8)
+
+        pose_path = os.path.join(self.data_root, 'ego_pose', f'{sample_id}.npy')
+        if os.path.exists(pose_path):
+            pose = torch.from_numpy(np.load(pose_path).astype(np.float64))
+        else:
+            self._warn_once('pose', '缺少 ego_pose，时序对齐退化为单位阵')
+            pose = torch.eye(4, dtype=torch.float64)
+
+        frame = {'images': torch.stack(images).float(), 'voxels': voxels, 'pose': pose}
+
+        if self.load_depth:
+            depth, found = self._load_depth(sample_id)
+            frame['depth'] = depth
+            frame['has_depth'] = torch.tensor(found)
+        if self.load_flow:
+            fp = os.path.join(self.data_root, 'flow', f'{sample_id}.npy')
+            mp = os.path.join(self.data_root, 'flow_mask', f'{sample_id}.npy')
+            if os.path.exists(fp) and os.path.exists(mp):
+                frame['flow'] = torch.from_numpy(np.load(fp).astype(np.float16))
+                frame['flow_mask'] = torch.from_numpy(np.load(mp).astype(np.bool_))
+                frame['has_flow'] = torch.tensor(True)
+            else:
+                frame['flow'] = torch.zeros(3, *self.voxel_size, dtype=torch.float16)
+                frame['flow_mask'] = torch.zeros(self.voxel_size, dtype=torch.bool)
+                frame['has_flow'] = torch.tensor(False)
+        return frame
 
     # ------------------------------------------------------------------
     # Dataset 接口
     # ------------------------------------------------------------------
 
     def __len__(self):
-        if self.sequence_length > 1:
-            return max(0, len(self.samples) - self.sequence_length + 1)
-        return len(self.samples)
-
-    def _load_single_frame(self, idx):
-        sample_id = self.samples[idx]
-
-        # 1. Load Images [N, 1, H, W]
-        images = []
-        for i in range(self.num_cameras):
-            dng_path = os.path.join(self.data_root, 'images', sample_id, f'cam_{i}.dng')
-            if os.path.exists(dng_path):
-                img = self._load_dng_image(dng_path)
-            else:
-                img = torch.zeros(1, *self.image_size)
-            images.append(img)
-        images = torch.stack(images, dim=0).float()  # [N, 1, H, W]
-
-        # 2. Load Voxels [X, Y, Z]
-        occ_path = os.path.join(self.data_root, 'occupancy', f'{sample_id}.npy')
-        if os.path.exists(occ_path):
-            voxels = torch.from_numpy(np.load(occ_path)).long()
-        else:
-            voxels = torch.zeros(self.voxel_size, dtype=torch.long)
-
-        # 3. 相机参数：优先逐帧 npz（含绝对位姿），否则使用静态标定
-        intrinsics, extrinsics = self._get_frame_params(sample_id)
-
-        return {
-            'images': images,           # [N, 1, H, W]
-            'voxels': voxels,           # [X, Y, Z]
-            'intrinsics': intrinsics,   # [N, 3, 3]
-            'extrinsics': extrinsics,   # [N, 4, 4]，逐帧不同（含绝对位姿）
-        }
+        return len(self.index)
 
     def __getitem__(self, idx):
-        if self.sequence_length == 1:
-            return self._load_single_frame(idx)
-
-        frames = [self._load_single_frame(idx + t) for t in range(self.sequence_length)]
-
-        # intrinsics 假定相机内参恒定（只取第 0 帧）
-        # extrinsics 每帧不同（含车辆绝对位姿），[T, N, 4, 4] 用于 ego_motion 计算
-        return {
-            'images': torch.stack([f['images'] for f in frames]),         # [T, N, C, H, W]
-            'voxels': torch.stack([f['voxels'] for f in frames]),         # [T, X, Y, Z]
-            'intrinsics': frames[0]['intrinsics'],                        # [N, 3, 3]
-            'extrinsics': torch.stack([f['extrinsics'] for f in frames]), # [T, N, 4, 4]
+        """始终返回带时间维 T 的字典（T = temporal_frames，非时序时 T=1）：
+          images [T,N,1,H,W] float；voxels [T,X,Y,Z] uint8（GPU 上再 .long()）
+          ego_motion [T,4,4]（t=0 为单位阵）；intrinsics [N,3,3]；extrinsics [N,4,4] Camera(cv)→Vehicle
+          depth [T,N,h,w]、has_depth [T]；flow [T,3,X,Y,Z] float16、flow_mask [T,X,Y,Z]、has_flow [T]
+        """
+        start = self.index[idx]
+        T = self.sequence_length
+        frames = [self._load_frame(self.samples[start + t]) for t in range(T)]
+        ego_motion = [torch.eye(4)]
+        for t in range(1, T):
+            m = torch.linalg.inv(frames[t]['pose']) @ frames[t - 1]['pose']
+            ego_motion.append(m.float())
+        out = {
+            'images': torch.stack([f['images'] for f in frames]),
+            'voxels': torch.stack([f['voxels'] for f in frames]),
+            'ego_motion': torch.stack(ego_motion),
+            'intrinsics': self.intrinsics.clone(),
+            'extrinsics': self.extrinsics.clone(),
         }
+        for k in ('depth', 'has_depth', 'flow', 'flow_mask', 'has_flow'):
+            if k in frames[0]:
+                out[k] = torch.stack([f[k] for f in frames])
+        return out
 
 
-def get_dataloader(data_root, split='train', batch_size=1, num_workers=4, config=None):
+def get_dataloader(data_root, split='train', batch_size=1, num_workers=0, config=None):
     dataset = OccupancyDataset(data_root, split, config)
     shuffle = split == 'train'
-    return DataLoader(
-        dataset, batch_size=batch_size, shuffle=shuffle,
-        num_workers=num_workers, pin_memory=True, drop_last=shuffle
-    )
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                      num_workers=num_workers, pin_memory=True, drop_last=shuffle)

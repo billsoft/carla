@@ -1,365 +1,418 @@
-import torch
-import time
+"""
+e2e_occ 网络自检（2026-10 重构后）
+
+1. 逐层 shape 报告：对每个子模块挂 forward hook，记录输入/输出形状和调用次数，
+   完整表写入 e2e_occ/shape_report.md，并对各阶段关键形状做断言。
+   覆盖多种配置组合（默认 / 稠密细化 / 隐式头 / 全局时序 / 接近重构前的基线）。
+2. 几何测试（使用真实相机标定，非单位外参）：
+   - 等距投影往返一致性
+   - 语义检查：车前 10m 地面点落在 front_main 下半部中央；左侧点落在左侧相机；车后点落在 rear
+   - 反例：用旧约定（UE 相机轴 / 含世界绝对位姿的外参）同样的点投影失败——证明测试有区分度
+3. 时序对齐方向测试：车辆前进/右移一个粗格，记忆中的标记应沿 -X / -Y 平移
+4. 训练冒烟：T=2 序列前向 + 反向，检查梯度有限、关键参数有梯度，报告峰值显存
+
+用法: python e2e_occ/verify_network.py [--skip_train] [--quick]
+"""
+
+import argparse
+
+import math
 import os
 import sys
-import math
-import traceback
+import time
 
-try:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from config import E2EOccConfig
-    from e2e_occ_net import E2EOccNet
-    from voxel_head import VoxelHead
-    from position_encoding import RayDirectionEncoding
-    from deformable_attention import DeformableCrossAttention
-except (ImportError, ValueError):
-    print("无法从相对路径导入，尝试作为包导入。")
-    from e2e_occ.config import E2EOccConfig
-    from e2e_occ.e2e_occ_net import E2EOccNet
-    from e2e_occ.voxel_head import VoxelHead
-    from e2e_occ.position_encoding import RayDirectionEncoding
-    from e2e_occ.deformable_attention import DeformableCrossAttention
+import torch
+import torch.nn as nn
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import E2EOccConfig
+from e2e_occ_net import build_model
+from dataset import default_calibration
+from deformable_attention import get_reference_points
+from position_encoding import pixel_rays_vehicle
+from geometry import equidistant_project, equidistant_unproject, M_CV_TO_UE
+from temporal_fusion import TemporalFusionModule
+from loss import E2ELoss
 
-def print_header(title):
-    print("\n" + "=" * 60)
-    print(f" {title}")
-    print("=" * 60)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+FAILS = []
 
 
-def print_section(title):
-    print(f"\n--- {title} ---")
+def check(cond, msg):
+    print(('  [PASS] ' if cond else '  [FAIL] ') + msg)
+    if not cond:
+        FAILS.append(msg)
 
 
-def verify_voxel_head(config, device):
-    """
-    专项验证 VoxelHead 新结构：
-    - 输入输出形状正确
-    - 中间分辨率的通道数正确（64→32 in 200, 32→18 in 400）
-    - 无 NaN/Inf
-    - 参数量合理
-    """
-    print_section("VoxelHead 新结构专项验证")
-
-    head = VoxelHead(config).to(device).eval()
-    num_params = sum(p.numel() for p in head.parameters())
-    print(f"  VoxelHead 参数量: {num_params / 1e6:.3f}M")
-
-    # 检查关键子模块通道数
-    refine1_in  = head.refine1[0].in_channels
-    refine1_out = head.refine1[0].out_channels
-    refine2_in  = head.refine2[0].in_channels
-    refine2_out = head.refine2[0].out_channels
-    skip1_in    = head.skip1.in_channels
-    skip1_out   = head.skip1.out_channels
-    skip2_in    = head.skip2.in_channels
-    skip2_out   = head.skip2.out_channels
-
-    dim = config.embed_dim
-    nc  = config.num_classes
-
-    checks = [
-        (refine1_in,  dim // 4, "refine1 输入通道"),
-        (refine1_out, dim // 8, "refine1 输出通道"),
-        (refine2_in,  dim // 8, "refine2 输入通道"),
-        (refine2_out, nc,       "refine2 输出通道（等于 num_classes）"),
-        (skip1_in,    dim // 4, "skip1 输入通道"),
-        (skip1_out,   dim // 8, "skip1 输出通道"),
-        (skip2_in,    dim // 8, "skip2 输入通道"),
-        (skip2_out,   nc,       "skip2 输出通道（等于 num_classes）"),
-    ]
-    all_ok = True
-    for actual, expected, name in checks:
-        ok = actual == expected
-        mark = "✅" if ok else "❌"
-        print(f"  {mark} {name}: {actual}（期望 {expected}）")
-        if not ok:
-            all_ok = False
-
-    # 前向传播形状验证
-    fx, fy, fz = config.fine_size
-    dummy = torch.randn(1, fx, fy, fz, dim, device=device)
-    with torch.no_grad():
-        out = head(dummy)
-
-    expected_shape = (1, nc, *config.voxel_size)
-    shape_ok = out.shape == expected_shape
-    mark = "✅" if shape_ok else "❌"
-    print(f"  {mark} 输出形状: {tuple(out.shape)}（期望 {expected_shape}）")
-    if not shape_ok:
-        all_ok = False
-
-    nan_ok = not (torch.isnan(out).any() or torch.isinf(out).any())
-    mark = "✅" if nan_ok else "❌"
-    print(f"  {mark} 输出数值: {'无 NaN/Inf' if nan_ok else '含 NaN/Inf！'}")
-    if not nan_ok:
-        all_ok = False
-
-    return all_ok
+def header(t):
+    print('\n' + '=' * 78 + f'\n{t}\n' + '=' * 78)
 
 
-def verify_equidistant_geometry(device):
-    """
-    等距投影(equidistant)几何正确性验证：
-
-    1. RayDirectionEncoding.get_rays_from_params 本身：构造一个已知垂直 FOV 的合成
-       相机，检查画面中心射线指向光轴、水平边缘射线的入射角等于水平半 FOV
-       (等距投影下 FOV_h/FOV_v = W/H 精确成立，见 position_encoding.py 的推导)。
-    2. DeformableCrossAttention.get_reference_points 与 RayDirectionEncoding 的
-       往返一致性：3D 点正向投影到像素，再从该像素反查射线方向，应该基本指回原方向。
-       这一步专门用来抓"两处实现各自没错但互相不一致"的问题——这正是这次修复要解决的
-       历史 bug（原来是等距编码 + 针孔参考点投影，两者矛盾）。
-    """
-    print_section("等距投影几何检查（射线编码 + 参考点投影往返一致性）")
-    all_ok = True
-
-    fov_vertical_deg = 90.0
-    W_orig, H_orig = 1280, 960
-    # 模拟 patch_embed 实测的 /8 降采样后的特征图分辨率
-    W_feat, H_feat = 160, 120
-
-    focal = (H_orig / 2.0) / math.radians(fov_vertical_deg / 2.0)
-    intrinsics = torch.tensor(
-        [[focal, 0.0, W_orig / 2.0], [0.0, focal, H_orig / 2.0], [0.0, 0.0, 1.0]],
-        dtype=torch.float32, device=device
-    ).view(1, 1, 3, 3)  # [B=1, N=1, 3, 3]
-    extrinsics = torch.eye(4, dtype=torch.float32, device=device).view(1, 1, 4, 4)  # 单位外参
-
-    ray_encoder = RayDirectionEncoding(dim=64, image_size=(H_feat, W_feat), num_cameras=1).to(device)
-    with torch.no_grad():
-        world_dirs = ray_encoder.get_rays_from_params(intrinsics, extrinsics, H_feat, W_feat)  # [1,1,H,W,3]
-
-    # 画面中心应指向光轴 [0,0,1]
-    center_dir = world_dirs[0, 0, H_feat // 2, W_feat // 2]
-    center_angle_deg = math.degrees(torch.acos(center_dir[2].clamp(-1, 1)).item())
-    center_ok = center_angle_deg < 1.0
-    print(f"  {'✅' if center_ok else '❌'} 画面中心射线与光轴夹角: {center_angle_deg:.3f}°（期望 ≈0°）")
-    all_ok = all_ok and center_ok
-
-    # 水平边缘像素 (dy≈0) 的入射角应等于水平半FOV = 垂直FOV/2 * (W/H)
-    edge_dir = world_dirs[0, 0, H_feat // 2, W_feat - 1]
-    edge_angle_deg = math.degrees(torch.acos(edge_dir[2].clamp(-1, 1)).item())
-    expected_edge_deg = fov_vertical_deg * (W_orig / H_orig) / 2.0
-    edge_ok = abs(edge_angle_deg - expected_edge_deg) < 1.0
-    print(f"  {'✅' if edge_ok else '❌'} 水平边缘射线与光轴夹角: {edge_angle_deg:.2f}°（期望 ≈{expected_edge_deg:.2f}°）")
-    all_ok = all_ok and edge_ok
-
-    # get_reference_points → get_rays_from_params 往返一致性
-    cross_attn = DeformableCrossAttention(dim=64, num_heads=1, num_cameras=1, num_points=1).to(device)
-
-    # 单位外参下世界系=相机系（光轴 = 世界 Z 轴）。voxel_range 里 X,Y 是 ±40m 大范围，
-    # Z（对应这里的相机前向）只有 -1~5.4m，所以要选一个 X,Y 偏移很小、Z 接近上限的点，
-    # 才会落在相机 FOV 以内（否则往返一致性检查测的是"落在画幅外被裁剪"而非真正的往返误差）。
-    # 偏离光轴 ~34°，phi≈-45°（非对称，能检验 phi 方向是否正确）。
-    query_coords_01 = torch.tensor([[[0.53, 0.47, 0.95]]], dtype=torch.float32, device=device)  # [B,Q,3] in [0,1]
-    with torch.no_grad():
-        ref_points = cross_attn.get_reference_points(query_coords_01, intrinsics, extrinsics, H_feat, W_feat)
-
-    u_norm, v_norm = ref_points[0, 0, 0].tolist()
-    # align_corners=False 的反归一化（像素中心在 (i+0.5)/size），要和 get_reference_points
-    # 内部实际使用的约定保持一致，否则这个往返检查测的是错误的像素位置。
-    u = (u_norm + 1.0) * W_feat / 2.0 - 0.5
-    v = (v_norm + 1.0) * H_feat / 2.0 - 0.5
-    iu = max(0, min(W_feat - 1, int(round(u))))
-    iv = max(0, min(H_feat - 1, int(round(v))))
-
-    projected_pixel_dir = world_dirs[0, 0, iv, iu]
-
-    real_x = query_coords_01[0, 0, 0].item() * 80.0 - 40.0
-    real_y = query_coords_01[0, 0, 1].item() * 80.0 - 40.0
-    real_z = query_coords_01[0, 0, 2].item() * 6.4 - 1.0
-    point_dir = torch.tensor([real_x, real_y, real_z], dtype=torch.float32, device=device)
-    point_dir = point_dir / point_dir.norm()
-
-    cos_sim = torch.dot(point_dir, projected_pixel_dir).clamp(-1.0, 1.0).item()
-    roundtrip_angle_deg = math.degrees(math.acos(cos_sim))
-    # 离散像素量化 + H/W 取整会带来一点误差，2° 容差足够宽松同时能抓住系统性不一致
-    roundtrip_ok = roundtrip_angle_deg < 2.0
-    print(f"  {'✅' if roundtrip_ok else '❌'} 参考点投影↔射线编码往返夹角误差: {roundtrip_angle_deg:.2f}°（期望 <2°）")
-    all_ok = all_ok and roundtrip_ok
-
-    return all_ok
+def shape_of(x):
+    if torch.is_tensor(x):
+        return 'x'.join(str(s) for s in x.shape) + f' {str(x.dtype).replace("torch.", "")}'
+    if isinstance(x, dict):
+        return '{' + ', '.join(f'{k}: {shape_of(v)}' for k, v in x.items() if v is not None) + '}'
+    if isinstance(x, (list, tuple)):
+        inner = [shape_of(v) for v in x if v is not None]
+        inner = [s for s in inner if s]
+        return '(' + ', '.join(inner) + ')' if inner else ''
+    return ''
 
 
-def verify_principal_point_offset(device):
-    """
-    验证主点 (cx, cy) 修复：偏心主点标定下，光轴射线应该指向偏移后的像素位置，
-    而不是固定在几何中心；get_reference_points 与 get_rays_from_params 在偏心
-    主点下的往返一致性也要继续成立。这两点合起来证明 cx/cy 真正参与了投影计算，
-    而不是像修复前那样被硬编码的 W/2, H/2 悄悄忽略掉。
-    """
-    print_section("主点 (cx, cy) 偏移修复验证")
-    all_ok = True
+# ----------------------------------------------------------------------------
+# 1. 逐层 shape
+# ----------------------------------------------------------------------------
 
-    fov_vertical_deg = 90.0
-    W_orig, H_orig = 1280, 960
-    W_feat, H_feat = 160, 120
+def collect_shapes(model, run):
+    records = {}
+    hooks = []
+    for name, mod in model.named_modules():
+        if name == '':
+            continue
 
-    focal = (H_orig / 2.0) / math.radians(fov_vertical_deg / 2.0)
-    # 主点刻意偏离几何中心：cx 偏右 100px，cy 偏上 60px，量级接近真实标定误差
-    cx_orig, cy_orig = W_orig / 2.0 + 100.0, H_orig / 2.0 - 60.0
-    intrinsics = torch.tensor(
-        [[focal, 0.0, cx_orig], [0.0, focal, cy_orig], [0.0, 0.0, 1.0]],
-        dtype=torch.float32, device=device
-    ).view(1, 1, 3, 3)
-    extrinsics = torch.eye(4, dtype=torch.float32, device=device).view(1, 1, 4, 4)
-
-    ray_encoder = RayDirectionEncoding(dim=64, image_size=(H_feat, W_feat), num_cameras=1).to(device)
-    with torch.no_grad():
-        world_dirs = ray_encoder.get_rays_from_params(intrinsics, extrinsics, H_feat, W_feat)
-
-    scale_x, scale_y = W_feat / W_orig, H_feat / H_orig
-    cx_feat = int(round(cx_orig * scale_x))
-    cy_feat = int(round(cy_orig * scale_y))
-
-    # 修复后：光轴射线应该落在偏移后的主点像素上，不再是几何中心
-    axis_dir = world_dirs[0, 0, cy_feat, cx_feat]
-    axis_angle_deg = math.degrees(torch.acos(axis_dir[2].clamp(-1, 1)).item())
-    axis_ok = axis_angle_deg < 1.0
-    print(f"  {'✅' if axis_ok else '❌'} 偏移主点像素 ({cx_feat},{cy_feat}) 处射线与光轴夹角: "
-          f"{axis_angle_deg:.3f}°（期望 ≈0°，证明 cx/cy 真正生效而非硬编码几何中心）")
-    all_ok = all_ok and axis_ok
-
-    # 几何中心像素这时不应该再指向光轴，否则说明 cx/cy 被忽略，退化回了修复前的行为
-    center_dir = world_dirs[0, 0, H_feat // 2, W_feat // 2]
-    center_angle_deg = math.degrees(torch.acos(center_dir[2].clamp(-1, 1)).item())
-    center_off_axis_ok = center_angle_deg > 1.0
-    print(f"  {'✅' if center_off_axis_ok else '❌'} 几何中心像素与光轴夹角: {center_angle_deg:.3f}°"
-          f"（期望明显 >0°，证明光轴已随 cx/cy 偏移，不再固定在几何中心）")
-    all_ok = all_ok and center_off_axis_ok
-
-    # get_reference_points 往返一致性（偏心主点场景）
-    cross_attn = DeformableCrossAttention(dim=64, num_heads=1, num_cameras=1, num_points=1).to(device)
-    query_coords_01 = torch.tensor([[[0.53, 0.47, 0.95]]], dtype=torch.float32, device=device)
-    with torch.no_grad():
-        ref_points = cross_attn.get_reference_points(query_coords_01, intrinsics, extrinsics, H_feat, W_feat)
-
-    u_norm, v_norm = ref_points[0, 0, 0].tolist()
-    u = (u_norm + 1.0) * W_feat / 2.0 - 0.5
-    v = (v_norm + 1.0) * H_feat / 2.0 - 0.5
-    iu = max(0, min(W_feat - 1, int(round(u))))
-    iv = max(0, min(H_feat - 1, int(round(v))))
-
-    projected_pixel_dir = world_dirs[0, 0, iv, iu]
-
-    real_x = query_coords_01[0, 0, 0].item() * 80.0 - 40.0
-    real_y = query_coords_01[0, 0, 1].item() * 80.0 - 40.0
-    real_z = query_coords_01[0, 0, 2].item() * 6.4 - 1.0
-    point_dir = torch.tensor([real_x, real_y, real_z], dtype=torch.float32, device=device)
-    point_dir = point_dir / point_dir.norm()
-
-    cos_sim = torch.dot(point_dir, projected_pixel_dir).clamp(-1.0, 1.0).item()
-    roundtrip_angle_deg = math.degrees(math.acos(cos_sim))
-    roundtrip_ok = roundtrip_angle_deg < 2.0
-    print(f"  {'✅' if roundtrip_ok else '❌'} 偏心主点场景下往返夹角误差: {roundtrip_angle_deg:.2f}°（期望 <2°）")
-    all_ok = all_ok and roundtrip_ok
-
-    return all_ok
-
-
-def run_verification():
-    print_header("E2E-OccNet 网络验证（含新输出头）")
-
+        def hook(m, inp, out, name=name):
+            r = records.setdefault(name, {'type': type(m).__name__, 'in': shape_of(inp),
+                                          'out': shape_of(out), 'calls': 0})
+            r['calls'] += 1
+        hooks.append(mod.register_forward_hook(hook))
     try:
-        # 1. 初始化
-        print_section("1. 环境与配置")
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"PyTorch 版本: {torch.__version__}")
-        print(f"运行设备: {device}")
-
-        config = E2EOccConfig()
-        print(f"  embed_dim={config.embed_dim}, num_classes={config.num_classes}")
-        print(f"  fine_size={config.fine_size}, voxel_size={config.voxel_size}")
-        print(f"  时序融合: {config.use_temporal} (帧数: {config.temporal_frames})")
-
-        # 2. VoxelHead 专项验证
-        print_section("2. VoxelHead 新结构专项验证")
-        head_ok = verify_voxel_head(config, device)
-
-        # 2b. 等距投影几何检查
-        geometry_ok = verify_equidistant_geometry(device)
-
-        # 2c. 主点 (cx, cy) 偏移修复验证
-        principal_point_ok = verify_principal_point_offset(device)
-
-        # 3. 完整模型构建
-        print_section("3. 完整模型构建")
-        model = E2EOccNet(config).to(device).eval()
-        num_params = model.get_num_params()
-        print(f"  总参数量: {num_params / 1e6:.2f}M")
-
-        # 4. 序列前向传播验证
-        print_section("4. 序列前向传播（含时序记忆）")
-        B = 1
-        T = config.temporal_frames
-        N = config.num_cameras
-        H, W = config.image_size
-
-        images_seq    = torch.randn(B, T, N, config.raw_channels, H, W, device=device)
-        intrinsics    = torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, N, -1, -1)
-        extrinsics_seq = torch.eye(4, device=device).view(1, 1, 1, 4, 4).expand(B, T, N, -1, -1).clone()
-        for t in range(1, T):
-            extrinsics_seq[:, t, :, 0, 3] = float(t)  # X 方向每帧前进 1m
-
-        memory = None
-        seq_ok = True
-        with torch.no_grad():
-            for t in range(T):
-                img_t = images_seq[:, t]
-                ext_t = extrinsics_seq[:, t]
-
-                ego_motion = None
-                if config.use_ego_motion and t > 0:
-                    pose_curr = ext_t[:, 0]
-                    pose_prev = extrinsics_seq[:, t - 1, 0]
-                    ego_motion = torch.linalg.inv(pose_curr) @ pose_prev
-
-                t0 = time.time()
-                outputs = model(images=img_t, intrinsics=intrinsics,
-                                extrinsics=ext_t, memory=memory, ego_motion=ego_motion)
-                ms = (time.time() - t0) * 1000
-
-                logits = outputs.get('semantic')
-                expected = (B, config.num_classes, *config.voxel_size)
-                shape_ok = logits is not None and logits.shape == expected
-                nan_ok   = logits is not None and not (torch.isnan(logits).any() or torch.isinf(logits).any())
-
-                print(f"  t={t}: {ms:.0f}ms  "
-                      f"{'✅' if shape_ok else '❌'} shape={tuple(logits.shape) if logits is not None else 'None'}  "
-                      f"{'✅' if nan_ok else '❌ NaN/Inf'}")
-                if not (shape_ok and nan_ok):
-                    seq_ok = False
-
-                if config.use_temporal:
-                    memory = outputs.get('memory')
-                    if memory is not None:
-                        mem_ok = not (torch.isnan(memory).any() or torch.isinf(memory).any())
-                        expected_mem = (B, config.num_coarse_queries, config.memory_dim)
-                        mem_shape_ok = memory.shape == expected_mem
-                        print(f"       memory shape={'✅' if mem_shape_ok else '❌'} {tuple(memory.shape)}  "
-                              f"数值={'✅' if mem_ok else '❌ NaN/Inf'}")
-                        if not (mem_ok and mem_shape_ok):
-                            seq_ok = False
-                        memory = memory.detach()
-
-        # 5. 显存报告（仅 GPU）
-        if device.type == 'cuda':
-            print_section("5. 显存报告")
-            peak_gb = torch.cuda.max_memory_allocated(device) / 1024 ** 3
-            print(f"  推理峰值显存: {peak_gb:.2f} GB")
-
-        # 汇总
-        all_pass = head_ok and geometry_ok and principal_point_ok and seq_ok
-        if all_pass:
-            print_header("✅ 全部验证通过")
-        else:
-            print_header("❌ 部分验证失败，请查看上方日志")
-
-    except Exception as e:
-        print_header("❌ 验证异常中止")
-        print(f"错误: {e}")
-        traceback.print_exc()
+        run()
+    finally:
+        for h in hooks:
+            h.remove()
+    return records
 
 
-if __name__ == "__main__":
-    run_verification()
+def make_inputs(cfg, B=1):
+    K, T, _ = default_calibration(cfg.num_cameras, cfg.image_size)
+    K = K.unsqueeze(0).expand(B, -1, -1, -1).to(DEVICE)
+    T = T.unsqueeze(0).expand(B, -1, -1, -1).to(DEVICE)
+    img = torch.rand(B, cfg.num_cameras, 1, *cfg.image_size, device=DEVICE)
+    return img, K, T
+
+
+
+
+def verify_shapes(name, cfg, write_table=None):
+    header(f'1. 逐层 shape 验证 —— 配置: {name}')
+    model = build_model(cfg).to(DEVICE).eval()
+    print(f'  参数量: {model.get_num_params() / 1e6:.2f}M')
+    img, K, T = make_inputs(cfg)
+    B, N, C = 1, cfg.num_cameras, cfg.embed_dim
+    em = torch.eye(4, device=DEVICE).unsqueeze(0)
+    em[:, 0, 3] = -0.5
+    outs = {}
+
+    def run():
+        with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE.type == 'cuda'):
+            o1 = model(img, K, T)
+            o2 = model(img, K, T, memory=o1['memory'], ego_motion=em,
+                       time_delta=torch.full((B,), cfg.frame_dt, device=DEVICE))
+        outs['o1'], outs['o2'] = o1, o2
+
+    if DEVICE.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
+    t0 = time.time()
+    rec = collect_shapes(model, run)
+    peak = torch.cuda.max_memory_allocated() / 1e9 if DEVICE.type == 'cuda' else 0
+    print(f'  两帧前向耗时 {time.time() - t0:.1f}s，推理峰值显存 {peak:.2f}GB')
+
+    # ---- 关键阶段形状断言 ----
+    def rec_out(n):
+        return rec[n]['out'] if n in rec else None
+
+    lv = {s: cfg.level_size(s) for s in cfg.level_strides}
+    pe = rec_out('patch_embed')
+    for s, (h, w) in lv.items():
+        if s == 32:
+            continue
+        check(f'{s}: {B}x{N}x{C}x{h}x{w}' in pe, f'patch_embed stride{s} 输出 [{B},{N},{C},{h},{w}]')
+    enc = rec_out('encoder')
+    for s, (h, w) in lv.items():
+        check(f'{s}: {B}x{N}x{C}x{h}x{w}' in enc, f'encoder stride{s} 输出 [{B},{N},{C},{h},{w}]')
+    if cfg.use_depth_aux:
+        dh, dw = cfg.level_size(cfg.depth_stride)
+        check(f'depth_logits: {B}x{N}x{cfg.depth_bins}x{dh}x{dw}' in enc,
+              f'深度 logits [{B},{N},{cfg.depth_bins},{dh},{dw}]')
+    cq = cfg.num_coarse_queries
+    check(rec_out('decoder.coarse_layers.0').startswith(f'{B}x{cq}x{C}'), f'粗解码层输出 [{B},{cq},{C}]')
+    if cfg.use_temporal:
+        check(rec_out('decoder.temporal_fusion') == f'({B}x{cq}x{C} float32, {B}x{cq}x{C} float32)'
+              or rec_out('decoder.temporal_fusion').startswith(f'({B}x{cq}x{C}'),
+              f'时序融合输出 (fused, memory) 均为 [{B},{cq},{C}]')
+    K_fine = int(cfg.num_fine_queries * cfg.fine_keep_ratio) if cfg.use_sparse_fine else cfg.num_fine_queries
+    check(rec_out('decoder.fine_layers.0').startswith(f'{B}x{K_fine}x{C}'),
+          f'细解码层输出 [{B},{K_fine},{C}]（{"稀疏 top-k" if cfg.use_sparse_fine else "稠密"}）')
+    fx, fy, fz = cfg.fine_size
+    check(f'fine_feats: {B}x{fx}x{fy}x{fz}x{C}' in rec_out('decoder'), f'解码器输出 [{B},{fx},{fy},{fz},{C}]')
+    vx, vy, vz = cfg.voxel_size
+    o2 = outs['o2']
+    check(tuple(o2['semantic'].shape) == (B, cfg.num_classes, vx, vy, vz),
+          f'语义输出 [{B},{cfg.num_classes},{vx},{vy},{vz}]')
+    if cfg.use_flow_head:
+        check(tuple(o2['flow'].shape) == (B, 3, vx, vy, vz), f'流场输出 [{B},3,{vx},{vy},{vz}]')
+    check(tuple(o2['coarse_occ_logits'].shape) == (B, *cfg.coarse_size), f'粗占用 logits [{B},{cfg.coarse_size}]')
+    check(torch.isfinite(o2['semantic'].float()).all().item(), '语义输出无 NaN/Inf')
+
+    if write_table:
+        with open(write_table, 'a', encoding='utf-8') as f:
+            f.write(f'\n## 配置: {name}\n\n参数量 {model.get_num_params() / 1e6:.2f}M，'
+                    f'两帧(第二帧带时序记忆)前向，batch=1，bf16 autocast。'
+                    f'"调用次数">1 表示该模块在相机/层级/帧循环中被多次调用，形状取第一次调用。\n\n')
+            f.write('| 模块 | 类型 | 调用次数 | 输入 | 输出 |\n|---|---|---|---|---|\n')
+            for n, r in rec.items():
+                f.write(f"| `{n}` | {r['type']} | {r['calls']} | {r['in']} | {r['out']} |\n")
+    # 控制台打印前两级模块
+    print('  —— 主要模块（完整逐层表见 shape_report.md）——')
+    for n, r in rec.items():
+        if n.count('.') <= 1 and not n.split('.')[-1].isdigit():
+            print(f"  {n:<42s} in={r['in'][:70]:<70s} out={r['out'][:90]}")
+    del model
+    torch.cuda.empty_cache()
+
+
+# ----------------------------------------------------------------------------
+# 2. 几何
+# ----------------------------------------------------------------------------
+
+def verify_geometry():
+    header('2. 几何测试（真实相机标定）')
+    cfg = E2EOccConfig()
+    K, T, _ = default_calibration(cfg.num_cameras, cfg.image_size)
+    K, T = K.unsqueeze(0), T.unsqueeze(0)
+    H, W = cfg.image_size
+    names = ['front_main', 'front_wide', 'front_narrow', 'left_pillar', 'right_pillar',
+             'left_repeater', 'right_repeater', 'rear']
+
+    # 2.1 往返一致性（固定种子；额外加入主点附近 ±2px 的点——光轴附近是 acos 式实现的精度死角）
+    errs = []
+    gen = torch.Generator().manual_seed(0)
+    for c in range(cfg.num_cameras):
+        cx, cy = K[0, c, 0, 2].item(), K[0, c, 1, 2].item()
+        u = torch.cat([torch.rand(2000, generator=gen) * (W - 1), cx + (torch.rand(200, generator=gen) - 0.5) * 4])
+        v = torch.cat([torch.rand(2000, generator=gen) * (H - 1), cy + (torch.rand(200, generator=gen) - 0.5) * 4])
+        d = equidistant_unproject(u, v, K[0, c, 0, 0], K[0, c, 1, 1], K[0, c, 0, 2], K[0, c, 1, 2])
+        u2, v2, _ = equidistant_project(d * 7.3, K[0, c, 0, 0], K[0, c, 1, 1], K[0, c, 0, 2], K[0, c, 1, 2])
+        errs.append(torch.maximum((u2 - u).abs(), (v2 - v).abs()).max().item())
+    check(max(errs) < 1e-2, f'等距投影 像素→射线→像素 往返误差 {max(errs):.2e} px')
+
+    rays = pixel_rays_vehicle(K, T, H // 16, W // 16, 16)                  # [1, N, h, w, 3]
+    c0 = rays[0, 0, H // 32, W // 32]
+    check(c0[0] > 0.99, f'front_main 图像中心射线指向车辆 +X（前）: {c0.numpy().round(3)}')
+    c7 = rays[0, 7, H // 32, W // 32]
+    check(c7[0] < -0.95, f'rear 图像中心射线指向车辆 -X（后）: {c7.numpy().round(3)}')
+
+    def proj(points, ext):
+        ref, valid = get_reference_points(points.view(1, -1, 3), K, ext, cfg.image_size)
+        u = (ref[..., 0] + 1) * W / 2 - 0.5
+        v = (ref[..., 1] + 1) * H / 2 - 0.5
+        return u[0], v[0], valid[0]
+
+    # 2.2 语义检查
+    pts = torch.tensor([[10.0, 0.0, 0.0],      # 车前 10m 地面
+                        [0.0, -10.0, 0.5],     # 左侧 10m
+                        [0.0, 10.0, 0.5],      # 右侧 10m
+                        [-10.0, 0.0, 0.5]])    # 车后 10m
+    u, v, valid = proj(pts, T)
+    check(valid[0, 0] and abs(u[0, 0] - W / 2) < 20 and v[0, 0] > H / 2,
+          f'车前10m地面点 → front_main 下半部中央 (u={u[0, 0]:.0f}, v={v[0, 0]:.0f})')
+    left_cams = [names[i] for i in range(8) if valid[i, 1]]
+    right_cams = [names[i] for i in range(8) if valid[i, 2]]
+    rear_cams = [names[i] for i in range(8) if valid[i, 3]]
+    check(len(left_cams) > 0 and all('left' in n for n in left_cams), f'左侧点只出现在左侧相机: {left_cams}')
+    check(len(right_cams) > 0 and all('right' in n for n in right_cams), f'右侧点只出现在右侧相机: {right_cams}')
+    check('rear' in rear_cams and not any(n.startswith('front') for n in rear_cams),
+          f'车后点出现在 rear 且不在前视相机: {rear_cams}')
+
+    # 2.3 反例：旧约定应当失败（证明上面的测试有区分度）
+    M = torch.eye(4, dtype=torch.float32)
+    M[:3, :3] = torch.from_numpy(M_CV_TO_UE).float()
+    T_ue_axes = T @ torch.linalg.inv(M)                                    # 去掉轴置换 = 旧代码用的 UE 轴外参
+    u, v, valid = proj(pts, T_ue_axes)
+    old_ok = bool(valid[0, 0] and abs(u[0, 0] - W / 2) < 20 and v[0, 0] > H / 2)
+    check(not old_ok, f'[反例] 旧约定（UE 相机轴当 OpenCV 轴）下车前点不再落在 front_main 正确位置 '
+          f'(valid={bool(valid[0, 0])}, u={u[0, 0]:.0f}, v={v[0, 0]:.0f})')
+    pose = torch.eye(4)
+    pose[0, 3], pose[1, 3] = 100.0, -50.0                                 # 车辆不在世界原点
+    T_world = pose @ T                                                    # 旧代码喂给网络的外参
+    u, v, valid = proj(pts, T_world)
+    # 旧约定把查询点当成世界原点附近的点：车在 (100,-50) 时，"车前 10m" 实际被投影到
+    # 车后约 90m、偏右 50m 处，落进 rear/右侧相机而不是 front_main
+    check(not valid[0, 0], f'[反例] 旧约定（外参含世界绝对位姿）下车前点不在 front_main 中，而被投影到: '
+          f'{[names[i] for i in range(8) if valid[i, 0]]}')
+
+
+# ----------------------------------------------------------------------------
+# 3. 时序对齐方向
+# ----------------------------------------------------------------------------
+
+def verify_temporal_alignment():
+    header('3. 时序记忆对齐方向测试')
+    cfg = E2EOccConfig()
+    tf = TemporalFusionModule(cfg, use_checkpoint=False)
+    X, Y, Z = cfg.coarse_size
+    cell = (cfg.voxel_range[3] - cfg.voxel_range[0]) / X                  # 3.2m
+    mem = torch.zeros(1, X, Y, Z, 4)
+    mem[0, 12, 12, 4, 0] = 1.0
+    mem = mem.view(1, -1, 4)
+
+    def peak_after(dx, dy, yaw_deg=0.0):
+        # ego_motion = 上一帧车辆系 → 当前帧车辆系；车辆前进 dx 时，静止物体在新坐标系里 x 减小 dx
+        a = math.radians(yaw_deg)
+        pose_prev = torch.eye(4)
+        pose_t = torch.eye(4)
+        pose_t[0, 0], pose_t[0, 1], pose_t[1, 0], pose_t[1, 1] = math.cos(a), -math.sin(a), math.sin(a), math.cos(a)
+        pose_t[0, 3], pose_t[1, 3] = dx, dy
+        em = (torch.linalg.inv(pose_t) @ pose_prev).unsqueeze(0)
+        aligned, valid = tf.align_memory(mem, em)
+        idx = aligned[0, :, 0].view(X, Y, Z).argmax()
+        return [int(i) for i in torch.unravel_index(idx, (X, Y, Z))], valid
+
+    p, _ = peak_after(0.0, 0.0)
+    check(p == [12, 12, 4], f'静止：标记保持在 (12,12,4)，实际 {p}')
+    p, valid = peak_after(cell, 0.0)
+    check(p == [11, 12, 4], f'车辆前进 {cell}m：标记沿 -X 移动到 (11,12,4)，实际 {p}')
+    vv = valid.view(X, Y, Z)
+    check(vv[-1].mean() < 0.5 and vv[0].mean() > 0.99, '前进后最前一排为新进入视野（valid≈0），最后一排有效')
+    p, _ = peak_after(0.0, cell)
+    check(p == [12, 11, 4], f'车辆右移 {cell}m：标记沿 -Y 移动到 (12,11,4)，实际 {p}')
+    # 原地右转 90°：车前方 (x=+d) 的点在新坐标系里变成左侧 (y=-d)
+    mem2 = torch.zeros(1, X, Y, Z, 4)
+    mem2[0, 18, 12, 4, 0] = 1.0                                          # 车前约 19m
+    mem_bak = mem.clone()
+    mem.copy_(mem2.view(1, -1, 4))
+    p, _ = peak_after(0.0, 0.0, yaw_deg=90.0)
+    mem.copy_(mem_bak)
+    check(p[0] == 12 and p[1] < 12, f'原地右转 90°：车前标记转到车辆左侧（y 减小），实际 {p}')
+
+
+# ----------------------------------------------------------------------------
+# 4. 训练冒烟
+# ----------------------------------------------------------------------------
+
+def verify_train_step(name, cfg):
+    header(f'4. 训练冒烟（T=2 前向+反向，bf16）—— 配置: {name}')
+    model = build_model(cfg).to(DEVICE).train()
+    crit = E2ELoss(cfg)
+    img, K, T = make_inputs(cfg)
+    X, Y, Z = cfg.voxel_size
+    vox = torch.zeros(1, X, Y, Z, dtype=torch.long, device=DEVICE)
+    vox[:, :, :, 4] = 11
+    vox[:, 220:240, 190:210, 5:12] = 4
+    tg = {'voxels': vox,
+          'depth': torch.full((1, cfg.num_cameras, *cfg.level_size(cfg.depth_stride)), 10.0, device=DEVICE),
+          'has_depth': torch.tensor([True], device=DEVICE),
+          'flow': torch.zeros(1, 3, X, Y, Z, device=DEVICE),
+          'flow_mask': (vox == 4),
+          'has_flow': torch.tensor([True], device=DEVICE)}
+    if DEVICE.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
+    t0 = time.time()
+    memory = None
+    # 与 train.py 默认 --tbptt 1 一致：每帧单独反向，记忆逐帧 detach
+    for t in range(2):
+        qp = None
+        if cfg.head_type == 'implicit':
+            from loss import sample_implicit_points
+            tg['point_idx'], qp = sample_implicit_points(vox, cfg, cfg.implicit_train_points)
+        em = torch.eye(4, device=DEVICE).unsqueeze(0) if t > 0 else None
+        with torch.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE.type == 'cuda'):
+            out = model(img, K, T, memory=memory.detach() if memory is not None else None, ego_motion=em,
+                        time_delta=torch.full((1,), cfg.frame_dt, device=DEVICE) if t > 0 else None,
+                        query_points=qp)
+            losses = crit(out, tg)
+        memory = out['memory']
+        losses['total'].backward()
+    if DEVICE.type == 'cuda':
+        torch.cuda.synchronize()
+    dt = time.time() - t0
+    peak = torch.cuda.max_memory_allocated() / 1e9 if DEVICE.type == 'cuda' else 0
+    print('  损失项: ' + ', '.join(f'{k}={float(v):.3f}' for k, v in losses.items()))
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    check(all(torch.isfinite(g).all() for g in grads), '所有梯度有限')
+    key = {
+        'patch_embed.patch_embed.rggb_conv.weight': '图像骨干',
+        'decoder.coarse_layers.0.cross_attn.sampling_offsets.weight': '粗阶段可变形采样偏移',
+        'decoder.fine_layers.0.cross_attn.value_proj.weight': '细阶段交叉注意力',
+        'decoder.coarse_occ_head.1.weight': '粗占用头',
+    }
+    if cfg.use_temporal:
+        key['decoder.temporal_fusion.mem_out.weight'] = '记忆回注分支（GRU 输出 → 当前帧，GRU 的梯度入口）'
+    if cfg.use_depth_aux:
+        key['encoder.depth_head.net.0.weight'] = '深度头'
+    params = dict(model.named_parameters())
+    for k, desc in key.items():
+        g = params[k].grad
+        check(g is not None and g.abs().sum() > 0, f'{desc} 有梯度 ({k})')
+    print(f'  两帧前向+反向耗时 {dt:.1f}s，训练峰值显存 {peak:.2f}GB')
+
+    if cfg.use_temporal:
+        # mem_out 零初始化，第一步时 GRU 门控梯度为 0；模拟一次参数更新（mem_out 变为非零）后，
+        # 在流式训练（记忆 detach）下 GRU 门控必须能从当前帧损失拿到梯度
+        model.zero_grad(set_to_none=True)
+        nn.init.normal_(model.decoder.temporal_fusion.mem_out.weight, std=1e-2)
+        with torch.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE.type == 'cuda'):
+            out = model(img, K, T, memory=memory.detach(), ego_motion=torch.eye(4, device=DEVICE).unsqueeze(0),
+                        time_delta=torch.full((1,), cfg.frame_dt, device=DEVICE),
+                        query_points=qp)
+            crit(out, tg)['total'].backward()
+        g = dict(model.named_parameters())['decoder.temporal_fusion.gate.update_gate.0.weight'].grad
+        check(g is not None and g.abs().sum() > 0, 'mem_out 非零后，记忆 detach 的流式训练下 GRU 门控有梯度')
+    del model
+    torch.cuda.empty_cache()
+    return peak
+
+
+def variant(**kw):
+    c = E2EOccConfig()
+    for k, v in kw.items():
+        setattr(c, k, v)
+    return c
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--skip_train', action='store_true')
+    ap.add_argument('--quick', action='store_true', help='只跑默认配置')
+    args = ap.parse_args()
+
+    verify_geometry()
+    verify_temporal_alignment()
+
+    report = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shape_report.md')
+    with open(report, 'w', encoding='utf-8') as f:
+        f.write('# e2e_occ 逐层 shape 报告\n\n由 `verify_network.py` 自动生成，'
+                '记录每个子模块第一次调用时的输入/输出张量形状与 dtype。\n')
+
+    configs = [('默认（全部优化开启）', E2EOccConfig())]
+    if not args.quick:
+        configs += [
+            ('稠密细化（use_sparse_fine=False）', variant(use_sparse_fine=False)),
+            ('隐式输出头（head_type=implicit）', variant(head_type='implicit')),
+            ('全局时序注意力（temporal_attn_type=global）', variant(temporal_attn_type='global')),
+            ('接近重构前基线（单尺度/无深度/无流场/LayerNorm/GELU/无RoPE/无移位窗口）',
+             variant(use_multiscale=False, use_depth_aux=False, use_flow_head=False, cam_visibility_norm=False,
+                     use_sparse_fine=False, temporal_attn_type='global', use_time_embedding=False,
+                     norm_type='layernorm', ffn_type='gelu', use_rope_3d=False, use_shifted_window=False)),
+        ]
+    for name, cfg in configs:
+        verify_shapes(name, cfg, write_table=report)
+    print(f'\n逐层 shape 表已写入 {report}')
+
+    if not args.skip_train and DEVICE.type == 'cuda':
+        verify_train_step('默认', E2EOccConfig())
+        if not args.quick:
+            verify_train_step('隐式输出头', variant(head_type='implicit'))
+
+    header('结果')
+    if FAILS:
+        print(f'{len(FAILS)} 项失败:')
+        for m in FAILS:
+            print('  - ' + m)
+        sys.exit(1)
+    print('全部通过')
+
+
+if __name__ == '__main__':
+    main()

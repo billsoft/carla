@@ -1,13 +1,21 @@
-import torch
-import numpy as np
+"""
+推理脚本：对数据集逐帧流式推理（同一场景内携带时序记忆，换场景时重置），
+结果按原数据集格式写到 output/occupancy/<sample_id>.npy，可直接用 dataset_viewer_v2 查看。
+
+相机标定、RAW 位深归一化、ego_motion 全部复用 dataset.OccupancyDataset 的实现，
+与训练完全一致（旧版推理脚本自己解析标定，硬编码 /4095，并把含世界位姿的外参喂给网络）。
+"""
+
 import argparse
-import os
-import sys
 import time
 from pathlib import Path
+
+import numpy as np
+import torch
+
 from config import E2EOccConfig
 from e2e_occ_net import build_model
-from dataset import OccupancyDataset
+from dataset import OccupancyDataset, _SAMPLE_RE, default_calibration
 
 
 class OccInference:
@@ -18,209 +26,103 @@ class OccInference:
         self.model = build_model(self.config).to(self.device)
         self.model.load_state_dict(ckpt['model'])
         self.model.eval()
-        print(f'[Inference] Model loaded from {checkpoint_path}')
-        print(f'[Inference] Device: {self.device}')
+        print(f'[Inference] Model loaded from {checkpoint_path} ({self.config.head_type} head)')
 
     @torch.no_grad()
-    def predict_batch(self, images, intrinsics, extrinsics):
-        """
-        推理单帧（非时序）
-        images:     [B, N, C, H, W]
-        intrinsics: [B, N, 3, 3]
-        extrinsics: [B, N, 4, 4]
-        returns:    [B, X, Y, Z] uint8 numpy
-        """
-        images = images.to(self.device)
-        intrinsics = intrinsics.to(self.device)
-        extrinsics = extrinsics.to(self.device)
+    def predict(self, images, intrinsics, extrinsics, memory=None, ego_motion=None):
+        """images [B,N,1,H,W]、intrinsics [B,N,3,3]、extrinsics [B,N,4,4]（Camera(cv)→Vehicle）
+        返回 (pred [B,X,Y,Z] uint8 numpy, flow [B,3,X,Y,Z] 或 None, new_memory)"""
+        cfg = self.config
+        B = images.shape[0]
+        td = torch.full((B,), cfg.frame_dt, device=self.device) if memory is not None else None
+        with torch.autocast('cuda', dtype=torch.bfloat16, enabled=(self.device.type == 'cuda')):
+            out = self.model(images.to(self.device), intrinsics.to(self.device), extrinsics.to(self.device),
+                             memory=memory, ego_motion=None if ego_motion is None else ego_motion.to(self.device),
+                             time_delta=td)
+        pred = out['semantic'].argmax(dim=1).cpu().numpy().astype(np.uint8)
+        flow = out['flow'].float().cpu().numpy() if out.get('flow') is not None else None
+        return pred, flow, out['memory']
 
-        with torch.amp.autocast('cuda', enabled=(self.device.type == 'cuda')):
-            outputs = self.model(images, intrinsics, extrinsics)
-
-        logits = outputs['semantic']           # [B, 18, 400, 400, 32]
-        pred = logits.argmax(dim=1)            # [B, 400, 400, 32]
-        return pred.cpu().numpy().astype(np.uint8)
-
-    def benchmark(self, num_runs=100, warmup=10):
-        dummy_img = torch.randn(1, self.config.num_cameras, 1, *self.config.image_size).to(self.device)
-        dummy_K   = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(1, self.config.num_cameras, 1, 1).to(self.device)
-        dummy_E   = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(1, self.config.num_cameras, 1, 1).to(self.device)
-
+    def benchmark(self, num_runs=50, warmup=5):
+        cfg = self.config
+        K, T, _ = default_calibration(cfg.num_cameras, cfg.image_size)
+        K, T = K.unsqueeze(0).to(self.device), T.unsqueeze(0).to(self.device)
+        img = torch.rand(1, cfg.num_cameras, 1, *cfg.image_size, device=self.device)
+        mem = None
         for _ in range(warmup):
-            with torch.no_grad():
-                self.model(dummy_img, dummy_K, dummy_E)
-
+            _, _, mem = self.predict(img, K, T, mem, torch.eye(4).unsqueeze(0) if mem is not None else None)
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         start = time.time()
         for _ in range(num_runs):
-            with torch.no_grad():
-                self.model(dummy_img, dummy_K, dummy_E)
+            _, _, mem = self.predict(img, K, T, mem, torch.eye(4).unsqueeze(0))
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
-
-        elapsed = time.time() - start
-        fps = num_runs / elapsed
-        print(f'FPS: {fps:.2f}, Latency: {1000/fps:.2f}ms')
+        fps = num_runs / (time.time() - start)
+        print(f'FPS: {fps:.2f}, Latency: {1000 / fps:.2f}ms（含 argmax 与回传 CPU）')
         return fps
 
 
-def run_inference_on_dataset(checkpoint_path, data_root, output_dir, num_samples=100, device='cuda'):
-    """
-    对 dataset_10k_bak 格式的数据集进行推理，输出保存到 output_dir/occupancy/<sample_id>.npy
-    格式与原始数据集完全相同，可直接用 dataset_viewer_v2 查看。
-    """
+def run_inference_on_dataset(checkpoint_path, data_root, output_dir, split='val', num_samples=100,
+                             device='cuda', save_flow=False):
     engine = OccInference(checkpoint_path, device=device)
-    config = engine.config
+    cfg = E2EOccConfig(**{k: getattr(engine.config, k) for k in E2EOccConfig.__dataclass_fields__})
+    # 推理逐帧读取，时序记忆由这里自己携带；不需要加载深度/流场真值
+    cfg.use_temporal = False
+    cfg.use_depth_aux = False
+    cfg.use_flow_head = False
+    ds = OccupancyDataset(data_root, split=split, config=cfg)
+    samples = ds.samples[:num_samples]
+    out_dir = Path(output_dir)
+    (out_dir / 'occupancy').mkdir(parents=True, exist_ok=True)
+    if save_flow:
+        (out_dir / 'flow').mkdir(parents=True, exist_ok=True)
+    print(f'[Inference] {data_root} [{split}] {len(samples)} 帧 → {output_dir}')
 
-    # 使用单帧模式（不用时序，推理更简单）
-    config_infer = E2EOccConfig()
-    config_infer.use_temporal = False
-    config_infer.temporal_frames = 1
-
-    dataset = OccupancyDataset(data_root, split='train', config=config_infer)
-
-    # 同时也加载 val/test
-    all_samples = []
-    for split in ['train', 'val', 'test']:
-        txt = Path(data_root) / f'{split}.txt'
-        if txt.exists():
-            with open(txt) as f:
-                all_samples += [l.strip() for l in f if l.strip()]
-    # 去重
-    all_samples = list(dict.fromkeys(all_samples))
-
-    # 如果没有split文件，直接扫occupancy目录
-    if not all_samples:
-        occ_dir = Path(data_root) / 'occupancy'
-        all_samples = sorted([f.stem for f in occ_dir.glob('*.npy')])
-
-    total = min(num_samples, len(all_samples))
-    print(f'[Inference] Dataset: {data_root}')
-    print(f'[Inference] Total samples: {len(all_samples)}, running: {total}')
-
-    # 输出目录结构与原数据集一致（viewer直接能读）
-    out_occ_dir = Path(output_dir) / 'occupancy'
-    out_occ_dir.mkdir(parents=True, exist_ok=True)
-
-    # 同时写 train.txt 方便viewer加载
-    written_ids = []
-
-    for i, sample_id in enumerate(all_samples[:total]):
+    memory, prev_pose, prev_key = None, None, None
+    K = ds.intrinsics.unsqueeze(0)
+    E = ds.extrinsics.unsqueeze(0)
+    for i, sid in enumerate(samples):
         t0 = time.time()
+        frame = ds._load_frame(sid)
+        m = _SAMPLE_RE.match(sid)
+        key = (m['scene'], int(m['frame'])) if m else None
+        # 同一场景且帧号连续才延续记忆
+        cont = (engine.config.use_temporal and prev_key is not None and key is not None
+                and key[0] == prev_key[0] and key[1] == prev_key[1] + 1)
+        ego_motion = None
+        if cont:
+            ego_motion = (torch.linalg.inv(frame['pose']) @ prev_pose).float().unsqueeze(0)
+        else:
+            memory = None
+        pred, flow, memory = engine.predict(frame['images'].unsqueeze(0), K, E, memory, ego_motion)
+        np.save(out_dir / 'occupancy' / f'{sid}.npy', pred[0])
+        if save_flow and flow is not None:
+            np.save(out_dir / 'flow' / f'{sid}.npy', flow[0].astype(np.float16))
+        prev_pose, prev_key = frame['pose'], key
+        print(f'[{i + 1:4d}/{len(samples)}] {sid} non_empty={int(np.count_nonzero(pred[0])):,} '
+              f'{"(记忆延续)" if cont else "(新场景)"} {(time.time() - t0) * 1000:.0f}ms', flush=True)
 
-        # 加载图像
-        images = []
-        img_dir = Path(data_root) / 'images' / sample_id
-        for cam_i in range(config.num_cameras):
-            dng_path = img_dir / f'cam_{cam_i}.dng'
-            npy_path = img_dir / f'cam_{cam_i}.npy'
-
-            img = None
-            if dng_path.exists():
-                try:
-                    import rawpy
-                    with rawpy.imread(str(dng_path)) as raw:
-                        arr = raw.raw_image_visible.astype(np.float32)
-                        arr = arr / 4095.0
-                        img = torch.from_numpy(arr[np.newaxis])   # [1, H, W]
-                except Exception as e:
-                    print(f'  [warn] DNG load failed cam_{cam_i}: {e}')
-
-            if img is None and npy_path.exists():
-                arr = np.load(npy_path).astype(np.float32)
-                img = torch.from_numpy(arr)
-
-            if img is None:
-                img = torch.zeros(1, *config.image_size)
-
-            images.append(img)
-
-        images = torch.stack(images, dim=0).unsqueeze(0).float()  # [1, N, 1, H, W]
-
-        # 加载相机参数
-        intrinsics = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(1, config.num_cameras, 1, 1)
-        extrinsics = torch.eye(4).unsqueeze(0).unsqueeze(0).repeat(1, config.num_cameras, 1, 1)
-
-        # 优先加载 ego_pose + calibration
-        K_path = Path(data_root) / 'camera_params' / f'{sample_id}.npz'
-        ego_path = Path(data_root) / 'ego_pose' / f'{sample_id}.npy'
-
-        if K_path.exists():
-            d = np.load(K_path, allow_pickle=False)
-            intrinsics = torch.from_numpy(d['intrinsics'].astype(np.float32)).unsqueeze(0)
-            extrinsics = torch.from_numpy(d['extrinsics'].astype(np.float32)).unsqueeze(0)
-        elif ego_path.exists():
-            calib_K = Path(data_root) / 'calibration' / 'intrinsics.json'
-            calib_E = Path(data_root) / 'calibration' / 'extrinsics.json'
-            if calib_K.exists() and calib_E.exists():
-                import json
-                with open(calib_K) as f:
-                    kd = json.load(f)
-                with open(calib_E) as f:
-                    ed = json.load(f)
-                ego_pose = np.load(str(ego_path)).astype(np.float32)
-                K_list, E_list = [], []
-                for ci in range(config.num_cameras):
-                    ck = kd.get(f'cam_{ci}', {})
-                    K = np.eye(3, dtype=np.float32)
-                    K[0,0] = ck.get('fx', 800); K[1,1] = ck.get('fy', 800)
-                    K[0,2] = ck.get('cx', 640); K[1,2] = ck.get('cy', 480)
-                    K_list.append(K)
-                    ce = ed.get(f'cam_{ci}', {})
-                    R = np.array(ce.get('rotation_matrix', np.eye(3).tolist()), dtype=np.float32)
-                    t = np.array(ce.get('translation', [0,0,0]), dtype=np.float32)
-                    T_rel = np.eye(4, dtype=np.float32)
-                    T_rel[:3,:3] = R; T_rel[:3,3] = t
-                    T_abs = ego_pose @ T_rel
-                    E_list.append(T_abs)
-                intrinsics = torch.from_numpy(np.stack(K_list)).unsqueeze(0)
-                extrinsics = torch.from_numpy(np.stack(E_list)).unsqueeze(0)
-
-        # 推理
-        pred = engine.predict_batch(images, intrinsics, extrinsics)  # [1, 400, 400, 32]
-        pred_voxel = pred[0]  # [400, 400, 32]
-
-        # 保存（格式与数据集一致）
-        out_path = out_occ_dir / f'{sample_id}.npy'
-        np.save(str(out_path), pred_voxel)
-        written_ids.append(sample_id)
-
-        elapsed = time.time() - t0
-        non_empty = int(np.count_nonzero(pred_voxel))
-        print(f'[{i+1:4d}/{total}] {sample_id}  non_empty={non_empty:,}  {elapsed*1000:.0f}ms', flush=True)
-
-    # 写 train.txt 供 viewer 加载
-    with open(Path(output_dir) / 'train.txt', 'w') as f:
-        f.write('\n'.join(written_ids))
-
-    print(f'\n[Inference] Done. Results saved to: {output_dir}')
-    print(f'[Inference] Viewer command:')
-    print(f'  python d:/code/carla/dataset_viewer_v2/server.py --dataset {output_dir}')
+    with open(out_dir / 'train.txt', 'w') as f:
+        f.write('\n'.join(samples))
+    print(f'\n[Inference] 完成。查看: python dataset_viewer_v2/server.py --dataset {output_dir}')
 
 
 def main():
-    parser = argparse.ArgumentParser(description='E2E Occupancy Inference')
-    parser.add_argument('--checkpoint', type=str, required=True, help='模型checkpoint路径')
-    parser.add_argument('--data_root',  type=str, default='d:/code/carla/dataset_10k_bak', help='数据集根目录')
-    parser.add_argument('--output',     type=str, default='d:/code/carla/inference_results', help='推理结果输出目录')
-    parser.add_argument('--num_samples',type=int, default=100, help='推理样本数量')
-    parser.add_argument('--device',     type=str, default='cuda', help='cuda 或 cpu')
-    parser.add_argument('--benchmark',  action='store_true', help='只跑性能测试')
-    args = parser.parse_args()
-
-    if args.benchmark:
-        engine = OccInference(args.checkpoint, args.device)
-        engine.benchmark()
+    p = argparse.ArgumentParser(description='E2E Occupancy Inference')
+    p.add_argument('--checkpoint', required=True)
+    p.add_argument('--data_root', default='d:/code/carla/dataset_10k_bak')
+    p.add_argument('--output', default='d:/code/carla/inference_results')
+    p.add_argument('--split', default='val')
+    p.add_argument('--num_samples', type=int, default=100)
+    p.add_argument('--device', default='cuda')
+    p.add_argument('--save_flow', action='store_true')
+    p.add_argument('--benchmark', action='store_true')
+    a = p.parse_args()
+    if a.benchmark:
+        OccInference(a.checkpoint, a.device).benchmark()
         return
-
-    run_inference_on_dataset(
-        checkpoint_path=args.checkpoint,
-        data_root=args.data_root,
-        output_dir=args.output,
-        num_samples=args.num_samples,
-        device=args.device,
-    )
+    run_inference_on_dataset(a.checkpoint, a.data_root, a.output, a.split, a.num_samples, a.device, a.save_flow)
 
 
 if __name__ == '__main__':

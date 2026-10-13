@@ -1,170 +1,135 @@
-import torch
-import torch.nn as nn
 import argparse
 import os
 import sys
 import time
+
+import torch
+import torch.nn as nn
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import E2EOccConfig
 from e2e_occ_net import build_model
-from loss import OccupancyLoss
+from loss import E2ELoss, sample_implicit_points, update_confusion, miou_from_confusion
 from dataset import get_dataloader
 
 # conda activate deepsys
-# python d:\code\carla\e2e_occ\train.py --batch_size 1 --epochs 100 --amp --data_root d:\code\carla\dataset_10k_bak
+# python e2e_occ/train.py --data_root <dataset_dir> --batch_size 1 --epochs 100 --amp --grad_accum 4
 
-# 禁用输出缓冲，确保每条日志立即显示（Windows下默认行缓冲会导致输出积压）
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch, use_amp=False, grad_accum_steps=1):
+
+def frame_targets(batch, t, device, config, point_idx=None):
+    tg = {'voxels': batch['voxels'][:, t].to(device, non_blocking=True).long()}
+    if 'depth' in batch:
+        tg['depth'] = batch['depth'][:, t].to(device, non_blocking=True)
+        tg['has_depth'] = batch['has_depth'][:, t].to(device)
+    if 'flow' in batch:
+        tg['flow'] = batch['flow'][:, t].to(device, non_blocking=True).float()
+        tg['flow_mask'] = batch['flow_mask'][:, t].to(device, non_blocking=True)
+        tg['has_flow'] = batch['has_flow'][:, t].to(device)
+    if point_idx is not None:
+        tg['point_idx'] = point_idx
+    return tg
+
+
+def run_sequence(model, batch, criterion, config, device, amp_dtype, use_amp, train=True,
+                 tbptt=2, grad_scale=1.0, scaler=None, confusion=None):
+    """逐帧前向一个序列（T=1 时即单帧）；训练时按 tbptt 帧一段做截断反向传播。
+
+    返回各损失项的序列平均值（python float 字典）。
+    """
+    images = batch['images'].to(device, non_blocking=True)            # [B, T, N, 1, H, W]
+    intrinsics = batch['intrinsics'].to(device)
+    extrinsics = batch['extrinsics'].to(device)
+    ego_motion_all = batch['ego_motion'].to(device)
+    B, T = images.shape[:2]
+    time_delta = torch.full((B,), config.frame_dt, device=device)
+
+    memory = None
+    logs = {}
+    # 时间加权：越靠后的帧可利用的历史越多，权重越高（鼓励网络利用时序信息）。
+    # 按整个序列的权重和归一化（而不是每段各自归一化），否则 tbptt=1 时每段只有一帧，
+    # loss·w/w 会把加权完全抵消。
+    weights = [1.0 + (t / max(1, T - 1)) for t in range(T)]
+    w_sum = sum(weights)
+    chunk_loss = 0.0
+    for t in range(T):
+        if train and t % tbptt == 0 and memory is not None:
+            memory = memory.detach()
+        ego_motion = ego_motion_all[:, t] if t > 0 else None
+
+        point_idx, query_points = None, None
+        if train and config.head_type == 'implicit':
+            vox = batch['voxels'][:, t].to(device).long()
+            point_idx, query_points = sample_implicit_points(vox, config, config.implicit_train_points)
+
+        with torch.autocast('cuda', dtype=amp_dtype, enabled=use_amp):
+            out = model(images[:, t], intrinsics, extrinsics, memory=memory, ego_motion=ego_motion,
+                        time_delta=time_delta if t > 0 else None, query_points=query_points)
+            tg = frame_targets(batch, t, device, config, point_idx)
+            losses = criterion(out, tg)
+
+        memory = out['memory']
+        for k, v in losses.items():
+            logs[k] = logs.get(k, 0.0) + float(v.detach()) / T
+
+        if confusion is not None and 'semantic' in out:
+            pred = out['semantic'].argmax(1)
+            update_confusion(confusion, pred, tg['voxels'], config.num_classes)
+
+        if train:
+            chunk_loss = chunk_loss + losses['total'] * weights[t]
+            if (t + 1) % tbptt == 0 or t == T - 1:
+                scaler.scale(chunk_loss / (w_sum * grad_scale)).backward()
+                chunk_loss = 0.0
+    return logs
+
+
+def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, device, epoch, config, args, amp_dtype):
     model.train()
-    total_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
+    totals, n = {}, 0
     start = time.time()
-    optimizer.zero_grad()
-    
-    # TBPTT Settings
-    TBPTT_CHUNK_SIZE = 2  # Truncate gradients every 2 steps
-    
     for i, batch in enumerate(loader):
-        images = batch['images'].to(device)
-        voxels = batch['voxels'].to(device)
-        intrinsics = batch['intrinsics'].to(device)
-        extrinsics = batch['extrinsics'].to(device)
-        
-        # Check for sequence data [B, T, N, C, H, W]
-        is_sequence = images.dim() == 6
-        
-        loss_val = 0.0
-        ce_loss_val = 0.0
-        
-        if is_sequence:
-            B, T, N, C, H, W = images.shape
-            memory = None
-            seq_loss = 0.0
-            seq_ce = 0.0
-
-            # TBPTT 循环：每个 chunk 做一次明确的 backward，scaler 状态清晰
-            for t_start in range(0, T, TBPTT_CHUNK_SIZE):
-                t_end = min(t_start + TBPTT_CHUNK_SIZE, T)
-
-                # 截断梯度历史
-                if memory is not None:
-                    memory = memory.detach()
-
-                chunk_loss = torch.tensor(0.0, device=device)
-                total_weight = 0.0
-
-                for t in range(t_start, t_end):
-                    img_t = images[:, t]      # [B, N, C, H, W]
-                    vox_t = voxels[:, t]      # [B, X, Y, Z]
-                    ext_t = extrinsics[:, t]  # [B, N, 4, 4]
-
-                    ego_motion = None
-                    if t > 0:
-                        ext_prev = extrinsics[:, t-1]
-                        # pose: [B, 4, 4], Camera→World (extrinsics 惯例)
-                        # ego_motion = inv(C_t→W) @ (C_{t-1}→W) = C_{t-1}→C_t
-                        # 语义：上一帧体素坐标系 → 当前帧体素坐标系
-                        pose_t = ext_t[:, 0]
-                        pose_prev = ext_prev[:, 0]
-                        ego_motion = torch.linalg.inv(pose_t) @ pose_prev
-
-                        # Log ego_motion for the first batch of each epoch
-                        if i == 0 and t == 1:
-                            print(f"\n--- Ego-motion check (epoch {epoch}) ---")
-                            print(ego_motion[0].detach().cpu().numpy())
-                            print("------------------------------------\n")
-
-                    with torch.amp.autocast('cuda', enabled=use_amp):
-                        outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
-                        loss_dict = criterion(outputs['semantic'], vox_t)
-
-                        time_weight = 1.0 + (t / max(1, T - 1))
-                        chunk_loss = chunk_loss + loss_dict['total'] * time_weight
-                        total_weight += time_weight
-
-                    seq_loss += loss_dict['total'].item()
-                    seq_ce += loss_dict['ce'].item()
-                    memory = outputs['memory']
-
-                # 每个 chunk 统一 backward 一次，scaler 状态始终明确
-                chunk_loss_norm = chunk_loss / (total_weight * grad_accum_steps)
-                scaler.scale(chunk_loss_norm).backward()
-
-            loss_val = seq_loss / T
-            ce_loss_val = seq_ce / T
-
-        else:
-            # 单帧训练
-            with torch.amp.autocast('cuda', enabled=use_amp):
-                outputs = model(images, intrinsics, extrinsics)
-                losses = criterion(outputs['semantic'], voxels)
-                loss = losses['total'] / grad_accum_steps
-                loss_val = losses['total'].item()
-                ce_loss_val = losses['ce'].item()
-
-            scaler.scale(loss).backward()
-
-        # 梯度累积步进（两个分支的 scaler 状态此时均明确）
-        if (i + 1) % grad_accum_steps == 0:
+        logs = run_sequence(model, batch, criterion, config, device, amp_dtype, args.amp, train=True,
+                            tbptt=args.tbptt, grad_scale=args.grad_accum, scaler=scaler)
+        if (i + 1) % args.grad_accum == 0:
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
-            optimizer.zero_grad()
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+        for k, v in logs.items():
+            totals[k] = totals.get(k, 0.0) + v
+        n += 1
+        msg = ' '.join(f'{k}={v:.4f}' for k, v in logs.items())
+        print(f'Epoch {epoch} [{i + 1}/{len(loader)}] {msg} Time: {time.time() - start:.1f}s', flush=True)
+        if args.max_steps and i + 1 >= args.max_steps:
+            break
+    return {k: v / max(1, n) for k, v in totals.items()}
 
-        total_loss += loss_val * grad_accum_steps
 
-        # 每步都打印，确保实时可见（小数据集时每10步一次可能长时间无输出）
-        elapsed = time.time() - start
-        print(f'Epoch {epoch} [{i+1}/{len(loader)}] Loss: {loss_val:.4f} CE: {ce_loss_val:.4f} Time: {elapsed:.1f}s', flush=True)
-            
-    return total_loss / len(loader)
-
-def validate(model, loader, criterion, device):
+@torch.no_grad()
+def validate(model, loader, criterion, device, config, args, amp_dtype):
     model.eval()
-    total_loss = 0.0
-    with torch.no_grad():
-        for batch in loader:
-            images = batch['images'].to(device)
-            voxels = batch['voxels'].to(device)
-            intrinsics = batch['intrinsics'].to(device)
-            extrinsics = batch['extrinsics'].to(device)
-            
-            is_sequence = images.dim() == 6
-            
-            if is_sequence:
-                B, T, N, C, H, W = images.shape
-                memory = None
-                seq_loss = 0.0
-                
-                for t in range(T):
-                    img_t = images[:, t]
-                    vox_t = voxels[:, t]
-                    ext_t = extrinsics[:, t]
-                    
-                    ego_motion = None
-                    if t > 0:
-                        ext_prev = extrinsics[:, t-1]
-                        # ego_motion = inv(C_t→W) @ (C_{t-1}→W) = C_{t-1}→C_t
-                        pose_t = ext_t[:, 0]
-                        pose_prev = ext_prev[:, 0]
-                        ego_motion = torch.linalg.inv(pose_t) @ pose_prev
-
-                    outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
-                    loss_dict = criterion(outputs['semantic'], vox_t)
-                    seq_loss += loss_dict['total'].item()
-                    memory = outputs['memory']
-                
-                total_loss += seq_loss / T
-            else:
-                outputs = model(images, intrinsics, extrinsics)
-                losses = criterion(outputs['semantic'], voxels)
-                total_loss += losses['total'].item()
-            
-    # Clear cache after validation to free up memory for training
+    totals, n = {}, 0
+    confusion = torch.zeros(config.num_classes, config.num_classes, dtype=torch.long, device=device)
+    for i, batch in enumerate(loader):
+        logs = run_sequence(model, batch, criterion, config, device, amp_dtype, args.amp, train=False,
+                            confusion=confusion)
+        for k, v in logs.items():
+            totals[k] = totals.get(k, 0.0) + v
+        n += 1
+        if args.max_steps and i + 1 >= args.max_steps:
+            break
     torch.cuda.empty_cache()
-    return total_loss / len(loader)
+    miou, _ = miou_from_confusion(confusion)
+    out = {k: v / max(1, n) for k, v in totals.items()}
+    out['miou'] = miou
+    return out
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -172,75 +137,105 @@ def main():
     parser.add_argument('--output_dir', type=str, default='./checkpoints')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--weight_decay', type=float, default=0.01)
-    parser.add_argument('--num_workers', type=int, default=0, help='Number of workers. Default 0 for Windows to avoid deadlocks.')
+    parser.add_argument('--warmup_steps', type=int, default=500)
+    parser.add_argument('--num_workers', type=int, default=0, help='Windows 下默认 0，避免死锁')
     parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision training')
-    parser.add_argument('--grad_accum', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--pretrained_backbone', type=str, default=None,
+                        help='pretrain_mae.py 产出的图像骨干权重（只加载 patch_embed/encoder 中形状匹配的参数）')
+    parser.add_argument('--amp', action='store_true', help='混合精度训练')
+    parser.add_argument('--amp_dtype', choices=['fp16', 'bf16'], default='bf16',
+                        help='bf16 动态范围大，无需 loss scaling（4090 支持）')
+    parser.add_argument('--grad_accum', type=int, default=1)
+    parser.add_argument('--tbptt', type=int, default=1,
+                        help='时序截断反向传播的段长（帧）。1 = 每帧单独反向、记忆逐帧 detach（StreamPETR 式流式训练，'
+                             '显存与单帧相同）；2 及以上让梯度穿过记忆，显存按帧数线性增长')
+    parser.add_argument('--compile', action='store_true', help='torch.compile（Windows 上 Triton 不稳定，仅供尝试）')
+    parser.add_argument('--max_steps', type=int, default=0, help='每个 epoch 最多跑多少个 batch（冒烟测试用）')
+    parser.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
+                        help='覆盖配置字段，例如 --set use_sparse_fine=False head_type=implicit')
     args = parser.parse_args()
-    
+
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    config = E2EOccConfig()
-    start_epoch = 0
+    amp_dtype = torch.bfloat16 if args.amp_dtype == 'bf16' else torch.float16
 
-    # 如果有 resume 参数，则从 checkpoint 加载
+    config = E2EOccConfig()
+    ckpt = None
     if args.resume:
-        print(f"正在从 {args.resume} 恢复...")
-        ckpt = torch.load(args.resume, map_location=device)
-        
-        # 关键：从 checkpoint 加载 config 来构建模型
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if 'config' in ckpt:
             config = ckpt['config']
-            print("已从 Checkpoint 加载模型配置.")
+    for kv in args.set:
+        k, v = kv.split('=', 1)
+        cur = getattr(config, k)
+        if isinstance(cur, bool):
+            v = v.lower() in ('1', 'true', 'yes')
+        elif isinstance(cur, tuple):
+            v = tuple(type(cur[0])(x) for x in v.split(','))
         else:
-            print("警告: Checkpoint 中未找到 'config'，将使用默认配置。这可能导致错误！")
+            v = type(cur)(v)
+        setattr(config, k, v)
 
-    # 使用正确的 config 构建模型、损失函数和优化器
     model = build_model(config).to(device)
-    criterion = OccupancyLoss(num_classes=config.num_classes)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
+    if args.pretrained_backbone:
+        sd = torch.load(args.pretrained_backbone, map_location=device, weights_only=False)
+        sd = sd.get('backbone', sd)
+        own = model.state_dict()
+        loadable = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape}
+        model.load_state_dict(loadable, strict=False)
+        print(f'已加载预训练骨干参数 {len(loadable)}/{len(sd)} 个')
 
-    # 如果恢复，现在加载模型和优化器的状态
-    if args.resume:
+    criterion = E2ELoss(config)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scaler = torch.amp.GradScaler('cuda', enabled=(args.amp and amp_dtype == torch.float16))
+
+    start_epoch = 0
+    best_miou = -1.0
+    if ckpt is not None:
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         start_epoch = ckpt['epoch'] + 1
-        print(f"成功从 epoch {start_epoch - 1} 恢复.")
+        best_miou = ckpt.get('miou', -1.0)
+        print(f'从 epoch {start_epoch - 1} 恢复')
 
-    print(f'模型已构建，参数量: {model.get_num_params() / 1e6:.2f}M')
-        
     train_loader = get_dataloader(args.data_root, 'train', args.batch_size, args.num_workers, config)
     val_loader = get_dataloader(args.data_root, 'val', args.batch_size, args.num_workers, config)
-    
-    best_loss = float('inf')
-    
-    print(f"Starting training with AMP={args.amp}, Grad Accum={args.grad_accum}", flush=True)
-    print(f"Temporal Training: {config.use_temporal} (Frames={config.temporal_frames})", flush=True)
-    
+
+    steps_per_epoch = max(1, len(train_loader) // args.grad_accum)
+    total_steps = steps_per_epoch * args.epochs
+
+    def lr_lambda(step):
+        if step < args.warmup_steps:
+            return (step + 1) / args.warmup_steps
+        progress = (step - args.warmup_steps) / max(1, total_steps - args.warmup_steps)
+        return 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.141592653589793)).item())
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda,
+                                                  last_epoch=start_epoch * steps_per_epoch - 1 if ckpt else -1)
+
+    train_model = torch.compile(model) if args.compile else model
+    print(f'模型参数量: {model.get_num_params() / 1e6:.2f}M | 样本: train {len(train_loader.dataset)} '
+          f'val {len(val_loader.dataset)} | AMP={args.amp}({args.amp_dtype}) T={config.temporal_frames} '
+          f'TBPTT={args.tbptt} head={config.head_type} sparse={config.use_sparse_fine}', flush=True)
+
     for epoch in range(start_epoch, args.epochs):
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, 
-                               use_amp=args.amp, grad_accum_steps=args.grad_accum)
-        
-        val_loss = validate(model, val_loader, criterion, device)
-        print(f'Epoch {epoch}: Train Loss {train_loss:.4f}, Val Loss {val_loss:.4f}', flush=True)
+        tr = train_epoch(train_model, train_loader, criterion, optimizer, scaler, scheduler, device, epoch,
+                         config, args, amp_dtype)
 
-        scheduler.step()
+        va = validate(model, val_loader, criterion, device, config, args, amp_dtype)
+        print(f"Epoch {epoch}: train_total={tr.get('total', 0):.4f} val_total={va.get('total', 0):.4f} "
+              f"val_mIoU={va['miou']:.4f} lr={optimizer.param_groups[0]['lr']:.2e}", flush=True)
 
-        if val_loss < best_loss:
-            best_loss = val_loss
-            torch.save({
-                'epoch': epoch,
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'loss': val_loss,
-                'config': config,  # 保存 config 对象
-            }, os.path.join(args.output_dir, 'best_model.pth'))
-            print(f'Saved best model at epoch {epoch}', flush=True)
+        state = {'epoch': epoch, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                 'loss': va.get('total', 0.0), 'miou': va['miou'], 'config': config}
+        torch.save(state, os.path.join(args.output_dir, 'last_model.pth'))
+        if va['miou'] > best_miou:
+            best_miou = va['miou']
+            torch.save(state, os.path.join(args.output_dir, 'best_model.pth'))
+            print(f'Saved best model at epoch {epoch} (mIoU {best_miou:.4f})', flush=True)
+
 
 if __name__ == '__main__':
     main()
