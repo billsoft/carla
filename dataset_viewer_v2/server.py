@@ -478,6 +478,8 @@ def get_occupancy(frame_id):
     体素二进制流。查询参数：
       source=gt|pred (默认 gt)
       include_free=0|1 (默认 0，排除 label==0)
+      camera_mask=0|1 (默认 0；1 = 只显示 mask_camera/<id>.npy 里相机观测到的体素，即训练时真正监督的范围，
+                       不含 dataset.py 额外保留的"车底路面"；数据集没有掩码时忽略此参数)
       z_min, z_max (可选，按 Z 层裁切，闭区间)
       max_voxels (可选，默认 DEFAULT_MAX_VOXELS，超过则均匀降采样；传 0 表示不限制)
     响应头 X-Voxel-Count 是实际发送的体素数 (body = count*6 字节)，
@@ -485,6 +487,7 @@ def get_occupancy(frame_id):
     """
     source = request.args.get('source', 'gt')
     include_free = request.args.get('include_free', '0') == '1'
+    camera_mask = request.args.get('camera_mask', '0') == '1'
     z_min = request.args.get('z_min', type=int)
     z_max = request.args.get('z_max', type=int)
     max_voxels = request.args.get('max_voxels', default=DEFAULT_MAX_VOXELS, type=int)
@@ -503,6 +506,14 @@ def get_occupancy(frame_id):
         return resp
 
     labels = grid[indices[:, 0], indices[:, 1], indices[:, 2]]
+
+    mask_path = Path(CURRENT_DATASET_DIR) / 'mask_camera' / f"{frame_id}.npy"
+    if camera_mask and mask_path.exists():
+        cam = np.load(mask_path)
+        if cam.shape[2] != grid.shape[2]:                      # 打包格式 (X,Y,Z/8)
+            cam = np.unpackbits(cam, axis=2, count=grid.shape[2])
+        keep = cam[indices[:, 0], indices[:, 1], indices[:, 2]].astype(bool)
+        indices, labels = indices[keep], labels[keep]
 
     mask = _z_mask(indices, z_min, z_max)
     if mask is not None:

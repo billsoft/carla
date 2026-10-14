@@ -236,6 +236,23 @@ body {
 
 #three-container { flex: 1; min-height: 0; }
 
+/* 播放时间轴: 3D 视图底部常驻，不随任何面板滚动 */
+#timeline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--bg-1);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+}
+#timeline button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
+#timeline #play-btn { min-width: 52px; }
+#timeline #frame-slider { flex: 1; min-width: 120px; }
+#timeline #frame-counter { margin-top: 0; min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+.timeline-speed { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.timeline-speed input[type="number"] { width: 64px; }
+
 #loading-overlay {
     position: absolute;
     top: 46px; right: 10px;
@@ -380,6 +397,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 /* Frame list */
 #frame-list {
+    position: relative;   /* offsetTop of items relative to the list (highlightCurrentFrame scrolls only this box) */
     min-height: 160px;
     max-height: 340px;
     overflow-y: auto;

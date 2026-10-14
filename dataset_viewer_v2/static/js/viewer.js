@@ -124,6 +124,7 @@ class Viewer {
         this.hiddenClasses = new Set();
         this.hiddenDiffCats = new Set();
         this.showFree = false;
+        this.cameraMask = false;
         this.zMin = 0; this.zMax = 31;
         this.showTrajectory = false;
         this.showFrustum = false;
@@ -347,6 +348,7 @@ class Viewer {
 
         // 体素显示开关
         document.getElementById('toggle-free').onchange = (e) => { this.showFree = e.target.checked; this.reloadVoxels(); };
+        document.getElementById('toggle-camera-mask').onchange = (e) => { this.cameraMask = e.target.checked; this.reloadVoxels(); };
         document.getElementById('toggle-trajectory').onchange = (e) => { this.showTrajectory = e.target.checked; this.updateTrajectory(); };
         document.getElementById('toggle-frustum').onchange = (e) => { this.showFrustum = e.target.checked; this.updateFrustum(); };
 
@@ -782,6 +784,7 @@ class Viewer {
 
         params.set('source', this.viewMode);
         params.set('include_free', this.showFree ? '1' : '0');
+        params.set('camera_mask', this.cameraMask ? '1' : '0');
 
         return fetch(`/api/occupancy/${frameId}?${params}`, { signal })
             .then(async (res) => {
@@ -1091,7 +1094,17 @@ class Viewer {
         const current = document.getElementById(`frame-item-${this.currentFrameIdx}`);
         if (current) {
             current.classList.add('active');
-            current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Scroll ONLY the frame list's own box. scrollIntoView() also scrolls every scrollable ancestor
+            // (the whole right panel / page), which during playback dragged the panel down to the frame list
+            // and the play/stop buttons out of reach.
+            const list = document.getElementById('frame-list');
+            if (list) {
+                const top = current.offsetTop;   // #frame-list is position:relative, so this is list-relative
+                const bottom = top + current.offsetHeight;
+                if (top < list.scrollTop || bottom > list.scrollTop + list.clientHeight) {
+                    list.scrollTop = top - (list.clientHeight - current.offsetHeight) / 2;
+                }
+            }
         }
     }
 
