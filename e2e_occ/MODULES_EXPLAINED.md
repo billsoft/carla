@@ -56,10 +56,13 @@
 - **UE → OpenCV 相机轴**：`p_ue = M·p_cv`，`M = [[0,0,1],[1,0,0],[0,-1,0]]`
   （像素向右 = UE +Y，向下 = UE −Z，光轴 = UE +X，依据 `WideAngleLens.usf`）。`det(M) = −1`
   是因为它把右手系映射进 CARLA 左手系，是正确的。
-- **CARLA 旋转矩阵**：与 `carla.Transform.get_matrix()` 逐项一致（pitch 正值 = 抬头）。
+- **CARLA 旋转矩阵**（`carla_rotation_matrix`）：与 UE `FRotationMatrix` 逐项一致（pitch 正值 = 抬头），
+  即引擎实际渲染的朝向。**不是** `carla.Transform.get_matrix()`——上游 #9751 翻转了客户端 pitch/roll
+  符号，二者在 pitch/roll≠0 时相反（见第 11 节第 4 条）。
 - **等距投影**：反投影 `θ = |((u−cx)/fx, (v−cy)/fy)|`，方向 `(sinθcosφ, sinθsinφ, cosθ)`；
   正投影 `θ = atan2(√(x²+y²), z)`，`u = cx + fx·θ·cosφ`。允许 fx≠fy、主点偏心。
-  （不用 `acos(z/|P|)`：光轴附近 float32 精度不足，实测窄视场相机在光轴附近误差 0.55 像素，atan2 为 0。）
+  （不用 `acos(z/|P|)`：光轴附近 float32 精度不足，实测窄视场相机在光轴附近误差 0.55 像素；atan2 版本
+  往返误差 ~2e-4 像素，`verify_network.py` 2.1 节专门在主点附近加了测试点。fx≠fy 时往返误差同量级。）
 - **归一化**：图像像素 → `grid_sample(align_corners=False)` 坐标 `2(u+0.5)/W − 1`，这个值与特征层级
   无关，所以一个参考点可以直接用于所有层级。
 
@@ -187,7 +190,7 @@ out = Linear(63→256) → LayerNorm → ReLU → Linear(256→256)   # 各层�
     2 × DecoderLayer（带自注意力）
 时序：TemporalFusion（第 7 节）
 粗占用：coarse_occ_head(query) → [25,25,8] logits（BCE 监督：该粗格是否含任何非空体素）
-细初值：三线性上采样到 80×80×16 → x + FFN(x) → Norm → + 位置编码
+细初值：三线性上采样到 80×80×16 → Norm(x + FFN(Norm(x))) → + 3D 正弦位置编码
 稀疏：score = 上采样(粗占用 logits)，取 top 25%（25,600 个）细体素
       只对它们做 2 × DecoderLayer（无自注意力，梯度检查点），结果 scatter 回稠密网格
 空间一致性：vol + GELU(BN(DepthwiseConv3d 3×3×3(vol)))
@@ -305,13 +308,16 @@ total = CE + 0.5·Lovász  +  深度 CE  +  流场 SmoothL1  +  粗占用 BCE
    时序序列不再跨场景拼接；推理脚本不再硬编码 `/4095`。
 
 ### 发现但没有改动的事项
-- `camera_config.py` 里 rear 相机注释写 "pitch=+8° 向下俯视"，但 UE 的 pitch 正值是**抬头**，
-  这台相机实际向上看 8°（可用平地上地平线在画面中心以下来实测确认）。是否改成 −8° 取决于你的本意，
-  改了需要重新采集。
+- rear 相机俯仰：2026-08 曾按 #9751 翻转后的客户端公式把 pitch 改成 +8°，在 UE 里实际是**朝上**看 8°。
+  2026-10 已按特斯拉实车（牌照上方、略向下俯）改回 **−8°**（UE pitch 负值=低头，光轴车辆系 z=−0.139）。
+  用 +8° 采集的旧数据 rear 是朝上拍的（标定文件如实记录了 +8°，网络加载不会错），但与新数据视角不同，
+  不建议混用。
 - **真值生成受上游 #9751 影响**：`ground_truth_voxel_generator.py`（4 处）和 `main_collection.py`
   的 `ego_pose` 用 `transform.get_matrix()`，它的 pitch/roll 符号与渲染相反。平地（Town10HD）几乎
   无影响；坡道/倾斜路面上朝向误差为 2θ，2° 坡、40m 处竖直偏差约 2.8m（约 14 格），俯仰车辆的
-  包围盒也会歪。修复需 5 处一起改成按 UE 公式建矩阵，且需要模拟器验证，未改动。
+  包围盒也会歪。2026-10 已修复：5 处 `get_matrix()` 和 3 处 `get_world_vertices()` 统一改用
+  `processing/transform_utils.py`（UE 公式，已与客户端在仅 yaw 时逐项对齐），但尚未在模拟器坡道场景实测；
+  修复前采集的坡道数据需要重采。
 - `generate_flow` 的流场是"相对自车速度×dt"且只在动态物体内非零，路面等静止背景的流场为 0
   而不是 −v_ego·dt，这是数据定义问题，网络侧按 `flow_mask` 处理。
 - 真值生成器（`ground_truth_voxel_generator.py`）的体素网格与网络约定一致（原点 = 车辆 transform，

@@ -43,6 +43,7 @@ from config.occupancy_config import (
 from sensors.camera_manager import CameraManager
 from sensors.semantic_lidar_sensor import SemanticLidarSensor
 from processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
+from processing.transform_utils import transform_to_matrix
 from processing.visibility_filter_simple import VisibilityFilterSimple # ⭐ 新增
 from data_utils.data_saver import OccNetDataSaver
 
@@ -505,7 +506,8 @@ def main():
             # Step 4: 获取 Ego Pose
             step_start = time.time()
             ego_transform = vehicle.get_transform()
-            ego_pose = np.array(ego_transform.get_matrix(), dtype=np.float32)
+            # 不用 get_matrix()：5.5 客户端 pitch/roll 符号与 UE 渲染相反，见 processing/transform_utils.py
+            ego_pose = transform_to_matrix(ego_transform).astype(np.float32)
             print(f"  [4/6] Ego Pose: {(time.time()-step_start)*1000:.1f}ms")
 
             # Step 5: 生成体素 (最耗时)

@@ -25,11 +25,17 @@ conda activate deepsys
 # 训练
 python e2e_occ/train.py --data_root <dataset_dir> --batch_size 1 --epochs 100 --amp --grad_accum 4
 
-# 推理
+# 推理（流式携带时序记忆，换场景重置；默认 --split val --num_samples 100，可加 --save_flow）
 python e2e_occ/inference.py --checkpoint checkpoints/best_model.pth --data_root <dataset_dir> --output <out_dir>
+# 推理速度基准（随机输入 + 真实标定）
+python e2e_occ/inference.py --checkpoint checkpoints/best_model.pth --benchmark
 
-# 结构自检（逐层形状、真实标定下的几何回归、时序方向、梯度通路，不是性能基准）
+# 结构自检（逐层形状、真实标定下的几何回归、时序方向、梯度通路，不是性能基准；
+# 会重写 shape_report.md，--quick 只跑默认配置、报告也只剩默认配置一节）
 python e2e_occ/verify_network.py
+# 快速单帧前向/反向冒烟、逐阶段显存/耗时剖析（均支持随机输入，不需要数据集）
+python e2e_occ/test.py
+python e2e_occ/profile_network.py --set use_sparse_fine=False
 
 # 可选：MAE 自监督预训练图像骨干
 python e2e_occ/pretrain_mae.py --data_root <dataset_dir> --epochs 20 --amp
@@ -38,8 +44,9 @@ python e2e_occ/pretrain_mae.py --data_root <dataset_dir> --epochs 20 --amp
 python dataset_viewer_v2/server.py --dataset <out_dir>   # http://localhost:8085/
 ```
 
-环境要求：Python 3.10+，PyTorch 2.0+（用到 `F.scaled_dot_product_attention` 自动选
-FlashAttention kernel），CUDA 11.8+。Windows 下 `train.py --num_workers` 保持默认 `0`，
+环境要求：Python 3.10+，**PyTorch 2.4+**（默认 `norm_type='rmsnorm'` 用到 2.4 才加入的
+`nn.RMSNorm`；`F.scaled_dot_product_attention` 自动选 FlashAttention kernel；`deepsys` 环境实测
+2.6.0+cu124），CUDA 11.8+。Windows 下 `train.py --num_workers` 保持默认 `0`，
 调大会撞上 `DataLoader` 多进程死锁的已知问题。
 
 ## 输入/输出

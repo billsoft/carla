@@ -7,6 +7,9 @@ import carla
 import numpy as np
 import math
 import logging
+
+# 不用客户端 get_matrix()/get_world_vertices()：5.5 客户端的 pitch/roll 符号与 UE 渲染相反，见 transform_utils.py
+from processing.transform_utils import transform_to_matrix, bbox_world_vertices
 from config.occupancy_config import (
     CARLA_TO_OCCUPANCY_MAPPING, OCCUPANCY_LABELS
 )
@@ -73,7 +76,7 @@ class GroundTruthVoxelGenerator:
         flow_mask = np.zeros(self.grid_size, dtype=bool)
         
         ego_transform = ego_vehicle.get_transform()
-        grid_to_world_matrix = np.array(ego_transform.get_matrix())
+        grid_to_world_matrix = transform_to_matrix(ego_transform)
         
         # World -> Grid (Ego) 旋转矩阵 (3x3)
         # V_ego = R_world_to_ego * V_world
@@ -135,10 +138,9 @@ class GroundTruthVoxelGenerator:
             except np.linalg.LinAlgError:
                 continue
 
-            verts_world = bb.get_world_vertices(actor_transform)
-            if not verts_world: continue
+            verts_world = bbox_world_vertices(bb, actor_transform)  # [8, 3]
             
-            verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
+            verts_world_np = np.concatenate([verts_world, np.ones((8, 1))], axis=1).T
             verts_grid_np = world_to_grid_matrix @ verts_world_np
             
             xs, ys, zs = verts_grid_np[0, :], verts_grid_np[1, :], verts_grid_np[2, :]
@@ -171,7 +173,7 @@ class GroundTruthVoxelGenerator:
             sub_points_grid = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
             
             sub_points_world = sub_points_grid @ grid_to_world_matrix.T
-            box_matrix_inv = np.linalg.inv(np.array(actor_transform.get_matrix()))
+            box_matrix_inv = np.linalg.inv(transform_to_matrix(actor_transform))
             points_in_actor = sub_points_world[:, :3] @ box_matrix_inv[:3, :3].T + box_matrix_inv[:3, 3]
             
             in_x = np.abs(points_in_actor[:, 0] - bb.location.x) <= bb.extent.x
@@ -215,7 +217,7 @@ class GroundTruthVoxelGenerator:
         # ⭐ 构建变换矩阵 (包含旋转，确保 Grid 是 Ego-Aligned)
         # 体素网格坐标系: 以 Ego 为原点，X轴向前，Y轴向右/左，Z轴向上
         # 这与 Viewer 和 Dataset 的预期一致
-        grid_to_world_matrix = np.array(ego_transform.get_matrix())
+        grid_to_world_matrix = transform_to_matrix(ego_transform)
         
         # 1. 填充静态环境 (地面、道路)
         self._fill_static_environment(occupancy, actor_ids, world, ego_transform, grid_to_world_matrix)
@@ -709,10 +711,10 @@ class GroundTruthVoxelGenerator:
             bb = obj.bounding_box
             
             # 使用 Identity Transform 获取世界顶点 (因为 BB 已经是 World AABB)
-            verts_world = bb.get_world_vertices(carla.Transform())
+            verts_world = bbox_world_vertices(bb, None)  # [8, 3]
             
             # 4. 转换到 Grid Frame (对齐世界坐标轴)
-            verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
+            verts_world_np = np.concatenate([verts_world, np.ones((8, 1))], axis=1).T
             verts_grid_np = world_to_grid_matrix @ verts_world_np
             
             xs_grid = verts_grid_np[0, :]
@@ -955,11 +957,9 @@ class GroundTruthVoxelGenerator:
             return
 
         # Get 8 corners in World
-        verts_world = bb.get_world_vertices(actor_transform)
-        if not verts_world:
-            return
+        verts_world = bbox_world_vertices(bb, actor_transform)  # [8, 3]
 
-        verts_world_np = np.array([[v.x, v.y, v.z, 1.0] for v in verts_world]).T
+        verts_world_np = np.concatenate([verts_world, np.ones((8, 1))], axis=1).T
 
         # Transform to Grid Frame
         verts_grid_np = world_to_grid_matrix @ verts_world_np
@@ -1052,7 +1052,7 @@ class GroundTruthVoxelGenerator:
         sub_points_world = all_samples_h @ grid_to_world_matrix.T
 
         # Step 2: World -> Actor Local (用于BBox内点检测)
-        box_matrix = np.array(actor_transform.get_matrix())
+        box_matrix = transform_to_matrix(actor_transform)
         try:
             box_matrix_inv = np.linalg.inv(box_matrix)
         except np.linalg.LinAlgError:

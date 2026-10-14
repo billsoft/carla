@@ -392,7 +392,7 @@ camera_bp.set_attribute('fov', str(cam_config['fov_vertical']))
 
 按 2.2 节的判定规则，`front_main`（37.5°）和 `front_narrow`（26.25°）两台的 FOV×√2 仍小于 90°，是 `CubemapRenderMask` 只含前面这一张的相机——正是 2.4 节修复直接受益、也是修复前肉眼可见最模糊的两台相机；其余 6 台 FOV 都在 90° 以上，天然需要渲染多张面，未受该修复影响也不需要收窄。
 
-`camera_config.py` 顶部还预留了一组"物理镜头仿真"字段（`lens_model`/`distortion_coeffs`/`principal_point`/`fov_horizontal`），对应第一部分 1.2/1.3 节的 Kannala-Brandt 系数与主点偏移——**目前 8 台相机都没有配置这些键**，即当前数据集用的仍是"完美"等距模型。这是留好的基础设施：一旦有真实标定的车载镜头参数，只需要在这个字典里加上对应键，不需要改任何引擎代码。（`e2e_occ` 网络当前的射线编码假设 fx=fy 各向同性，真正启用 `fov_horizontal` 之前需要先确认/升级那部分算法。）
+`camera_config.py` 顶部还预留了一组"物理镜头仿真"字段（`lens_model`/`distortion_coeffs`/`principal_point`/`fov_horizontal`），对应第一部分 1.2/1.3 节的 Kannala-Brandt 系数与主点偏移——**目前 8 台相机都没有配置这些键**，即当前数据集用的仍是"完美"等距模型。这是留好的基础设施：一旦有真实标定的车载镜头参数，只需要在这个字典里加上对应键，不需要改任何引擎代码。（`e2e_occ` 网络的等距正/反投影 2026-10 起统一在 `e2e_occ/geometry.py`，已支持 fx≠fy 和偏心主点，但只验证了自身互逆，尚未与引擎各向异性 distort shader 的实际输出对照；真正启用 `fov_horizontal` 之前需要先用引擎采集结果核对。Kannala-Brandt 畸变系数网络仍不消费。）
 
 ## 3.3 从像素到 DNG：数据落盘全链路
 

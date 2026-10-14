@@ -17,9 +17,11 @@ intrinsics 的值。两者换算关系(各向同性等距投影下精确成立):
     'principal_point': (cx, cy)            # 像素单位真实光心，默认 (width/2, height/2)
     'fov_horizontal': 90.0                 # 独立于 fov_vertical 的水平 FOV(度)，默认按
                                             # 宽高比从 fov_vertical 线性推导（各向同性）
-目前没有任何相机配这些键——还没有真实实验室标定数据。e2e_occ 网络的射线编码目前假设
-fx=fy 各向同性，真用上 'fov_horizontal' 之前需要先检查/升级那部分算法（不要自己改，
-按用户要求这一层的职责边界很明确：镜头内外参数只应该通过射线编码这一处表达给网络）。
+目前没有任何相机配这些键——还没有真实实验室标定数据。e2e_occ 网络的等距正/反投影
+（2026-10 起统一在 e2e_occ/geometry.py）已支持 fx≠fy，但只验证了自身正反投影互逆，
+没有和引擎各向异性 distort shader 的实际输出对照过；真用上 'fov_horizontal' 之前需要先
+用引擎采集结果核对（不要自己改，按用户要求这一层的职责边界很明确：镜头内外参数只应该
+通过射线编码这一处表达给网络）。
 """
 
 # ========== Tesla 8相机布局 ==========
@@ -121,11 +123,14 @@ TESLA_CAMERAS = [
         'fov': 120.0,    # 真实 Tesla 后摄约 130-150°，按用户要求简化取 120°
         'fov_vertical': 90.0,
         'position': [-2.7, 0.0, 1.2],   # ⭐ X=-2.7 (向车尾外延20cm, 原-2.5)
-        # 2026-08-27 修复符号错误: LibCarla/geom/Rotation.h::RotateVector (2026-06-18
-        # 上游 #9751 修正后) forward.z = -sin(pitch)，pitch 为正才是向下看。原来的
-        # pitch=-8 在当前引擎公式下实际是向上抬头，和"看清地面"的注释意图正好相反。
-        'rotation': [8.0, 180.0, 0.0],  # ⭐ pitch=+8° (向下俯视，看清地面)
-        'description': '后视 (Rear, 正后方 180°, 俯仰 +8° 向下, 120°FOV)',
+        # pitch 方向以 UE 引擎渲染为准：FRotator 的 pitch 正值=抬头、负值=低头（Engine
+        # Rotator.h "+Up, -Down"；FRotator::Vector() 前向量 z = sin(pitch)），Python 侧
+        # carla.Rotation 的 pitch 原样传给 FRotator。所以要向下俯视必须是负值。
+        # 2026-08-27 曾依据 LibCarla 客户端 Rotation::RotateVector（上游 #9751 翻转了符号，
+        # 但 UE 端没跟着改，上游 ue58-dev 已在 7c32b194a 撤销）把这里错改成 +8，实际是
+        # 向上看；2026-10 改回 -8。用 +8 采集的旧数据 rear 相机是朝上 8° 拍的。
+        'rotation': [-8.0, 180.0, 0.0],  # ⭐ pitch=-8° (向下俯视，看清地面)
+        'description': '后视 (Rear, 正后方 180°, 俯仰 -8° 向下, 120°FOV)',
         'raw_type': 'bayer_rggb',
         'bit_depth': 12,
     },

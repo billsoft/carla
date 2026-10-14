@@ -311,6 +311,11 @@ bug 存在于加这次改动之前，只是原来没人会去读 `XFocalLength`�
 没有接入网络**——目前没有任何相机配置了真实畸变系数，没有数据驱动，留到真的需要
 时再做，见 `occnetv3_data_generator/README.md` 对应小节。
 
+**2026-10 更新**：上面提到的两处投影公式已合并到 `e2e_occ/geometry.py`
+（`equidistant_project` / `equidistant_unproject`，全网唯一一份，支持 fx≠fy 与偏心主点），
+`ARCHITECTURE.md` 已重写、不再有"第 3.3 节"，坐标约定见其第 2 节，回归测试见
+`verify_network.py` 第 2 节。
+
 ### 4.11 `Variations.Contains(id)` 恒真陷阱：8 相机画面全部"看向错误方向"
 
 4.10 加的 `cx`/`cy`/`fov_horizontal` 覆盖开关用 `if (Variations.Contains("fov_horizontal"))`

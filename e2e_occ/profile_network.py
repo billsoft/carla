@@ -24,7 +24,14 @@ def main():
     for kv in args.set:
         k, v = kv.split('=', 1)
         cur = getattr(config, k)
-        setattr(config, k, (v.lower() in ('1', 'true')) if isinstance(cur, bool) else type(cur)(v))
+        # 与 train.py --set 的解析规则一致（含 tuple 字段，如 fine_size=80,80,16）
+        if isinstance(cur, bool):
+            v = v.lower() in ('1', 'true', 'yes')
+        elif isinstance(cur, tuple):
+            v = tuple(type(cur[0])(x) for x in v.split(','))
+        else:
+            v = type(cur)(v)
+        setattr(config, k, v)
 
     model = E2EOccNet(config).cuda().train()
     K, T, _ = default_calibration(config.num_cameras, config.image_size)

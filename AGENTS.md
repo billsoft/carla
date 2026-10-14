@@ -8,6 +8,10 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 **代码修复原则:** 有问题的文件在原文件上修复，不要创建 `_fix`、`_fixed`、`_new` 等后缀的新文件。
 
+**⚠️ 本目录是 UE5.8 移植 worktree（`D:\code\carla_ue58`，分支 `ue58-port`）**：引擎 `D:\code\UnrealEngine58_carla`、
+MSVC 必须 14.44（`vcvars64.bat -vcvars_ver=14.44`）、Python 环境 `C:\Users\bills\.conda\envs\carla58`、Content 为
+`ue58-dev-carla` 分支。与下文 5.5 内容冲突时以 `CLAUDE.md` 顶部的 5.5/5.8 对照表为准。
+
 ---
 
 ## 仓库概况
@@ -207,12 +211,14 @@ GPU 读回没等完成、客户端反序列化按错误格式解析、16-bit 格
 ### 网络：`e2e_occ/`
 
 详细的逐模块架构见 `ARCHITECTURE.md`，训练流程/损失函数/显存优化见 `TRAINING.md`（均对照实际代码核对过，改网络结构前务必先读，不要凭记忆假设结构没变——`voxel_head.py` 等模块已经和早期版本有实质性差异）。要点：
-- 参考 Tesla FSD 架构，10.49M 参数（实测），输入 8 路等距投影 Bayer RAW `[B,8,1,960,1280]`，输出 `(400,400,32)` 18 类语义体素。
-- 粗细两阶段 Deformable Cross-Attention 解码 + GRU 时序融合（Ego-Motion 对齐）。
-- 相机是等距投影（equidistant），不是针孔——`position_encoding.py`（反投影：像素→射线方向）和 `deformable_attention.py`（正投影：3D点→像素）必须用同一套等距投影公式，改一处要同步改另一处，见 `ARCHITECTURE.md` 第 3 节。
+- 参考 Tesla FSD 架构，默认配置 13.45M 参数（实测），输入 8 路等距投影 Bayer RAW `[B,8,1,960,1280]`，输出 `(400,400,32)` 18 类语义体素 + 3 维占用流。
+- 多尺度（stride 8/16/32）可变形交叉注意力 + 粗 → 时序（局部可变形注意力 + GRU，Ego-Motion 对齐）→ 稀疏细两阶段解码；深度辅助监督。P1~P3 各项优化都有 `config.py` 开关，`train.py --set key=value` 可做消融。
+- **坐标约定（2026-10 统一，见 `e2e_occ/geometry.py` 文件头）**：车辆/体素系 X前 Y右 Z上；相机系 OpenCV（x右 y下 z前）；网络吃的外参是 **Camera(OpenCV)→Vehicle 静态标定，不含车辆世界位姿**。所有等距正/反投影只在 `geometry.py` 实现一份，不要在别处另写投影公式。改几何相关代码后必须跑 `verify_network.py`（含真实标定下的几何回归测试和时序方向测试）。
+- 2026-10 之前的 checkpoint 与当前结构不兼容（且旧版几何有 3 处错误，见 `MODULES_EXPLAINED.md` 第 11 节）。
 
 ```bash
 conda activate deepsys
+python e2e_occ/verify_network.py
 python e2e_occ/train.py --data_root <dataset_dir> --batch_size 1 --epochs 100 --amp --grad_accum 4
 python e2e_occ/inference.py --checkpoint <ckpt.pth> --data_root <dataset_dir> --output <dir>
 
@@ -224,12 +230,14 @@ python dataset_viewer_v2/server.py --dataset <dir>   # http://localhost:8085/
 
 `dataset_10k*/` 下按 `scene_XXXX_frame_XXXX` 组织样本：`calibration/{intrinsics,extrinsics}.json`（静态，Camera→Vehicle）、`images/*.dng`（8 相机 Bayer）、`depth/*.npy`、`occupancy/*.npy`（`(400,400,32)` uint8）、`flow/*.npy`、`flow_mask/*.npy`、`ego_pose/*.npy`（`(4,4)` float32，Vehicle→World）、`ego_motion/*.npy`、`train.txt`/`val.txt`/`test.txt`。
 
-- 外参约定：`extrinsics = Camera→World`（含车辆绝对位姿）。
-- `ego_motion` 计算：`inv(pose_t) @ pose_{t-1}`（上一帧坐标系 → 当前帧坐标系）。
-- `e2e_occ/dataset.py` 加载相机参数的优先级：`camera_params/{id}.npz`（逐帧绝对外参，`dense_occupancy_collection` 格式，已弃用）→ `ego_pose/{id}.npy` + `calibration/`（当前 `occnetv3_data_generator` 格式）→ `calibration/` 静态标定退化（时序对齐失效，仅调试用）。
+- 外参约定：`calibration/extrinsics.json` 存 Camera(UE 轴 x前 y右 z上)→Vehicle；`e2e_occ/dataset.py` 转成 Camera(OpenCV 轴)→Vehicle 喂给网络。旋转矩阵必须按 UE `FRotationMatrix`（pitch 正值=抬头，即引擎实际渲染朝向）；旧版采集代码在 pitch/roll≠0 时符号与之相反，新版在 json 顶层写 `rotation_convention: ue_frotator` 标记，dataset 对没有标记的旧数据自动修正。
+- **⚠️ 当前 LibCarla 的 `carla.Transform.get_matrix()` 与 UE 渲染不一致**：上游 #9751（2026-06）翻转了客户端 pitch/roll 符号，但 `Rotation→FRotator` 原样传递、UE 端未改。2026-10 起采集侧（真值生成器、`ego_pose`）改用 `occnetv3_data_generator/processing/transform_utils.py` 按 UE 公式自建矩阵和包围盒顶点，不再调用 `get_matrix()`/`get_world_vertices()`；此前采集的数据在坡道/倾斜路面上真值会歪（平地无影响）。上游 ue58-dev 已在 7c32b194a 撤销该翻转。
+- `ego_motion` 计算：`inv(pose_t) @ pose_{t-1}`（上一帧车辆系 → 当前帧车辆系），`pose` 来自 `ego_pose/`。
+- `depth/` 来自**针孔**深度相机（平面 z 深度），与鱼眼 RGB 像素不对应，dataset 里换算成沿鱼眼射线的距离后才作为监督目标。
+- 时序样本不跨场景拼接；`camera_params/*.npz`（`dense_occupancy_collection` 格式）已不再支持。
 - DNG 位深（`main_collection.py --raw-bit-depth`，默认 12）从 `calibration/intrinsics.json` 顶层 `raw_bit_depth` 字段读取，不要在 `dataset.py` 里硬编码某个位深的归一化除数——这类硬编码曾经导致过采集侧改了位深、加载侧没跟着改的静默数值错误。
 
-18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 在损失函数里权重必须 ≥ 1.0，`11: driveable_surface` 与 `13: sidewalk` 在可见性过滤中强制保留。
+18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 若将来在损失里加类别权重，其权重不得低于 1.0（当前 `e2e_occ/loss.py` 是无类别权重的 CE + Lovász）；`11: driveable_surface` 与 `13: sidewalk` 在可见性过滤中强制保留。
 
 ---
 
