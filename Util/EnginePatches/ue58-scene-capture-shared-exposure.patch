@@ -1,0 +1,115 @@
+diff --git a/Engine/Source/Runtime/Engine/Private/SceneCaptureExposureSharing.cpp b/Engine/Source/Runtime/Engine/Private/SceneCaptureExposureSharing.cpp
+new file mode 100644
+index 000000000..ce71f03a1
+--- /dev/null
++++ b/Engine/Source/Runtime/Engine/Private/SceneCaptureExposureSharing.cpp
+@@ -0,0 +1,46 @@
++// CARLA engine patch (2026-10): see SceneCaptureExposureSharing.h.
++
++#include "SceneCaptureExposureSharing.h"
++
++#include "Components/SceneCaptureComponent.h"
++#include "UObject/ObjectKey.h"
++
++namespace
++{
++	TMap<TObjectKey<USceneCaptureComponent>, TWeakObjectPtr<USceneCaptureComponent>>& GetExposureSources()
++	{
++		static TMap<TObjectKey<USceneCaptureComponent>, TWeakObjectPtr<USceneCaptureComponent>> Map;
++		return Map;
++	}
++}
++
++namespace SceneCaptureExposureSharing
++{
++	void SetExposureSource(const USceneCaptureComponent* Capture, USceneCaptureComponent* Source)
++	{
++		check(IsInGameThread());
++		if (Capture == nullptr)
++		{
++			return;
++		}
++		if (Source == nullptr || Source == Capture)
++		{
++			GetExposureSources().Remove(TObjectKey<USceneCaptureComponent>(Capture));
++		}
++		else
++		{
++			GetExposureSources().Add(TObjectKey<USceneCaptureComponent>(Capture), Source);
++		}
++	}
++
++	USceneCaptureComponent* GetExposureSource(const USceneCaptureComponent* Capture)
++	{
++		if (Capture == nullptr)
++		{
++			return nullptr;
++		}
++		const TWeakObjectPtr<USceneCaptureComponent>* Found =
++			GetExposureSources().Find(TObjectKey<USceneCaptureComponent>(Capture));
++		return Found ? Found->Get() : nullptr;
++	}
++}
+diff --git a/Engine/Source/Runtime/Engine/Public/SceneCaptureExposureSharing.h b/Engine/Source/Runtime/Engine/Public/SceneCaptureExposureSharing.h
+new file mode 100644
+index 000000000..59015632a
+--- /dev/null
++++ b/Engine/Source/Runtime/Engine/Public/SceneCaptureExposureSharing.h
+@@ -0,0 +1,27 @@
++// CARLA engine patch (2026-10): share eye adaptation (auto exposure) between scene captures.
++//
++// A multi-capture camera (e.g. CARLA's cube-map fisheye: six USceneCaptureComponent2D faces stitched into one
++// image) meters every face independently when histogram auto exposure is on, which leaves visible brightness
++// seams in the stitched image. The renderer already supports sharing one view's eye adaptation with other views
++// through FSceneViewInitOptions::ExposureSceneViewStateInterface (used by Movie Render Queue panoramic/tiled
++// rendering), but scene captures never set it. Registering an exposure source here makes
++// SetupViewFamilyForSceneCapture (SceneCaptureRendering.cpp) point the capture's view at the source capture's
++// view state: the source meters and adapts, the other captures read the very same exposure in the same frame.
++//
++// Kept out of SceneCaptureComponent.h on purpose so the patch does not trigger a full engine rebuild.
++// Game thread only. The source must be captured every frame, before the captures that follow it.
++
++#pragma once
++
++#include "CoreMinimal.h"
++
++class USceneCaptureComponent;
++
++namespace SceneCaptureExposureSharing
++{
++	/** Make Capture use Source's eye adaptation. Pass Source == nullptr (or Capture itself) to clear. */
++	ENGINE_API void SetExposureSource(const USceneCaptureComponent* Capture, USceneCaptureComponent* Source);
++
++	/** The registered exposure source of Capture, or nullptr (none, cleared, or source destroyed). */
++	ENGINE_API USceneCaptureComponent* GetExposureSource(const USceneCaptureComponent* Capture);
++}
+diff --git a/Engine/Source/Runtime/Renderer/Private/SceneCaptureRendering.cpp b/Engine/Source/Runtime/Renderer/Private/SceneCaptureRendering.cpp
+index de9d83491..c4b1de4f4 100644
+--- a/Engine/Source/Runtime/Renderer/Private/SceneCaptureRendering.cpp
++++ b/Engine/Source/Runtime/Renderer/Private/SceneCaptureRendering.cpp
+@@ -4,6 +4,7 @@
+ 	
+ =============================================================================*/
+ #include "SceneCaptureRendering.h"
++#include "SceneCaptureExposureSharing.h"  // CARLA engine patch: shared eye adaptation between scene captures
+ #include "Containers/ArrayView.h"
+ #include "SceneUtils.h"
+ #include "TemporalUpscaler.h"
+@@ -821,6 +822,17 @@ TArray<FSceneView*> SetupViewFamilyForSceneCapture(
+ 		{
+ 			// Use CubemapFaceIndex if in range [0..CubeFace_MAX), otherwise use ViewIndex.  Casting to unsigned treats -1 as a large value, choosing ViewIndex.
+ 			ViewInitOptions.SceneViewStateInterface = SceneCaptureComponent->GetViewState((uint32)CubemapFaceIndex < CubeFace_MAX ? CubemapFaceIndex : ViewIndex + CubemapFaceOffset);
++
++			// CARLA engine patch: use another capture's eye adaptation (SceneCaptureExposureSharing.h), so a camera
++			// made of several captures (cube-map fisheye faces) has one shared auto exposure instead of seams.
++			if (USceneCaptureComponent* ExposureSource = SceneCaptureExposureSharing::GetExposureSource(SceneCaptureComponent))
++			{
++				if (FSceneViewStateInterface* ExposureState = ExposureSource->GetViewState(0))
++				{
++					ViewInitOptions.ExposureSceneViewStateInterface = ExposureState;
++				}
++			}
++
+ 			ViewInitOptions.LODDistanceFactor = FMath::Clamp(SceneCaptureComponent->LODDistanceFactor, .01f, 100.0f);
+ 			ViewInitOptions.bIsSceneCaptureCube = SceneCaptureComponent->IsCube();
+ 			ViewInitOptions.bSceneCaptureUsesRayTracing = GRayTracingSceneCaptures == -1 ? SceneCaptureComponent->bUseRayTracingIfEnabled : GRayTracingSceneCaptures > 0;

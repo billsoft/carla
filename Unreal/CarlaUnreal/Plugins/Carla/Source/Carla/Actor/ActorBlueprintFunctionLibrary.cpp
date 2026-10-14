@@ -2557,9 +2557,55 @@ void UActorBlueprintFunctionLibrary::SetCamera(
     FString PostProcessProfileName = RetrieveActorAttributeToString(
         "post_process_profile", Variations, TEXT(""));
     PostProcessProfileName = UPostProcessJsonUtils::ResolveProfileName(PostProcessProfileName);
+    bool bProfileLoaded = true;
     for (auto *Face : Camera->GetCaptureComponents2D())
-      UPostProcessJsonUtils::LoadAllPostProcessFromJsonToSceneCapture(
+      bProfileLoaded &= UPostProcessJsonUtils::LoadAllPostProcessFromJsonToSceneCapture(
           Face, PostProcessProfileName);
+
+    // The legacy exposure attributes (exposure_mode, exposure_min/max_bright, exposure_compensation,
+    // exposure_speed_up/down, shutter_speed, iso, fstop) are still registered for the fisheye
+    // (MakeWideAngleLensCameraDefinition) but nothing consumed them since the pinhole moved to JSON
+    // profiles (upstream #9110) and the fisheye port (#9741) copied only the attribute list: setting them
+    // silently did nothing, and with the default profile (no Default.json ships, so nothing loads) every
+    // face stayed on the constructor's fixed manual exposure (~EV100 9.9) and never adapted.
+    // An explicitly loaded profile owns exposure; otherwise apply the attributes to all six faces. With
+    // histogram mode the faces still adapt as ONE camera: they share face 0's eye adaptation
+    // (ASceneCaptureSensor_WideAngleLens::BeginPlay, engine patch SceneCaptureExposureSharing.h).
+    if (!bProfileLoaded)
+    {
+      const bool bManual = RetrieveActorAttributeToString("exposure_mode", Variations, TEXT("histogram")) == TEXT("manual");
+      for (auto *Face : Camera->GetCaptureComponents2D())
+      {
+        auto &PP = Face->PostProcessSettings;
+        PP.bOverride_AutoExposureMethod = true;
+        PP.AutoExposureMethod = bManual ? EAutoExposureMethod::AEM_Manual : EAutoExposureMethod::AEM_Histogram;
+        PP.bOverride_AutoExposureBias = true;
+        PP.AutoExposureBias = RetrieveActorAttributeToFloat("exposure_compensation", Variations, 0.0f);
+        PP.bOverride_AutoExposureBiasCurve = true;
+        PP.AutoExposureBiasCurve = nullptr;
+        PP.bOverride_AutoExposureMinBrightness = true;
+        PP.AutoExposureMinBrightness = RetrieveActorAttributeToFloat("exposure_min_bright", Variations, 10.0f);
+        PP.bOverride_AutoExposureMaxBrightness = true;
+        PP.AutoExposureMaxBrightness = RetrieveActorAttributeToFloat("exposure_max_bright", Variations, 12.0f);
+        PP.bOverride_AutoExposureSpeedUp = true;
+        PP.AutoExposureSpeedUp = RetrieveActorAttributeToFloat("exposure_speed_up", Variations, 3.0f);
+        PP.bOverride_AutoExposureSpeedDown = true;
+        PP.AutoExposureSpeedDown = RetrieveActorAttributeToFloat("exposure_speed_down", Variations, 1.0f);
+        // Physical camera exposure (shutter / ISO / f-stop) only drives the manual mode. The f-stop also
+        // sets depth of field, so it is only claimed in manual mode, where the user asked for it.
+        PP.bOverride_AutoExposureApplyPhysicalCameraExposure = true;
+        PP.AutoExposureApplyPhysicalCameraExposure = bManual;
+        if (bManual)
+        {
+          PP.bOverride_CameraShutterSpeed = true;
+          PP.CameraShutterSpeed = RetrieveActorAttributeToFloat("shutter_speed", Variations, 200.0f);
+          PP.bOverride_CameraISO = true;
+          PP.CameraISO = RetrieveActorAttributeToFloat("iso", Variations, 100.0f);
+          PP.bOverride_DepthOfFieldFstop = true;
+          PP.DepthOfFieldFstop = RetrieveActorAttributeToFloat("fstop", Variations, 1.4f);
+        }
+      }
+    }
   }
 
   if (Variations.Contains("gamma"))

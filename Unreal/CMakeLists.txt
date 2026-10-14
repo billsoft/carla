@@ -558,6 +558,28 @@ base content folder."
     COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE BASE RELEASE METADATA COMPLETED **********"
   )
 
+  # The DLSSRRDenoiser plugin only links the static NGX loader; NGX loads the DLSS "snippet" DLLs at runtime
+  # from the executable's folder or from $DLSS_SDK/lib/Windows_x86_64/rel, and DLSS_SDK is only set for the
+  # build commands, never for the packaged runtime. Without these next to CarlaUnreal.exe the log says
+  # "DLSS Ray Reconstruction is not available on this system (driver/GPU/snippet)" (NGXLoadFromPath fails with
+  # 0xBAD00004 FeatureNotFound) and sensor.camera.rt_lens renders undenoised.
+  if (WIN32 AND NOT "${CARLA_DLSS_SDK_RESOLVED}" STREQUAL "" AND NOT "${CARLA_DLSS_SDK_RESOLVED}" STREQUAL "disabled")
+    set (CARLA_DLSS_SNIPPET_DIR ${CARLA_DLSS_SDK_RESOLVED}/lib/Windows_x86_64/rel)
+    if (EXISTS ${CARLA_DLSS_SNIPPET_DIR}/nvngx_dlssd.dll)
+      set (
+        PACKAGE_POST_BUILD_COMMANDS
+        ${PACKAGE_POST_BUILD_COMMANDS}
+        COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE STAGING DLSS NGX SNIPPETS **********"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CARLA_DLSS_SNIPPET_DIR}/nvngx_dlssd.dll
+          ${CARLA_DLSS_SNIPPET_DIR}/nvngx_dlss.dll
+          ${CARLA_PACKAGE_ARCHIVE_PATH}/Windows/CarlaUnreal/Binaries/Win64/
+      )
+    else ()
+      carla_warning ("DLSS SDK at ${CARLA_DLSS_SDK_RESOLVED} has no lib/Windows_x86_64/rel/nvngx_dlssd.dll; the package will have no DLSS-RR denoising.")
+    endif ()
+  endif ()
+
   if (NOT ${CARLA_UNREAL_PACKAGE_NO_COMPRESSION})
     set (
       PACKAGE_POST_BUILD_COMMANDS

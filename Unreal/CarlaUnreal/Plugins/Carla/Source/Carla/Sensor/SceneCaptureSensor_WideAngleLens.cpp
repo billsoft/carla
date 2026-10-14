@@ -16,6 +16,7 @@
 #include "RenderGraphUtils.h"
 #include "HAL/IConsoleManager.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "SceneCaptureExposureSharing.h"  // CARLA engine patch: shared eye adaptation between scene captures
 #include <util/ue-header-guard-end.h>
 
 #include <cmath>
@@ -984,10 +985,34 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
         FaceCapture->ShowFlags = PostProcessConfig.EngineShowFlags;
         FaceCapture->PostProcessSettings = PostProcessConfig.PostProcessSettings;
 
+        if (bEnablePostProcessingEffects)
+        {
+            // Effects computed per view (per face) leave seams in the stitched image even when all faces share
+            // one exposure (see below): local exposure (bilateral grid / fusion), bloom and lens flares.
+            // A real camera has one sensor; keep only the global, shared exposure + tone curve.
+            auto &PP = FaceCapture->PostProcessSettings;
+            PP.bOverride_LocalExposureHighlightContrastScale = true;
+            PP.LocalExposureHighlightContrastScale = 1.0f;
+            PP.bOverride_LocalExposureShadowContrastScale = true;
+            PP.LocalExposureShadowContrastScale = 1.0f;
+            PP.bOverride_LocalExposureDetailStrength = true;
+            PP.LocalExposureDetailStrength = 1.0f;
+            FaceCapture->ShowFlags.SetBloom(false);
+            FaceCapture->ShowFlags.SetLensFlares(false);
+        }
+
         FaceCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
         FaceCapture->UpdateContent();
         FaceCapture->Activate();
     }
+
+    // One auto exposure for the whole camera: faces 1..5 use face 0's (front, +X) eye adaptation through the
+    // engine's ExposureSceneViewStateInterface (engine patch SceneCaptureExposureSharing.h). Before this every
+    // face metered on its own, so histogram exposure (any post_process_profile) left brightness seams.
+    // Face 0 is always in the render mask (ComputeCubemapRenderMask) and is captured first in
+    // CaptureSceneExtended, so the other faces read the exposure it adapted in the same frame.
+    for (int32 i = 1; i < FaceCaptures.Num(); ++i)
+        SceneCaptureExposureSharing::SetExposureSource(FaceCaptures[i], FaceCaptures[0]);
 
     // Raise the render-fence block timeout: a single wide-angle capture
     // enqueues up to 6 face scene-captures plus the RDG composite pass, which
@@ -1051,6 +1076,7 @@ void ASceneCaptureSensor_WideAngleLens::EndPlay(const EEndPlayReason::Type EndPl
     {
         if (FaceCapture == nullptr)
             continue;
+        SceneCaptureExposureSharing::SetExposureSource(FaceCapture, nullptr);
         FaceCapture->Deactivate();
         FaceCapture->TextureTarget = nullptr;
         FaceCapture->ReleaseViewStates();
