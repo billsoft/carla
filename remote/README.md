@@ -1,6 +1,18 @@
 # CARLA 远程服务端使用手册（192.168.100.81）
 
-本机做开发 + 客户端，Win11 服务器（RTX 4090）跑 CARLA 服务端。所有远程操作通过 SSH 公钥免密登录，不存密码。
+本机做开发 + 客户端，服务器（主机名 XTWY20240424，i9-13900K / 64GB / RTX 4090）跑 CARLA 服务端。所有远程操作通过 SSH 公钥免密登录，不存密码。
+
+> **UE5.8（本目录 `D:\code\carla_ue58`，2026-10 起）与 5.5 的差异**
+> - 打包：本目录的 `build_package_development.bat`（5.8 引擎 + MSVC 14.44）；本机 D 盘不够，`Build\Package`、
+>   `Unreal\CarlaUnreal\Saved\Cooked` 用目录链接指到 `C:\carla_build58\`，`carla_remote.ps1` 的默认 zip 路径已指向这里。
+> - 客户端 Python：`C:\Users\bills\.conda\envs\carla58\python.exe`（必须与服务端同一次编译），`-Action test` 已改用它。
+> - 计划任务改为 `ONSTART`：服务器重启后服务端自动拉起（常驻）。
+> - 新增 `-Action firewall`：放行入站 TCP 2000-2002、8000。
+> - 新增 `reset_carla_world.py`：服务端常驻时，被中断的脚本会把同步模式、天气、车辆和传感器留在服务端；
+>   连接异常或画面不对时先跑它复位。
+> - 公钥失效时（服务器重装/换人）：先 `scp %USERPROFILE%\.ssh\id_ed25519.pub administrator@192.168.100.81:C:/ProgramData/ssh/new_key.pub`，
+>   再 `ssh administrator@192.168.100.81 "type C:\ProgramData\ssh\new_key.pub >> C:\ProgramData\ssh\administrators_authorized_keys && icacls C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant Administrators:F /grant SYSTEM:F && del C:\ProgramData\ssh\new_key.pub"`
+>   （各输一次密码；不要写成一行嵌套引号的 PowerShell，会被本地和远端各解析一次而失败）。
 
 ## 一、架构总览
 
