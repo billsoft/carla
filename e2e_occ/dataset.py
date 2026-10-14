@@ -11,6 +11,14 @@ OccNetV3 数据集加载（occnetv3_data_generator 格式）。
 - 时序序列不跨场景（按 scene_XXXX_frame_YYYY 的场景号和连续帧号切分）。
 - 额外加载深度（深度辅助监督目标）和场景流（流场头目标）。
 
+2026-10-14 相机可见性掩码（label_version 2 数据起，见 occnetv3_data_generator/processing/camera_visibility.py）：
+- 有 mask_camera/<sid>.npy 时，相机没观测到的体素真值置为 IGNORE_INDEX(255)，损失和 mIoU 都跳过它们
+  （Occ3D 约定）；occupancy/*.npy 本身是全知真值，不改。config.use_camera_mask 关闭。
+- config.camera_mask_keep_ground_surface（默认开）：车/人正下方那一列最上面的地面类体素 (11/12/13/14)
+  即使相机看不到也保留监督——路面在车底下连续，这是可推断的，也是此前"地面类强制保留"的约定。
+  被建筑挡住、或只是在视线外的地面不保留；地面往下填充的整列始终忽略。
+- 帧间隔：scenes/<scene>.json 的 frame_dt（采集抽帧后不再是 0.05s），作为 time_delta [T] 返回。
+
 已弃用的 dense_occupancy_collection 格式（camera_params/*.npz）不再支持。
 """
 
@@ -40,6 +48,28 @@ except ImportError:
 
 _SAMPLE_RE = re.compile(r'^(?P<scene>.+)_frame_(?P<frame>\d+)$')
 
+IGNORE_INDEX = 255
+GROUND_LABELS = (11, 12, 13, 14)        # driveable_surface / other_flat / sidewalk / terrain
+DYNAMIC_LABELS = (2, 3, 4, 5, 6, 7, 9, 10)   # bicycle/bus/car/工程车/motorcycle/pedestrian/trailer/truck
+
+
+def ground_surface_keep(occ):
+    """(X,Y,Z) uint8 → bool：车/人正下方那一列最上面的地面类体素 (被它们挡住的路面，连续可推断)。
+    只看"上方有动态物体"的列——上方是空的列不在这里放行，否则被建筑挡住的远处地面也会被重新监督。"""
+    gnd = np.isin(occ, GROUND_LABELS)
+    zs = np.arange(occ.shape[2])
+    top = np.where(gnd.any(2), (gnd * zs).max(2), -1)                    # (X, Y)
+    dyn_above = (np.isin(occ, DYNAMIC_LABELS) & (zs[None, None, :] > top[..., None])).any(2)
+    return gnd & (zs[None, None, :] == top[..., None]) & ((top >= 0) & dyn_above)[..., None]
+
+
+def load_camera_mask(path, z_size):
+    """mask_camera/<sid>.npy：打包格式 (X,Y,Z/8) 或未打包 (X,Y,Z)。"""
+    m = np.load(path)
+    if m.shape[2] != z_size:
+        m = np.unpackbits(m, axis=2, count=z_size)
+    return m.astype(bool)
+
 
 def default_calibration(num_cameras=8, image_size=(960, 1280)):
     """从 occnetv3_data_generator/config/camera_config.py 构建标定（无 calibration/ 目录时、
@@ -67,7 +97,7 @@ def default_calibration(num_cameras=8, image_size=(960, 1280)):
         cx, cy = c.get('principal_point', (W / 2.0, H / 2.0))
         K[i, 0, 2], K[i, 1, 2] = cx, cy
         T[i] = cam_to_vehicle_from_mount(c['position'], c['rotation'])
-        hfov[i] = c['fov']
+        hfov[i] = c.get('depth_fov', c['fov'])
     return torch.from_numpy(K), torch.from_numpy(T), hfov
 
 
@@ -83,6 +113,9 @@ class OccupancyDataset(Dataset):
         self.load_depth = bool(config and config.use_depth_aux)
         self.load_flow = bool(config and config.use_flow_head)
         self.depth_stride = config.depth_stride if config else 8
+        self.use_camera_mask = bool(getattr(config, 'use_camera_mask', True)) if config else True
+        self.keep_ground_surface = bool(getattr(config, 'camera_mask_keep_ground_surface', True)) if config else True
+        self.default_frame_dt = float(getattr(config, 'frame_dt', 0.05)) if config else 0.05
 
         self.samples = self._load_samples()
         self.index = self._build_sequence_index()
@@ -90,6 +123,8 @@ class OccupancyDataset(Dataset):
         self.raw_bit_depth = self._load_raw_bit_depth()
         self._depth_maps = {}
         self._warned = set()
+        self.scene_frame_dt = self._load_scene_frame_dt()
+        self._check_label_version()
 
     # ------------------------------------------------------------------
     # 样本与序列索引
@@ -135,6 +170,32 @@ class OccupancyDataset(Dataset):
     # 标定
     # ------------------------------------------------------------------
 
+    def _load_scene_frame_dt(self):
+        """scenes/<scene>.json 的 frame_dt (抽帧采集后相邻保存帧的间隔)；没有就用 config.frame_dt。"""
+        out = {}
+        d = os.path.join(self.data_root, 'scenes')
+        if os.path.isdir(d):
+            for n in os.listdir(d):
+                if n.endswith('.json'):
+                    with open(os.path.join(d, n), encoding='utf-8') as f:
+                        meta = json.load(f)
+                    if 'frame_dt' in meta:
+                        out[os.path.splitext(n)[0]] = float(meta['frame_dt'])
+        return out
+
+    def frame_dt(self, sample_id):
+        m = _SAMPLE_RE.match(sample_id)
+        return self.scene_frame_dt.get(m['scene'] if m else None, self.default_frame_dt)
+
+    def _check_label_version(self):
+        p = os.path.join(self.data_root, 'calibration', 'intrinsics.json')
+        if os.path.exists(p):
+            with open(p, 'r') as f:
+                ver = json.load(f).get('label_version', 1)
+            if ver < 2:
+                warnings.warn(f'{self.data_root} 是 label_version {ver} 的旧数据：交通灯/标志被标成 traffic_cone、'
+                              f'车道线→traffic_cone、路缘→barrier；与新数据类别含义不同，不要混训（mask_camera 可用 compute_camera_mask.py 补算）')
+
     def _load_raw_bit_depth(self):
         int_path = os.path.join(self.data_root, 'calibration', 'intrinsics.json')
         if os.path.exists(int_path):
@@ -166,7 +227,7 @@ class OccupancyDataset(Dataset):
             K = torch.eye(3)
             K[0, 0], K[1, 1], K[0, 2], K[1, 2] = ci['fx'], ci['fy'], ci['cx'], ci['cy']
             K_list.append(K)
-            hfov.append(float(ci.get('fov', 90.0)))
+            hfov.append(float(ci.get('depth_fov', ci.get('fov', 90.0))))   # 针孔深度相机的水平 FOV
 
             ce = ext_data[f'cam_{i}']
             R = np.array(ce['rotation_matrix'], dtype=np.float64)
@@ -184,7 +245,8 @@ class OccupancyDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _depth_sampling_map(self, cam, depth_hw):
-        """采集侧深度相机是**针孔** sensor.camera.depth（水平 FOV = 配置里的 'fov'，与 RGB 同位姿），
+        """采集侧深度相机是**针孔** sensor.camera.depth（水平 FOV = 标定里的 'depth_fov'，旧数据为 'fov'；
+        与 RGB 同位姿），
         值是平面 z 深度。对鱼眼 depth_stride 层级的每个特征像素：等距反投影得到射线方向 →
         投影到针孔相机取深度 → 除以方向 z 分量得到沿射线的距离。针孔覆盖不到的鱼眼边角标记无效。"""
         key = (cam, depth_hw)
@@ -260,8 +322,20 @@ class OccupancyDataset(Dataset):
                 images.append(torch.zeros(1, *self.image_size))
 
         occ_path = os.path.join(self.data_root, 'occupancy', f'{sample_id}.npy')
-        voxels = torch.from_numpy(np.load(occ_path).astype(np.uint8)) if os.path.exists(occ_path) \
-            else torch.zeros(self.voxel_size, dtype=torch.uint8)
+        occ = np.load(occ_path).astype(np.uint8) if os.path.exists(occ_path) \
+            else np.zeros(self.voxel_size, dtype=np.uint8)
+        observed = None
+        if self.use_camera_mask:
+            mp = os.path.join(self.data_root, 'mask_camera', f'{sample_id}.npy')
+            if os.path.exists(mp):
+                observed = load_camera_mask(mp, occ.shape[2])
+                if self.keep_ground_surface:
+                    observed |= ground_surface_keep(occ)
+                occ = np.where(observed, occ, np.uint8(IGNORE_INDEX))
+            else:
+                self._warn_once('mask_camera', f'缺少相机可见性掩码（如 {mp}），这些帧在全部体素上监督；'
+                                               f'可用 occnetv3_data_generator/compute_camera_mask.py 补算')
+        voxels = torch.from_numpy(occ)
 
         pose_path = os.path.join(self.data_root, 'ego_pose', f'{sample_id}.npy')
         if os.path.exists(pose_path):
@@ -277,11 +351,20 @@ class OccupancyDataset(Dataset):
             frame['depth'] = depth
             frame['has_depth'] = torch.tensor(found)
         if self.load_flow:
+            fz = os.path.join(self.data_root, 'flow', f'{sample_id}.npz')       # 新数据：压缩
             fp = os.path.join(self.data_root, 'flow', f'{sample_id}.npy')
             mp = os.path.join(self.data_root, 'flow_mask', f'{sample_id}.npy')
-            if os.path.exists(fp) and os.path.exists(mp):
-                frame['flow'] = torch.from_numpy(np.load(fp).astype(np.float16))
-                frame['flow_mask'] = torch.from_numpy(np.load(mp).astype(np.bool_))
+            if (os.path.exists(fz) or os.path.exists(fp)) and os.path.exists(mp):
+                if os.path.exists(fz):
+                    with np.load(fz) as z:
+                        flow = z['flow']
+                else:
+                    flow = np.load(fp)
+                fmask = np.load(mp).astype(np.bool_)
+                if observed is not None:
+                    fmask &= observed              # 看不见的那半边车不监督流场
+                frame['flow'] = torch.from_numpy(flow.astype(np.float16))
+                frame['flow_mask'] = torch.from_numpy(fmask)
                 frame['has_flow'] = torch.tensor(True)
             else:
                 frame['flow'] = torch.zeros(3, *self.voxel_size, dtype=torch.float16)
@@ -298,7 +381,8 @@ class OccupancyDataset(Dataset):
 
     def __getitem__(self, idx):
         """始终返回带时间维 T 的字典（T = temporal_frames，非时序时 T=1）：
-          images [T,N,1,H,W] float；voxels [T,X,Y,Z] uint8（GPU 上再 .long()）
+          images [T,N,1,H,W] float；voxels [T,X,Y,Z] uint8（GPU 上再 .long()；255 = 相机未观测，忽略）
+          time_delta [T] 与上一帧的间隔秒数（场景元数据 frame_dt）
           ego_motion [T,4,4]（t=0 为单位阵）；intrinsics [N,3,3]；extrinsics [N,4,4] Camera(cv)→Vehicle
           depth [T,N,h,w]、has_depth [T]；flow [T,3,X,Y,Z] float16、flow_mask [T,X,Y,Z]、has_flow [T]
         """
@@ -313,6 +397,8 @@ class OccupancyDataset(Dataset):
             'images': torch.stack([f['images'] for f in frames]),
             'voxels': torch.stack([f['voxels'] for f in frames]),
             'ego_motion': torch.stack(ego_motion),
+            'time_delta': torch.tensor([self.frame_dt(self.samples[start + t]) for t in range(T)],
+                                       dtype=torch.float32),
             'intrinsics': self.intrinsics.clone(),
             'extrinsics': self.extrinsics.clone(),
         }

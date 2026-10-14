@@ -36,7 +36,8 @@ Windows 下 `--num_workers` 保持 0（`DataLoader` 多进程死锁的已知问�
 | 键 | 形状 | 说明 |
 |---|---|---|
 | `images` | `[T,8,1,960,1280]` | DNG 读出的 Bayer RAW / `(2^raw_bit_depth-1)`，位深从 `calibration/intrinsics.json` 读 |
-| `voxels` | `[T,400,400,32]` uint8 | 语义真值（GPU 上转 long） |
+| `voxels` | `[T,400,400,32]` uint8 | 语义真值（GPU 上转 long）；255 = 相机未观测，损失/mIoU 忽略 |
+| `time_delta` | `[T]` | 与上一帧的间隔秒数（`scenes/<scene>.json` 的 `frame_dt`，抽帧采集后不再是 0.05） |
 | `ego_motion` | `[T,4,4]` | `inv(pose_t) @ pose_{t-1}`，t=0 为单位阵 |
 | `intrinsics` | `[8,3,3]` | 等距投影内参（原图分辨率） |
 | `extrinsics` | `[8,4,4]` | Camera(OpenCV)→Vehicle 静态标定（见 ARCHITECTURE.md 第 2 节） |
@@ -46,12 +47,15 @@ Windows 下 `--num_workers` 保持 0（`DataLoader` 多进程死锁的已知问�
 - **序列不跨场景**：按 `scene_XXXX_frame_YYYY` 解析，只有同一场景且帧号连续的 T 帧才组成一个样本。
   相邻序列起点间隔由 `sequence_stride` 控制，默认 0 = T（不重叠，每帧每 epoch 只处理一次）；
   设为 1 时序列全部重叠，样本数约 ×T，epoch 耗时也约 ×T。
-- **深度目标的换算**：采集侧深度相机是**针孔** `sensor.camera.depth`（水平 FOV = 配置 `fov`，
+- **相机可见性掩码**（`use_camera_mask`，默认开）：有 `mask_camera/<sid>.npy` 时，相机没观测到的
+  体素置 255（Occ3D 约定），语义 CE/Lovász、粗占用 BCE（全 ignore 的粗格不算）、流场（`flow_mask & 观测`）、
+  验证 mIoU 都跳过它们。`camera_mask_keep_ground_surface`（默认开）保留被车/人挡住的最上层地面体素。
+  没有掩码的旧数据照常在全部体素上监督并告警；补算见 `occnetv3_data_generator/compute_camera_mask.py`。
+- **深度目标的换算**：采集侧深度相机是**针孔** `sensor.camera.depth`（水平 FOV = 标定 `depth_fov`，旧数据为 `fov`，
   与 RGB 同位姿），值是平面 z 深度；RGB 是等距鱼眼。对鱼眼 stride-8 的每个特征像素：等距反投影
   得射线 → 投影到针孔深度图取值 → 除以射线 z 分量得到沿射线距离。针孔覆盖不到的鱼眼边角
   （广角相机的四角）标为无效。直接按像素下标读深度图是错的。
-- **流场目标语义**：`generate_flow` 写的是**相对自车**速度 × dt（车辆系，米），只在动态物体
-  体素内非零。所以流场损失只在 `flow_mask` 内计算。
+- **流场目标语义**：物体自身速度（不减自车速度）旋转到当前车辆系 × 帧间隔（米），只在动态物体体素内非零；停着的车与建筑一样为 0，自车运动由 ego_motion 表达（label_version 2 起；之前是相对自车速度）。流场损失只在 `flow_mask ∩ 相机观测` 内计算。
 - 已弃用的 `camera_params/*.npz` 格式不再支持。缺 `ego_pose` 时 ego_motion 退化为单位阵并告警。
 
 ## 3. 训练循环（`train.py::run_sequence`）

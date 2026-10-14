@@ -118,23 +118,18 @@ WALKER_MAPPING = {
 
 # Props（道具/静态物体）映射
 PROP_MAPPING = {
-    # Traffic Cone (8) - 交通锥桶/交通标识
+    # Traffic Cone (8) - 只放可移动的锥桶/临时警示牌 (nuScenes 定义)
     8: [
         'static.prop.trafficcone01',
         'static.prop.trafficcone02',
         'static.prop.constructioncone',
-        'static.prop.streetsign',
-        'static.prop.streetsign01',
-        'static.prop.streetsign04',
         'static.prop.trafficwarning',
-        'static.prop.streetbarrier',  # Moved from Barrier
-        'static.prop.warningtape',
-        'static.prop.advertisingboard',
     ],
 
     # Barrier (1) - 隔离栏/护栏
     1: [
-        # 'static.prop.streetbarrier', -> Moved to 8
+        'static.prop.streetbarrier',
+        'static.prop.warningtape',
         'static.prop.chainbarrier',
         'static.prop.chainbarriergate',
         'static.prop.warningconstruction',
@@ -145,10 +140,10 @@ PROP_MAPPING = {
     # Manmade (15) - 人造物体
     15: [
         'static.prop.fountain',
-        # 'static.prop.streetsign', -> Moved to 8
-        # 'static.prop.streetsign01', -> Moved to 8
-        # 'static.prop.streetsign04', -> Moved to 8
-        # 'static.prop.trafficwarning', -> Moved to 8
+        'static.prop.streetsign',
+        'static.prop.streetsign01',
+        'static.prop.streetsign04',
+        'static.prop.advertisingboard',
     ],
 
     # Vegetation (16) - 植被
@@ -226,8 +221,10 @@ CITY_OBJECT_MAPPING = {
     carla.CityObjectLabel.Walls: 15,           # 墙 (48个) -> manmade
     carla.CityObjectLabel.Fences: 1,           # 围栏 (1767个) -> barrier
     carla.CityObjectLabel.Poles: 15,           # 杆 (120个) -> manmade
-    carla.CityObjectLabel.TrafficLight: 8,     # 交通灯 (62个) -> traffic_cone
-    carla.CityObjectLabel.TrafficSigns: 8,     # 交通标志 (147个) -> traffic_cone
+    # 交通灯/交通标志是固定在杆上的设施，按 nuScenes/Occ3D 约定归 manmade；traffic_cone(8)
+    # 只留给可移动的锥桶类 (label_version 2 起改，旧数据里它们被错标成 8)
+    carla.CityObjectLabel.TrafficLight: 15,    # 交通灯 (62个) -> manmade
+    carla.CityObjectLabel.TrafficSigns: 15,    # 交通标志 (147个) -> manmade
     carla.CityObjectLabel.Vegetation: 16,      # 植被 (4270个) -> vegetation
     carla.CityObjectLabel.Terrain: 14,         # 地形 (23个) -> terrain
     carla.CityObjectLabel.Car: 4,              # 车辆 (80个) -> car

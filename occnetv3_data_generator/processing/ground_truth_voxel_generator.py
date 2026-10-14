@@ -6,21 +6,15 @@ Ground Truth 体素生成器
 import carla
 import numpy as np
 import math
-import logging
 
 # 不用客户端 get_matrix()/get_world_vertices()：5.5 客户端的 pitch/roll 符号与 UE 渲染相反，见 transform_utils.py
 from processing.transform_utils import transform_to_matrix, bbox_world_vertices
 from config.occupancy_config import (
-    CARLA_TO_OCCUPANCY_MAPPING, OCCUPANCY_LABELS
+    CARLA_TO_OCCUPANCY_MAPPING
 )
 from config.actor_occupancy_mapping import (
     get_occupancy_label_from_actor
 )
-# DepthVisibilityFilter 已移除 - 使用 Label 0 (Free) 替代 mask 机制
-
-# 配置日志
-logging.basicConfig(filename='voxel_mapping.log', level=logging.INFO,
-                    format='%(asctime)s - %(message)s')
 
 class GroundTruthVoxelGenerator:
     """
@@ -32,7 +26,9 @@ class GroundTruthVoxelGenerator:
                  x_range=(-40.0, 40.0),  # ⭐ 更新默认值
                  y_range=(-40.0, 40.0),  # ⭐ 更新默认值
                  z_range=(-1.0, 5.4),
-                 resolution=0.2):  # ⭐ 修正默认值: 0.5 -> 0.2
+                 resolution=0.2,  # ⭐ 修正默认值: 0.5 -> 0.2
+                 verbose=False):
+        self.verbose = verbose
         self.x_range = x_range
         self.y_range = y_range
         self.z_range = z_range
@@ -55,13 +51,15 @@ class GroundTruthVoxelGenerator:
         if self.grid_size != expected_grid_size:
             print(f"[警告] 体素网格尺寸 {self.grid_size} 与标准 {expected_grid_size} 不一致")
 
-        # DepthVisibilityFilter 已移除
-        # 不可见区域直接设置为 Label 0 (Free)，无需 mask
         
     def generate_flow(self, world, ego_vehicle, dt=0.05):
         """
         生成 3D 场景流 (Scene Flow) 和 动态掩码 (Flow Mask)
-        基于 Ego 坐标系: Flow = V_ego * dt
+
+        Flow = 物体自身的世界速度旋转到当前自车坐标系 × dt (OpenOcc/Occ3D 占用流约定)：
+        停着的车 flow=0，和旁边的建筑一致；自车自己的运动由 ego_motion 单独表达。
+        2026-10-14 之前是"物体速度 - 自车速度"(相对速度)，结果停着的车 flow=-v_ego·dt 而
+        建筑恒为 0，同一个静止世界里两种物体的流场互相矛盾。
         
         Args:
             world: carla.World
@@ -89,10 +87,6 @@ class GroundTruthVoxelGenerator:
         walkers = actors.filter('walker.pedestrian.*')
         dynamic_actors = list(vehicles) + list(walkers)
         
-        # 获取 Ego 速度 (World Frame)
-        v_ego_world = ego_vehicle.get_velocity()
-        v_ego_vec_world = np.array([v_ego_world.x, v_ego_world.y, v_ego_world.z])
-        
         # 遍历动态 Actor
         for actor in dynamic_actors:
             # 距离粗筛
@@ -103,23 +97,8 @@ class GroundTruthVoxelGenerator:
             v_actor_world = actor.get_velocity()
             v_actor_vec_world = np.array([v_actor_world.x, v_actor_world.y, v_actor_world.z])
             
-            # 2. 计算相对速度 (World Frame)
-            # Flow 定义: 物体相对于 Ego 的运动
-            # V_rel_world = V_actor_world - V_ego_world
-            # 注意: 如果我们希望 Flow 表示"物体在世界中的绝对运动投影到Ego系"，则不需要减去 V_ego
-            # 但通常 Scene Flow 用于预测下一帧物体在当前 Ego 系中的位置，或者是物体相对于相机的运动
-            # OccNetV3 论文通常定义 Flow 为绝对运动或相对运动。
-            # 为了支持时序融合 (Temporal Fusion)，我们需要将 t-1 帧的特征 warp 到 t 帧
-            # Backward Flow: grid_t + flow = grid_{t-1}
-            # 这里我们生成 Forward Flow (位移): displacement = velocity * dt
-            # 采用相对速度: V_rel = V_actor - V_ego
-            v_rel_world = v_actor_vec_world - v_ego_vec_world
-            
-            # 3. 转换到 Ego Frame
-            v_rel_ego = world_to_grid_rot @ v_rel_world
-            
-            # 4. 计算位移 (Flow)
-            displacement = v_rel_ego * dt
+            # 2. 物体自身速度 (不减自车速度) 旋转到当前自车坐标系，× dt 得到位移
+            displacement = (world_to_grid_rot @ v_actor_vec_world) * dt
             
             # 5. 填充 Flow Grid (Rasterize Actor BBox)
             # 复用 _fill_actor_bb 的逻辑，但不修改 occupancy，而是填充 flow
@@ -195,14 +174,13 @@ class GroundTruthVoxelGenerator:
 
         return flow, flow_mask
 
-    def generate(self, world, ego_vehicle, visibility_data=None):
+    def generate(self, world, ego_vehicle):
         """
         生成一帧的体素数据
 
         Args:
             world: carla.World
             ego_vehicle: carla.Actor (hero vehicle)
-            visibility_data: Optional[Union[bytes, dict]] - 可见性数据 (LiDAR bytes 或 Depth Camera dict)
 
         Returns:
             occupancy: (X, Y, Z) uint8 array - 体素类别
@@ -212,8 +190,7 @@ class GroundTruthVoxelGenerator:
         actor_ids = np.zeros(self.grid_size, dtype=np.int32)  # ⭐ 新增：记录Actor ID（使用int32支持负数虚拟ID）
         
         ego_transform = ego_vehicle.get_transform()
-        ego_location = ego_transform.location
-        
+
         # ⭐ 构建变换矩阵 (包含旋转，确保 Grid 是 Ego-Aligned)
         # 体素网格坐标系: 以 Ego 为原点，X轴向前，Y轴向右/左，Z轴向上
         # 这与 Viewer 和 Dataset 的预期一致
@@ -251,14 +228,14 @@ class GroundTruthVoxelGenerator:
 
         all_actors = list(vehicles) + list(walkers) + list(props) + list(traffic)
 
-        print(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}, Props={len(props)}, Traffic={len(traffic)}")
+        self._dbg(f"\n[体素生成] 场景中总Actor数: 车辆={len(vehicles)}, 行人={len(walkers)}, Props={len(props)}, Traffic={len(traffic)}")
 
         # 3. 遍历 Actor，光栅化 Bounding Box
         filled_actor_ids = []
         filled_by_type = {'vehicles': [], 'walkers': [], 'props': [], 'traffic': []}
         filtered_by_distance = {'vehicles': 0, 'walkers': 0, 'props': 0, 'traffic': 0}
 
-        print(f"\n[调试] ========== 开始填充Actor到体素 ==========")
+        self._dbg(f"\n[调试] ========== 开始填充Actor到体素 ==========")
 
         for actor in all_actors:
             # 距离粗筛
@@ -288,8 +265,8 @@ class GroundTruthVoxelGenerator:
             else:
                 filled_by_type['vehicles'].append(actor.id)
 
-        print(f"[调试] ========== 填充完成 ==========")
-        print(f"[调试] 距离过滤: 车辆 {filtered_by_distance['vehicles']}, 行人 {filtered_by_distance['walkers']}, Props {filtered_by_distance['props']}")
+        self._dbg(f"[调试] ========== 填充完成 ==========")
+        self._dbg(f"[调试] 距离过滤: 车辆 {filtered_by_distance['vehicles']}, 行人 {filtered_by_distance['walkers']}, Props {filtered_by_distance['props']}")
 
         # 4. 填充自车
         self._fill_actor_bb(occupancy, actor_ids, ego_vehicle, grid_to_world_matrix, is_ego=True)
@@ -301,7 +278,7 @@ class GroundTruthVoxelGenerator:
         if np.any(ego_mask):
             ego_indices = np.argwhere(ego_mask)
             ego_center = np.mean(ego_indices, axis=0)
-            print(f"[体素生成] ✅ Ego Vehicle Voxel Center: {ego_center} (Expected ~[256, 256, 20])")
+            self._dbg(f"[体素生成] ✅ Ego Vehicle Voxel Center: {ego_center} (Expected ~[256, 256, 20])")
             
             # 检查偏移
             offset = ego_center - np.array([self.grid_size[0]/2, self.grid_size[1]/2, (0 - self.z_range[0])/self.resolution])
@@ -310,21 +287,11 @@ class GroundTruthVoxelGenerator:
         else:
             print(f"[体素生成] ❌ 错误: 未找到 Ego Vehicle 体素!")
 
-        print(f"[体素生成] 填充到体素的Actor IDs ({len(filled_actor_ids)}个): {sorted(filled_actor_ids)}")
-        print(f"[体素生成]   车辆: {len(filled_by_type['vehicles'])}个, 行人: {len(filled_by_type['walkers'])}个")
+        self._dbg(f"[体素生成] 填充到体素的Actor IDs ({len(filled_actor_ids)}个): {sorted(filled_actor_ids)}")
+        self._dbg(f"[体素生成]   车辆: {len(filled_by_type['vehicles'])}个, 行人: {len(filled_by_type['walkers'])}个")
 
-        # 5. 可见性过滤 (Legacy LiDAR Filter)
-        # 注意: 现在的 pipeline 使用外部 VisibilityFilter (Depth Camera)，此处不再处理
-        if visibility_data is not None:
-             print("[可见性过滤] 使用 LiDAR 过滤 (Legacy)...")
-             occupancy, actor_ids = self._apply_visibility_filter(
-                 occupancy, actor_ids, visibility_data, world, ego_vehicle.id
-             )
-
-
-        # Mask 字段已完全移除
-        # 不可见/空白区域使用 Label 0 (Free) 表示，无需单独的 mask
-
+        # 可见性处理在外部：LiDAR 实例过滤 (visibility_filter_simple.py)、相机自由空间雕刻与
+        # 观测掩码 (camera_visibility.py)，见 main_collection.py
         return occupancy, actor_ids
 
     def _fill_static_environment(self, occupancy, actor_ids, world, ego_transform, grid_to_world_matrix):
@@ -401,7 +368,7 @@ class GroundTruthVoxelGenerator:
         num_missing = len(missing_indices)
         
         if num_missing > 0:
-            print(f"[地面填充] 发现 {num_missing} 个新网格点 (总 {num_points}), 开始查询 Map API...")
+            self._dbg(f"[地面填充] 发现 {num_missing} 个新网格点 (总 {num_points}), 开始查询 Map API...")
             
             # 仅对缺失点查询 Map
             for idx in missing_indices:
@@ -426,24 +393,14 @@ class GroundTruthVoxelGenerator:
                         l = 11  # driveable_surface
                         z = wp_loc.z
 
-                        # ⭐ 检测车道线 (仅在车道内部检测)
-                        if hasattr(wp, 'left_lane_marking') and hasattr(wp, 'right_lane_marking'):
-                            left_marking = wp.left_lane_marking
-                            right_marking = wp.right_lane_marking
-
-                            # 检查是否有车道标线
-                            has_marking = (left_marking and left_marking.type != carla.LaneMarkingType.NONE) or \
-                                         (right_marking and right_marking.type != carla.LaneMarkingType.NONE)
-
-                            if has_marking:
-                                # 车道线通常在车道边缘附近 (距离边界 0.2m 以内)
-                                edge_distance = half_width - dist
-                                if edge_distance < 0.2:
-                                    l = 8  # traffic_cone (车道线)
+                        # 车道线仍是路面 (nuScenes/Occ3D 里 lane marking 属于 driveable_surface)。
+                        # label_version 1 曾把车道边缘 0.2m 标成 traffic_cone(8)，让网络在
+                        # 照片里只看到白线的位置去学"锥桶"，已去掉。
 
                     elif dist < half_width + 0.5:
-                        # 车道外侧 0.5m: 隔离带 (马路牙子)
-                        l = 1  # barrier
+                        # 车道外侧 0.5m: 路缘石 (马路牙子)，与人行道同属一类。
+                        # label_version 1 标成 barrier(1)，但照片里这是路面高度的平面，不是护栏。
+                        l = 13  # sidewalk
                         z = wp_loc.z
                 
                 # Check Sidewalk
@@ -457,8 +414,7 @@ class GroundTruthVoxelGenerator:
                             
                 self.ground_cache[key] = {'label': l, 'z': z}
 
-        t_query_elapsed = time.time() - t_query_start
-        # print(f"[地面填充] Cache 查询完成 (新增 {num_missing}), 耗时: {t_query_elapsed:.3f}s")
+        self._dbg(f"[地面填充] Cache 查询完成 (新增 {num_missing}), 耗时: {time.time() - t_query_start:.3f}s")
 
         # 5. 从 Cache 直接填充到网格
         final_ix = keys_x_flat
@@ -494,7 +450,7 @@ class GroundTruthVoxelGenerator:
         # 调试信息: 显示 Cache 命中率
         if len(query_keys) > 0:
             hit_rate = hit_mask.sum() / len(hit_mask) * 100
-            print(f"  [向量化填充] Cache命中率: {hit_mask.sum()}/{len(hit_mask)} ({hit_rate:.1f}%)")
+            self._dbg(f"  [向量化填充] Cache命中率: {hit_mask.sum()}/{len(hit_mask)} ({hit_rate:.1f}%)")
 
         # 计算 Z 索引
         # ⭐⭐⭐ FIX: 使用 round() 替代 floor (int cast) ⭐⭐⭐
@@ -522,7 +478,7 @@ class GroundTruthVoxelGenerator:
         iz_ground = int((gz_ground - self.z_range[0]) / self.resolution)
         iz_ground = max(0, min(iz_ground, self.grid_size[2] - 1))
 
-        print(f"\n[地面填充] 地面层索引 iz_ground={iz_ground} (ground_z={ground_z_world:.2f}, ego_z={ego_location.z:.2f})")
+        self._dbg(f"\n[地面填充] 地面层索引 iz_ground={iz_ground} (ground_z={ground_z_world:.2f}, ego_z={ego_location.z:.2f})")
 
         # 第一遍: 填充地表层 (Map API 查询到的所有地面体素)
         # ⚠️ 修复: 不限制 Z 层,填充所有 Map API 查询到的地面
@@ -557,7 +513,7 @@ class GroundTruthVoxelGenerator:
         surface_fill_count = len(valid_ix)
         t_elapsed = time.time() - t_start
 
-        print(f"[地面填充] 地表层填充: {surface_fill_count} 个体素 (耗时: {t_elapsed:.3f}s)")
+        self._dbg(f"[地面填充] 地表层填充: {surface_fill_count} 个体素 (耗时: {t_elapsed:.3f}s)")
 
         # 第二遍: 对每个 (x,y) 列,从地面向下填充
         # ⭐⭐⭐ 性能优化: 向量化向下填充,消除双重循环 ⭐⭐⭐
@@ -609,7 +565,7 @@ class GroundTruthVoxelGenerator:
         # Terrain，不如假设"往下也是同一种东西"——这样同一位置在不同帧里地下内容
         # 稳定不变，不会给训练引入和真实场景无关的噪声。
         # 这条只在这个函数里、这个时间点安全: 此时 occupancy 里只有地面层的结果
-        # (driveable_surface/sidewalk/terrain/barrier/traffic_cone车道线, 见上面
+        # (driveable_surface/sidewalk/terrain, 见上面
         # ground_cache 的取值范围)，_fill_static_environment 的建筑/杆/Actor光栅化
         # 都还没跑，所以不会把建筑/车辆的标签误往下拖成一根柱子。
         # 之前(2026-08-27之前)改成统一 Terrain 是因为"如果地表是 Barrier，地下会
@@ -626,7 +582,7 @@ class GroundTruthVoxelGenerator:
         filled_columns = np.count_nonzero(has_surface)
 
         t_downfill_elapsed = time.time() - t_start_downfill
-        print(f"[地面填充] 完成 {filled_columns} 列填充, 总填充 {total_filled} 个体素 (耗时: {t_downfill_elapsed:.3f}s)")
+        self._dbg(f"[地面填充] 完成 {filled_columns} 列填充, 总填充 {total_filled} 个体素 (耗时: {t_downfill_elapsed:.3f}s)")
 
 
         # --- B. 静态物体 (建筑物, 交通标志, 杆等) ---
@@ -666,11 +622,11 @@ class GroundTruthVoxelGenerator:
             if obj.type not in static_type_mapping:
                 skipped_types.add(obj.type)
 
-        print(f"\n[调试] 环境物体统计 (总数: {len(env_objs)}):")
+        self._dbg(f"\n[调试] 环境物体统计 (总数: {len(env_objs)}):")
         for t, count in type_counts.items():
             mapped = "✓" if t in static_type_mapping else "✗ (未映射)"
             skipped = "⛔ (已排除)" if t in SKIP_STATIC_TYPES else ""
-            print(f"  - {t}: {count} 个 {mapped} {skipped}")
+            self._dbg(f"  - {t}: {count} 个 {mapped} {skipped}")
             
         if skipped_types:
             print(f"[警告] 发现未映射的物体类型: {skipped_types}")
@@ -838,7 +794,7 @@ class GroundTruthVoxelGenerator:
             
             count_filled += 1
             
-        print(f"[体素生成] 已填充静态环境物体: {count_filled} 个")
+        self._dbg(f"[体素生成] 已填充静态环境物体: {count_filled} 个")
                 
         # --- C. 记录未映射物体 (Debug) ---
         # 记录每帧遇到的 CityObjectLabel 类型和 Actor 类型
@@ -986,12 +942,10 @@ class GroundTruthVoxelGenerator:
 
         # 行人调试：记录边界框裁剪前后
         is_walker = 'walker.pedestrian' in actor.type_id.lower()
-        if is_walker:
-            original_grid_indices = (min_ix, max_ix, min_iy, max_iy, min_iz, max_iz)
 
         if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
             if is_walker:
-                print(f"  [行人调试] ID={actor.id} 在网格范围外被跳过 - Grid范围: ix=[{min_ix},{max_ix}), iy=[{min_iy},{max_iy}), iz=[{min_iz},{max_iz})")
+                self._dbg(f"  [行人调试] ID={actor.id} 在网格范围外被跳过 - Grid范围: ix=[{min_ix},{max_ix}), iy=[{min_iy},{max_iy}), iz=[{min_iz},{max_iz})")
             return
 
         # Prepare Sub-grid for OBB check
@@ -1083,7 +1037,7 @@ class GroundTruthVoxelGenerator:
 
         # 行人调试：记录extent信息
         if is_walker:
-            print(f"  [行人调试] ID={actor.id} BBox原始extent=({bb.extent.x:.2f}, {bb.extent.y:.2f}, {bb.extent.z:.2f}), "
+            self._dbg(f"  [行人调试] ID={actor.id} BBox原始extent=({bb.extent.x:.2f}, {bb.extent.y:.2f}, {bb.extent.z:.2f}), "
                   f"自适应extent=({extent_x:.2f}, {extent_y:.2f}, {extent_z:.2f})")
 
         # Check Extents with adaptive shrinking
@@ -1105,12 +1059,12 @@ class GroundTruthVoxelGenerator:
 
         if not np.any(mask_in):
             if is_walker:
-                print(f"  [行人调试] ID={actor.id} 没有体素通过extent检查 - 潜在网格: {(max_ix - min_ix) * (max_iy - min_iy) * (max_iz - min_iz)} 个")
+                self._dbg(f"  [行人调试] ID={actor.id} 没有体素通过extent检查 - 潜在网格: {(max_ix - min_ix) * (max_iy - min_iy) * (max_iz - min_iz)} 个")
             return
 
         # 行人调试：记录填充的体素数
         if is_walker:
-            print(f"  [行人调试] ID={actor.id} ✓ 成功填充 {voxel_count} 个体素 (occupancy_label={occ_label})")
+            self._dbg(f"  [行人调试] ID={actor.id} ✓ 成功填充 {voxel_count} 个体素 (occupancy_label={occ_label})")
 
         # Fill (label already determined above)
         nx, ny, nz = max_ix - min_ix, max_iy - min_iy, max_iz - min_iz
@@ -1146,351 +1100,7 @@ class GroundTruthVoxelGenerator:
         occupancy[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi
         actor_ids_grid[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = roi_ids
 
-    def _apply_visibility_filter(self, occupancy, actor_ids, lidar_data, world, ego_vehicle_id):
-        """
-        应用可见性过滤：只保留激光雷达扫描到的物体
-
-        核心逻辑：
-        1. 解析64线语义激光雷达数据，提取可见的actor_id和tag（语义标签）
-        2. 对于动态物体（obj_idx>0）：保留该actor_id的所有体素
-        3. 对于静态环境（obj_idx=0）：根据tag映射到虚拟ID，只保留扫到的虚拟ID
-        4. ⭐ Hero车辆始终保留（激光雷达在车顶扫不到自己）
-
-        Args:
-            occupancy: (X,Y,Z) uint8 - 体素类别数组
-            actor_ids: (X,Y,Z) uint32 - 体素Actor ID数组
-            lidar_data: bytes - 64线语义激光雷达原始数据
-            world: carla.World对象
-            ego_vehicle_id: int - Hero车辆的actor ID
-
-        Returns:
-            filtered_occupancy: 过滤后的体素类别数组
-            filtered_actor_ids: 过滤后的Actor ID数组
-        """
-        # 1. 解析激光雷达数据
-        dtype = np.dtype([
-            ('x', np.float32), ('y', np.float32), ('z', np.float32),
-            ('cos', np.float32),
-            ('obj_idx', np.uint32),  # Actor ID
-            ('tag', np.uint32)       # 语义标签 (CARLA semantic tag)
-        ])
-        points = np.frombuffer(lidar_data, dtype=dtype)
-
-        # 2. 提取可见的actor ID（动态物体）+ 基于点云密度的可见性判断
-        # ⭐ 关键改进：只有LiDAR点数足够多的actor才认为真正可见
-        # 避免通过建筑物缝隙扫到的远处车辆被标记为"可见"
-
-        dynamic_points = points[points['obj_idx'] > 0]  # 只看动态物体
-        unique_ids, counts = np.unique(dynamic_points['obj_idx'], return_counts=True)
-
-        # ⭐ 可见性阈值：降低到5点（极近距离的车辆可能被Hero车身严重遮挡）
-        # 行人、自行车等小物体可能只有5-10个点
-        # 如果阈值太高（10+），紧贴Hero车辆的车会被过滤
-        MIN_POINTS_THRESHOLD = 5  # 最少5个点才算真正可见
-
-        visible_actor_ids_set = set()
-        filtered_by_density = []
-
-        for actor_id, point_count in zip(unique_ids, counts):
-            if point_count >= MIN_POINTS_THRESHOLD:
-                visible_actor_ids_set.add(int(actor_id))
-            else:
-                filtered_by_density.append((int(actor_id), point_count))
-
-        print(f"\n[可见性过滤] 激光雷达检测到 {len(points)} 点")
-        print(f"[可见性过滤] 动态物体点数统计: {len(unique_ids)} 个actor")
-        print(f"[可见性过滤] 点数充足（>={MIN_POINTS_THRESHOLD}点）: {len(visible_actor_ids_set)} 个")
-        print(f"[可见性过滤] 点数不足（<{MIN_POINTS_THRESHOLD}点）被过滤: {len(filtered_by_density)} 个")
-        if filtered_by_density:
-            # ⭐ 显示所有被过滤的actor，方便诊断
-            print(f"[可见性过滤] 点数不足的Actor（所有）: {filtered_by_density}")
-
-        # ⭐ 强制保留Hero车辆（激光雷达在车顶扫不到自己）
-        visible_actor_ids_set.add(ego_vehicle_id)
-        print(f"[可见性过滤] 强制保留Hero车辆 ID={ego_vehicle_id}")
-
-        # 3. 处理静态环境（obj_idx=0）：根据tag映射到虚拟ID
-        # ⭐⭐⭐ CRITICAL FIX：静态环境需要分类处理 ⭐⭐⭐
-        #
-        # 问题：之前的逻辑无条件保留所有扫到的静态tag，导致：
-        #   - 扫到远处建筑tag=1 → 虚拟ID -1015 → **所有建筑**都可见（错误！）
-        #   - 扫到远处植被tag=9 → 虚拟ID -1016 → **所有植被**都可见（错误！）
-        #
-        # 新逻辑：
-        #   1. 地面类型（道路、人行道）→ 不添加到可见集合，后续通过occupancy类型判断
-        #   2. 大型静态物体（建筑、植被、墙）→ **不添加到可见集合**，让后续逻辑过滤
-        #   3. 小型静态物体（杆、标志、围栏）→ 基于点云密度判断
-
-        # 3. 处理静态环境（基于几何的点云匹配）
-        # ⭐ 核心改进：解决静态物体无法区分实例的问题
-        # 方法：
-        #   1. 将 LiDAR 点云转换到 Ego 坐标系（体素网格坐标系）
-        #   2. 计算点云落在哪个体素中
-        #   3. 查询该体素当前的 actor_id
-        #   4. 如果 ID 是静态物体（负数），则认为该静态物体可见
-        
-        # 3.1 坐标转换 Sensor -> Ego
-        # Sensor 安装在 (0, 0, 1.5)，即 z += 1.5
-        points_xyz = np.stack([points['x'], points['y'], points['z']], axis=-1)
-        points_ego = points_xyz + np.array([0.0, 0.0, 1.5]) 
-
-        # 3.2 提取静态点 (obj_idx == 0)
-        # 其实所有点都可以用来 check，防止动态物体漏检，但动态物体已经由 obj_idx 处理了
-        # 这里只关注 obj_idx == 0 的点，去“激活”静态物体
-        dynamic_points_mask = points['obj_idx'] > 0
-        static_points_ego = points_ego[~dynamic_points_mask]
-        static_tags = points['tag'][~dynamic_points_mask]  # ⭐ Extract Tags
-        
-        if len(static_points_ego) > 0:
-            # 3.3 批量计算 Grid Indices (Vectorized)
-            ix = np.floor((static_points_ego[:, 0] - self.x_range[0]) / self.resolution).astype(int)
-            iy = np.floor((static_points_ego[:, 1] - self.y_range[0]) / self.resolution).astype(int)
-            iz = np.floor((static_points_ego[:, 2] - self.z_range[0]) / self.resolution).astype(int)
-            
-            # 3.4 过滤有效范围内的点
-            valid_mask = (ix >= 0) & (ix < self.grid_size[0]) & \
-                         (iy >= 0) & (iy < self.grid_size[1]) & \
-                         (iz >= 0) & (iz < self.grid_size[2])
-            
-            valid_ix = ix[valid_mask]
-            valid_iy = iy[valid_mask]
-            valid_iz = iz[valid_mask]
-            valid_tags = static_tags[valid_mask]  # ⭐ Valid Tags
-            
-            # 3.5 查表获取 Hit Actor IDs
-            if len(valid_ix) > 0:
-                hit_ids = actor_ids[valid_ix, valid_iy, valid_iz]
-                
-                # 3.6 提取静态 ID (负数)
-                # 忽略 -1011/-1012/-1013 (Road/Ground/Sidewalk)，它们由 GROUND_LABELS 保护
-                # 我们主要关心 Buildings, Fences, Poles 等
-                static_mask = hit_ids < 0
-                hit_static_ids = hit_ids[static_mask]
-                hit_static_tags = valid_tags[static_mask]  # ⭐ Corresponding Tags
-                
-                # Sort to group by ID for counting and tag lookup
-                sort_idx = np.argsort(hit_static_ids)
-                sorted_ids = hit_static_ids[sort_idx]
-                sorted_tags = hit_static_tags[sort_idx]
-                
-                unique_static_ids, start_indices = np.unique(sorted_ids, return_index=True)
-                end_indices = np.append(start_indices[1:], len(sorted_ids))
-                counts = end_indices - start_indices
-                rep_tags = sorted_tags[start_indices]
-                
-                count_visible = 0
-                for uid, count, tag in zip(unique_static_ids, counts, rep_tags):
-                    # Default threshold (Buildings, etc.)
-                    current_threshold = 100 
-                    
-                    # Small objects (Pole=5, Sign=12, Light=18, Fence=2, Rail=16, GuardRail=17)
-                    if tag in [5, 12, 18]: 
-                        # ⭐ 极细物体：只要扫到 1 个点就保留！
-                        current_threshold = 1
-                    elif tag in [2, 16, 17]:
-                        # 围栏等：2 个点
-                        current_threshold = 2
-                        
-                    if count >= current_threshold:
-                        visible_actor_ids_set.add(uid)
-                        count_visible += 1
-                        # print(f"[可见性过滤] ID={uid} (tag={tag}) 点数={count} >= {current_threshold} ✓")
-                
-                print(f"[可见性过滤] 几何匹配到的静态物体数: {count_visible}/{len(unique_static_ids)}")
-
-        # 4. 创建可见性mask - ⭐⭐⭐ 新逻辑：用户指定的简单可见性规则 ⭐⭐⭐
-        #
-        # 用户需求（2025-12-18）：
-        #   1. 所有体素初始值 visible = False
-        #   2. 地面类型(11,12,13,14) → visible = True（永久可见）
-        #   3. Hero车辆 → visible = True（永久可见）
-        #   4. 激光雷达检测到的ID → 该ID的所有体素 visible = True
-        #   5. 最终：visible = False 的 → occupancy = 0（空气）
-        #
-        # 这样可以：
-        #   - 过滤被遮挡的建筑物（静态环境也会被过滤）
-        #   - 保护地面不出现"坑"（通过occupancy类型判断）
-        #   - 保护Hero车辆（强制可见）
-
-        # 步骤1: 所有体素初始值 = False
-        visibility_mask = np.zeros(occupancy.shape, dtype=bool)
-
-        # 步骤2: 地面相关类型永久可见（避免地面出现"坑"）
-        # 11=driveable_surface, 12=other_flat, 13=sidewalk, 14=terrain
-        GROUND_LABELS = [11, 12, 13, 14]
-        ground_mask = np.isin(occupancy, GROUND_LABELS)
-        visibility_mask[ground_mask] = True
-
-        print(f"[可见性过滤] 地面体素（永久可见）: {np.sum(ground_mask)}")
-
-        # 步骤3: Hero车辆永久可见
-        hero_mask = (actor_ids == ego_vehicle_id)
-        visibility_mask[hero_mask] = True
-        print(f"[可见性过滤] Hero车辆体素（永久可见）: {np.sum(hero_mask)}")
-
-        # 步骤4: 激光雷达检测到的ID → 所有该ID的体素可见
-        lidar_detected_mask = np.isin(actor_ids, list(visible_actor_ids_set))
-        visibility_mask[lidar_detected_mask] = True
-
-        # ⭐ 统计
-        all_voxel_actor_ids = np.unique(actor_ids[actor_ids > 0])  # 正数ID（真实actors）
-        all_voxel_virtual_ids = np.unique(actor_ids[actor_ids < 0])  # 负数ID（虚拟actors）
-
-        print(f"[可见性过滤] 体素中包含的真实Actor IDs: {sorted(list(all_voxel_actor_ids))}")
-        print(f"[可见性过滤] 体素中真实Actor数量: {len(all_voxel_actor_ids)}")
-        print(f"[可见性过滤] 体素中虚拟ID数量: {len(all_voxel_virtual_ids)}")
-
-        # ⭐ 详细统计：哪些动态Actor被过滤了
-        visible_dynamic_ids = [aid for aid in all_voxel_actor_ids if aid in visible_actor_ids_set]
-        invisible_dynamic_ids = [aid for aid in all_voxel_actor_ids if aid not in visible_actor_ids_set]
-        print(f"[可见性过滤] 激光雷达检测到的动态Actor IDs: {sorted(visible_dynamic_ids)}")
-        print(f"[可见性过滤] 将被过滤的动态Actor IDs: {sorted(invisible_dynamic_ids)}")
-
-        # 统计静态环境
-        visible_static_ids = sorted([vid for vid in all_voxel_virtual_ids if vid in visible_actor_ids_set])
-        invisible_static_ids = sorted([vid for vid in all_voxel_virtual_ids if vid not in visible_actor_ids_set])
-        print(f"[可见性过滤] 激光雷达检测到的静态虚拟IDs: {visible_static_ids}")
-        print(f"[可见性过滤] 将被过滤的静态虚拟IDs: {invisible_static_ids}")
-
-        # 统计
-        total_occupied = np.sum(occupancy > 0)
-        visible_voxels = np.sum(visibility_mask & (occupancy > 0))
-        filtered_voxels = total_occupied - visible_voxels
-
-        print(f"[可见性过滤] 总占用体素: {total_occupied}")
-        print(f"[可见性过滤] 可见体素: {visible_voxels}")
-        print(f"[可见性过滤] 过滤掉: {filtered_voxels} ({filtered_voxels/total_occupied*100:.1f}%)")
-
-        # 步骤5: 最终过滤 - visible = False 的体素 → occupancy = 0（空气）
-        filtered_occupancy = occupancy.copy()
-        filtered_actor_ids = actor_ids.copy()
-
-        # ⭐⭐⭐ 关键：所有不可见的体素（无论动态还是静态）都变成空气 ⭐⭐⭐
-        # ⭐⭐⭐ CRITICAL FIX: 地面类型永远不删除，即使被车辆BBox覆盖 ⭐⭐⭐
-        invisible_mask = ~visibility_mask
-
-        # 地面保护：即使invisible，只要occupancy是地面类型，就不删除
-        # 这样可以避免车辆BBox底部与地面重叠时，地面被删除造成"坑"
-        GROUND_LABELS = [11, 12, 13, 14]
-        is_ground = np.isin(filtered_occupancy, GROUND_LABELS)
-
-        # 最终要删除的：不可见 且 不是地面
-        final_remove_mask = invisible_mask & (~is_ground)
-        
-        # ⭐ Debug Loss Report
-        self._debug_voxel_loss(filtered_occupancy, final_remove_mask)
-
-        filtered_occupancy[final_remove_mask] = 0  # 不可见且非地面 → 空气
-        filtered_actor_ids[final_remove_mask] = 0  # 清除Actor ID
-
-        # 分类统计
-        dynamic_filtered = np.sum(final_remove_mask & (actor_ids > 0))  # 动态物体被过滤
-        static_filtered = np.sum(final_remove_mask & (actor_ids < 0))   # 静态环境被过滤
-        ground_protected = np.sum(invisible_mask & is_ground)  # 不可见但因为是地面而保护
-
-        print(f"[可见性过滤] 过滤掉的动态物体体素: {dynamic_filtered}")
-        print(f"[可见性过滤] 过滤掉的静态环境体素（遮挡建筑等）: {static_filtered}")
-        print(f"[可见性过滤] 保留的地面体素: {np.sum(is_ground)}")
-        print(f"[可见性过滤] 地面被保护（不可见但保留）: {ground_protected}")
-
-        return filtered_occupancy, filtered_actor_ids
-
-
-
-    def _debug_voxel_loss(self, occupancy, remove_mask):
-        """
-        统计可见性过滤造成的体素损失
-        """
-        from dense_occupancy_collection.config.occupancy_config import OCCUPANCY_LABELS
-        
-        print(f"\n[Debug Analysis] Visibility Filter Loss Report")
-        print(f"{'Class ID':<10} {'Class Name':<20} {'Total Voxels':<12} {'Removed':<12} {'Loss Rate':<10} {'Status'}")
-        print("-" * 80)
-
-        total_voxels = 0
-        total_removed = 0
-
-        # 获取标签名称映射
-        label_names = {i: name for i, name in enumerate(OCCUPANCY_LABELS)}
-
-        for label_id in range(1, 18): # 忽略 0 (Air)
-            # 该类别的总体素掩码
-            class_mask = (occupancy == label_id)
-            count_total = np.sum(class_mask)
-            
-            if count_total == 0:
-                continue
-
-            # 该类别被移除的体素掩码
-            removed_mask = class_mask & remove_mask
-            count_removed = np.sum(removed_mask)
-
-            loss_rate = (count_removed / count_total) * 100.0 if count_total > 0 else 0
-            
-            label_name = label_names.get(label_id, f"Class_{label_id}")
-            
-            status = "🟢 OK"
-            if loss_rate > 90.0:
-                status = "🔴 CRITICAL"
-            elif loss_rate > 50.0:
-                status = "🟠 HIGH"
-                
-            print(f"{label_id:<10} {label_name:<20} {count_total:<12} {count_removed:<12} {loss_rate:>5.1f}%     {status}")
-            
-            total_voxels += count_total
-            total_removed += count_removed
-
-        print("-" * 80)
-        total_rate = (total_removed / total_voxels * 100) if total_voxels > 0 else 0
-        print(f"{'TOTAL':<30} {total_voxels:<12} {total_removed:<12} {total_rate:>5.1f}%")
-
-        # 这里的 actor_ids 需要从 generate 传入，或者从 self 获取（如果是成员变量）
-        # _debug_voxel_loss 是 generate 调用的，occupancy 和 remove_mask 是传入参数
-        # 但 actor_ids 没有传入。我们需要修改函数签名或在调用处处理。
-        # 为简单起见，这里只打印体素统计，或者假设 actor_ids 无法访问就不打印了
-        # 上面的代码中 dynamic_filtered 依赖 actor_ids 和 final_remove_mask
-        # 但 final_remove_mask 在这里叫 remove_mask
-        
-        # 修正变量名
-        # dynamic_filtered = np.sum(remove_mask & (actor_ids > 0)) 
-        # static_filtered = np.sum(remove_mask & (actor_ids < 0))
-        
-        # 由于无法访问 actor_ids (除非作为参数传入)，我们先注释掉这部分
-        # 或者修改调用处传入 actor_ids
-        
-        return
-
-    def save_to_npz(self, filepath, occupancy, actor_ids, metadata=None):
-        """
-        保存体素数据到NPZ文件
-
-        Args:
-            filepath: 保存路径
-            occupancy: (X,Y,Z) uint8 - 体素类别
-            actor_ids: (X,Y,Z) uint32 - 体素Actor ID
-            metadata: 额外元数据
-
-        注意: mask 字段已移除，使用 Label 0 (Free) 表示不可见/空白区域
-        """
-        save_dict = {
-            'occupancy': occupancy,
-            'actor_ids': actor_ids,
-            'x_range': self.x_range,
-            'y_range': self.y_range,
-            'z_range': self.z_range,
-            'resolution': self.resolution,
-            'grid_size': self.grid_size
-        }
-        if metadata:
-            save_dict.update(metadata)
-        np.savez_compressed(filepath, **save_dict)
-    
-    def get_statistics(self, occupancy):
-        total_voxels = occupancy.size
-        occupied_voxels = np.sum(occupancy > 0)
-        
-        return {
-            'total_voxels': total_voxels,
-            'occupied_voxels': int(occupied_voxels),
-            'occupancy_rate': occupied_voxels / total_voxels if total_voxels > 0 else 0
-        }
+    def _dbg(self, *args, **kw):
+        """逐帧调试输出 (默认关闭，GroundTruthVoxelGenerator(verbose=True) 打开)。"""
+        if self.verbose:
+            print(*args, **kw)

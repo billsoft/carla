@@ -3,38 +3,20 @@
 检查地面上方是否有异常的灰色/白色层
 
 用法:
-    python occnetv3_data_generator/diagnose_ground_layer.py --dataset d:/code/carla/dataset_10k_bak
+    python occnetv3_data_generator/diagnose_ground_layer.py --dataset <数据集目录>
 """
 
-import numpy as np
 import argparse
+import sys
+
+import numpy as np
 from pathlib import Path
 from collections import Counter
 
-# 语义类别映射 (与occupancy_config.py保持一致)
-OCCUPANCY_LABELS = [
-    'free',                  # 0: 空气/未标记
-    'barrier',               # 1: 护栏/隔离带
-    'bicycle',               # 2: 自行车
-    'bus',                   # 3: 公交车
-    'car',                   # 4: 轿车
-    'construction_vehicle',  # 5: 工程车辆
-    'motorcycle',            # 6: 摩托车
-    'pedestrian',            # 7: 行人
-    'traffic_cone',          # 8: 交通锥/车道线
-    'trailer',               # 9: 拖车
-    'truck',                 # 10: 卡车
-    'driveable_surface',     # 11: 可行驶路面 (Road)
-    'other_flat',            # 12: 其他平坦表面
-    'sidewalk',              # 13: 人行道
-    'terrain',               # 14: 地形/泥土
-    'manmade',               # 15: 人造物 (建筑、杆、标志)
-    'vegetation',            # 16: 植被
-    'general_object',        # 17: 通用物体
-]
-
-# 定义地面相关类别
-GROUND_LABELS = {11, 12, 13, 14}  # Road, OtherFlat, Sidewalk, Terrain
+# 标签定义只认 config/occupancy_config.py 这一份 (之前这里抄了一份，traffic_cone 还注释成"车道线")
+sys.path.insert(0, str(Path(__file__).parent))
+from config.occupancy_config import OCCUPANCY_LABELS, GROUND_LABELS, X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION  # noqa: E402
+GROUND_LABELS = set(GROUND_LABELS)
 
 # 定义颜色 (用于打印)
 COLORS = {
@@ -56,10 +38,10 @@ def load_occupancy(file_path):
         occupancy = np.load(file_path)
         data = {
             'occupancy': occupancy,
-            'x_range': [-40.0, 40.0],
-            'y_range': [-40.0, 40.0],
-            'z_range': [-4.0, 4.0],
-            'resolution': 0.2,
+            'x_range': list(X_RANGE),
+            'y_range': list(Y_RANGE),
+            'z_range': list(Z_RANGE),
+            'resolution': RESOLUTION,
             'grid_size': occupancy.shape
         }
     elif file_path.suffix == '.npz':
@@ -111,8 +93,8 @@ def analyze_ground_layer(occupancy):
         return
 
     print(f"[1] 地面高度统计:")
-    print(f"  - 最低地面 Z索引: {valid_heights.min()} (Z={valid_heights.min() * 0.2 - 4.0:.2f}m)")
-    print(f"  - 最高地面 Z索引: {valid_heights.max()} (Z={valid_heights.max() * 0.2 - 4.0:.2f}m)")
+    print(f"  - 最低地面 Z索引: {valid_heights.min()} (Z={valid_heights.min() * RESOLUTION + Z_RANGE[0]:.2f}m)")
+    print(f"  - 最高地面 Z索引: {valid_heights.max()} (Z={valid_heights.max() * RESOLUTION + Z_RANGE[0]:.2f}m)")
     print(f"  - 平均地面 Z索引: {valid_heights.mean():.2f}")
     print(f"  - 地面高度方差: {valid_heights.std():.2f}")
 
@@ -212,7 +194,7 @@ def analyze_ground_layer(occupancy):
                 elif iz > gh:
                     marker = f" ← +{iz - gh}"
 
-                print(f"    Z={iz:2d} ({(iz * 0.2 - 4.0):5.2f}m): {color} {label:20s} {marker}")
+                print(f"    Z={iz:2d} ({(iz * RESOLUTION + Z_RANGE[0]):5.2f}m): {color} {label:20s} {marker}")
 
     # 统计总结
     print(f"\n[5] 问题总结:")
@@ -238,7 +220,7 @@ def analyze_ground_layer(occupancy):
 
 def main():
     parser = argparse.ArgumentParser(description='地面层诊断工具')
-    parser.add_argument('--dataset', default='d:/code/carla/dataset_10k_bak',
+    parser.add_argument('--dataset', required=True,
                         help='数据集目录')
     parser.add_argument('--frame', type=int, default=0,
                         help='要分析的帧编号 (默认: 0)')

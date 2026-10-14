@@ -271,7 +271,7 @@ total = CE + 0.5·Lovász  +  深度 CE  +  流场 SmoothL1  +  粗占用 BCE
 | CE | 逐体素分类，让训练"启动" |
 | Lovász-Softmax | IoU 的可微凸替代，按类别平均，小类与大类同等重要，缓解空气占绝大多数的不平衡。超过 100 万体素时子采样（全保留非空体素） |
 | 深度 CE | 64 个对数均匀 bin（1~60m）；目标由针孔深度图换算成沿鱼眼射线的距离（见 TRAINING.md） |
-| 流场 SmoothL1 | 只在 `flow_mask`（动态物体）内；目标是相对自车的位移 |
+| 流场 SmoothL1 | 只在 `flow_mask`（动态物体）内；目标是物体自身在帧间隔内的位移（车辆系） |
 | 粗占用 BCE | 稀疏细化的选择依据要准，否则会把真有东西的体素漏掉 |
 
 验证时计算 **mIoU**（不含 0:free）。
@@ -318,8 +318,7 @@ total = CE + 0.5·Lovász  +  深度 CE  +  流场 SmoothL1  +  粗占用 BCE
   包围盒也会歪。2026-10 已修复：5 处 `get_matrix()` 和 3 处 `get_world_vertices()` 统一改用
   `processing/transform_utils.py`（UE 公式，已与客户端在仅 yaw 时逐项对齐），但尚未在模拟器坡道场景实测；
   修复前采集的坡道数据需要重采。
-- `generate_flow` 的流场是"相对自车速度×dt"且只在动态物体内非零，路面等静止背景的流场为 0
-  而不是 −v_ego·dt，这是数据定义问题，网络侧按 `flow_mask` 处理。
+- `generate_flow` 的流场：物体自身速度（不减自车速度）旋转到当前车辆系 × 帧间隔（米），只在动态物体体素内非零；停着的车与建筑一样为 0，自车运动由 ego_motion 表达（label_version 2 起；之前是相对自车速度）。网络侧按 `flow_mask` 处理。
 - 真值生成器（`ground_truth_voxel_generator.py`）的体素网格与网络约定一致（原点 = 车辆 transform，
   [X,Y,Z] 索引，0 号体素在 −40m，无翻转），但**地面层**的 Z 索引用 `round` 而其余物体用 `floor`，
   地面高度相对体素中心约定低约半格（0.1m）；且地面高度只减去车辆 z 平移，不考虑车身俯仰。

@@ -3,7 +3,6 @@ OccNetV3 数据采集主脚本 (v2 - 修复卡死问题)
 参考 dense_occupancy_collection 的正确初始化流程
 """
 import sys
-import os
 from pathlib import Path
 import argparse
 import time
@@ -45,29 +44,68 @@ from sensors.semantic_lidar_sensor import SemanticLidarSensor
 from processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
 from processing.transform_utils import transform_to_matrix
 from processing.visibility_filter_simple import VisibilityFilterSimple # ⭐ 新增
+from processing.camera_visibility import CameraVisibility, carve_static
 from data_utils.data_saver import OccNetDataSaver
 
+FIXED_DELTA_SECONDS = 0.05   # 同步模式仿真步长 (20Hz)
 
-def setup_carla(host='localhost', port=2000, town='Town10HD'):
+
+def choose_weather(name, rng):
+    """返回 (carla.WeatherParameters, 参数字典)。
+
+    'random'：每次采集（一个场景）随机一组白天天气，避免所有数据都是固定的 ClearNoon 顶光（阴影短、画面平）。
+      - 太阳高度 8~70°、方位任意；云量 晴/少云/阴 加权混合（鱼眼 6 个 cube 面已共享直方图自动曝光，
+        低太阳/阴天能自适应，见 UE58_RENDERING_ISSUES.md 问题 1/2）；轻雾 0~10、从 30~100m 外开始，
+        制造远景空气透视。不采夜间。
+      - 不下雨、路面不湿：下雨时引擎会给相机叠加镜头雨滴材质（Weather.cpp 的 M_LensRain），污染图像。
+    其它值按 carla.WeatherParameters 预设名取（如 ClearNoon、ClearSunset、Default=地图默认）。
+    """
+    if name != 'random':
+        w = getattr(carla.WeatherParameters, name)
+    else:
+        bucket = rng.choice(['clear', 'partly', 'overcast'], p=[0.45, 0.35, 0.2])
+        cloud = {'clear': (0, 25), 'partly': (25, 65), 'overcast': (65, 95)}[bucket]
+        w = carla.WeatherParameters(
+            cloudiness=float(rng.uniform(*cloud)),
+            precipitation=0.0,
+            precipitation_deposits=0.0,
+            wind_intensity=float(rng.uniform(0, 30)),
+            sun_azimuth_angle=float(rng.uniform(0, 360)),
+            sun_altitude_angle=float(rng.uniform(8, 70)),
+            fog_density=float(rng.uniform(0, 10)),
+            fog_distance=float(rng.uniform(30, 100)),   # 雾从 30~100m 外开始：只影响远景，近处清晰
+            wetness=0.0,
+        )
+    keys = ['cloudiness', 'precipitation', 'precipitation_deposits', 'wind_intensity', 'sun_azimuth_angle',
+            'sun_altitude_angle', 'fog_density', 'fog_distance', 'wetness']
+    return w, {k: float(getattr(w, k)) for k in keys}
+
+
+def setup_carla(host='localhost', port=2000, town='Town10HD', weather=None):
     """连接CARLA并设置同步模式 (参考 dense_occupancy_collection)"""
     print(f"[CARLA] 连接到 {host}:{port}")
     client = carla.Client(host, port)
     client.set_timeout(10.0)
 
-    # 加载地图
-    try:
-        world = client.load_world(town)
+    # 加载地图：已经是目标地图就不重载 (重载要几十秒，且旧版 10s 超时会让重载中的服务端
+    # 把后续 get_settings 也拖超时)；切图时临时放宽超时并等新世界就绪
+    world = client.get_world()
+    current = world.get_map().name.split('/')[-1]
+    same_map = current in (town, f'{town}_Opt') or f'{current}_Opt' == town
+    if town and not same_map:
+        client.set_timeout(180.0)
+        world = client.load_world(town)   # 新世界是异步模式，load_world 返回时已可用
         print(f"  ✓ 加载地图: {town}")
-    except RuntimeError as e:
-        print(f"  ⚠️  使用当前地图")
-        world = client.get_world()
+    else:
+        print(f"  ✓ 使用当前地图: {current}")
+    client.set_timeout(30.0)
 
-    world.set_weather(carla.WeatherParameters.ClearNoon)
+    world.set_weather(weather if weather is not None else carla.WeatherParameters.ClearNoon)
 
     # 设置同步模式 (与 dense_occupancy_collection 完全一致)
     settings = world.get_settings()
     settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 0.05  # 20Hz
+    settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
     world.apply_settings(settings)
     print(f"  ✓ 同步模式: 20Hz (delta={settings.fixed_delta_seconds}s)")
 
@@ -370,20 +408,52 @@ def main():
     parser.add_argument('--num-walkers', type=int, default=10, help='NPC行人数量')
     parser.add_argument('--raw-bit-depth', type=int, default=12, choices=[8, 10, 12, 14, 16],
                          help='DNG 保存时模拟的传感器 ADC 位深 (默认: 12-bit)')
-    parser.add_argument('--clear-output', action='store_true', default=True, help='生成前清空输出目录 (默认: True)')
+    parser.add_argument('--weather', default='random',
+                        help="天气: random(默认, 每次采集随机一组白天天气, 见 choose_weather) 或 "
+                             "carla.WeatherParameters 预设名 (ClearNoon / ClearSunset / Default=地图默认 ...)")
+    parser.add_argument('--seed', type=int, default=None, help='随机天气的种子 (默认不固定)')
+    parser.add_argument('--frame-skip', type=int, default=1,
+                        help='每隔多少个仿真步 (0.05s) 保存一帧 (默认 1 = 20Hz 全存)。相邻帧几乎重复，'
+                             '批量采集建议 5 (=4Hz)；flow/ego_motion 都按保存帧之间的间隔计算')
+    parser.add_argument('--append', action='store_true',
+                        help='追加到已有数据集 (不清空输出目录，场景编号自动取下一个空闲的)；批量采集用')
+    parser.add_argument('--scene-index', type=int, default=None,
+                        help='场景编号 (sample_id 里的 scene_XXXX)；默认新建时 0、--append 时取下一个空闲编号')
+    parser.add_argument('--no-camera-mask', action='store_true',
+                        help='不计算 mask_camera (相机可见性掩码，见 processing/camera_visibility.py)')
+    parser.add_argument('--verbose', action='store_true', help='打印体素生成器的逐帧调试信息')
+    parser.add_argument('--warmup-ticks', type=int, default=0,
+                        help='正式采集前额外空跑的仿真步数，让车辆离开出生点、交通流散开')
     parser.add_argument('--debug-actor-ids', action='store_true', default=False,
                          help='调试开关: 额外保存每帧 actor_ids (400,400,32) 到 debug_actor_ids/ '
                               '目录，用于配合 dataset_viewer_v2 点击体素查具体是哪个 actor/环境物体 '
                               '生成的。训练不需要，默认关闭。')
     args = parser.parse_args()
 
-    # 清空输出目录
+    if args.frame_skip < 1:
+        parser.error('--frame-skip 必须 >= 1')
+
+    # 清空输出目录 (--append 时保留已有场景)
     import shutil
+    import json
     output_dir = Path(args.output)
-    if output_dir.exists() and args.clear_output:
+    if output_dir.exists() and not args.append:
         print(f"[Cleanup] 清理输出目录: {output_dir}")
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    from config.occupancy_config import LABEL_VERSION
+    intr_path = output_dir / 'calibration' / 'intrinsics.json'
+    if args.append and intr_path.exists():
+        old = json.load(open(intr_path, encoding='utf-8'))
+        if old.get('label_version', 1) != LABEL_VERSION or old.get('raw_bit_depth') != args.raw_bit_depth:
+            parser.error(f'{output_dir} 已有数据的 label_version={old.get("label_version", 1)} / '
+                         f'raw_bit_depth={old.get("raw_bit_depth")}，与本次 ({LABEL_VERSION} / {args.raw_bit_depth}) '
+                         f'不一致，不能追加到同一个数据集')
+    if args.scene_index is None:
+        used = {int(p.stem.split('_frame_')[0].rsplit('_', 1)[1])
+                for p in (output_dir / 'occupancy').glob(f'{args.scene}_*_frame_*.npy')}
+        args.scene_index = max(used) + 1 if used else 0
 
     client, world = None, None
     vehicle = None
@@ -395,7 +465,13 @@ def main():
     try:
         # 1. 设置CARLA
         step_start = time.time()
-        client, world, tm_port = setup_carla(args.host, args.port, args.town)
+        if args.seed is not None:
+            import random
+            random.seed(args.seed)          # spawn_vehicle 的出生点洗牌
+            np.random.seed(args.seed)       # NPC 车型/颜色/行人位置
+        weather, weather_params = choose_weather(args.weather, np.random.default_rng(args.seed))
+        client, world, tm_port = setup_carla(args.host, args.port, args.town, weather)
+        print(f"  ✓ 天气 {args.weather}: " + ', '.join(f'{k}={v:.1f}' for k, v in weather_params.items()))
         print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 2. 生成车辆
@@ -430,18 +506,31 @@ def main():
             x_range=X_RANGE,
             y_range=Y_RANGE,
             z_range=Z_RANGE,
-            resolution=RESOLUTION
+            resolution=RESOLUTION,
+            verbose=args.verbose,
         )
         visibility_filter = VisibilityFilterSimple() # ⭐ 新增
         data_saver = OccNetDataSaver(args.output, args.scene, raw_bit_depth=args.raw_bit_depth,
-                                      save_actor_ids=args.debug_actor_ids)
-        print(f"  ✓ 体素生成器和数据保存器")
+                                      save_actor_ids=args.debug_actor_ids, scene_index=args.scene_index)
+        data_saver.save_scene_meta({
+            'town': world.get_map().name, 'weather': args.weather, 'weather_parameters': weather_params,
+            'seed': args.seed, 'frame_skip': args.frame_skip,
+            'frame_dt': FIXED_DELTA_SECONDS * args.frame_skip,   # 相邻保存帧的时间间隔 = flow 的位移时长
+            'num_vehicles': args.num_vehicles, 'num_walkers': args.num_walkers,
+        })
+        print(f"  ✓ 体素生成器和数据保存器 (场景 {args.scene}_{args.scene_index:04d})")
 
         # 6. 保存相机标定
         intrinsics = {cam['id']: camera_manager.get_intrinsics(cam['id']) for cam in TESLA_CAMERAS}
         extrinsics = {cam['id']: camera_manager.get_extrinsics(cam['id']) for cam in TESLA_CAMERAS}
         data_saver.save_calibration(intrinsics, extrinsics, TESLA_CAMERAS)
         print(f"  ✓ 相机标定已保存")
+        # 相机可见性掩码：从刚写出的标定文件构造，与离线补算 compute_camera_mask.py 走同一条路径
+        camera_vis = None
+        if not args.no_camera_mask:
+            camera_vis = CameraVisibility.from_calibration(output_dir / 'calibration',
+                                                           X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION)
+            print(f"  ✓ 相机可见性掩码预计算完成")
         print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 7. 等待传感器初始化 (重要!)
@@ -466,6 +555,10 @@ def main():
         print("\n[4.5/5] 清空传感器队列...")
         camera_manager.clear_queues()
         semantic_lidar.clear_queues()
+        if args.warmup_ticks > 0:
+            print(f"  空跑 {args.warmup_ticks} 步让交通流散开...")
+            for _ in range(args.warmup_ticks):
+                world.tick()
 
         # 8. 开始采集
         print(f"\n{'='*60}")
@@ -478,18 +571,21 @@ def main():
             frame_start = time.time()
             print(f"\n[帧 {frame_idx+1}/{args.frames}]")
 
-            # Step 1: World Tick
+            # Step 1: World Tick (抽帧：前 frame_skip-1 步只推进仿真，传感器数据由帧号对齐丢弃)
             step_start = time.time()
-            world.tick()
-            print(f"  [1/6] World Tick: {(time.time()-step_start)*1000:.1f}ms")
+            for _ in range(args.frame_skip):
+                sim_frame = world.tick()
+            print(f"  [1/6] World Tick x{args.frame_skip}: {(time.time()-step_start)*1000:.1f}ms")
 
-            # Step 2: 采集相机数据 (RGB + 深度)
+            # Step 2: 采集相机数据 (RGB + 深度)，按帧号严格对齐
             step_start = time.time()
-            camera_data = camera_manager.get_synced_frame(timeout=2.0)
+            camera_data = camera_manager.get_synced_frame(timeout=5.0, frame=sim_frame)
             if camera_data is None:
                 print(f"  ❌ RGB 相机数据同步失败,跳过")
+                ego_pose_prev = None          # 断帧：下一帧的 ego_motion/时序不能跨过这个缺口
+                data_saver.generate_sample_id()   # 空占一个帧号，dataset 按帧号连续性切序列时能看到缺口
                 continue
-            depth_data = camera_manager.get_synced_depth_frame(timeout=2.0)
+            depth_data = camera_manager.get_synced_depth_frame(timeout=5.0, frame=sim_frame)
             if depth_data is None:
                 print(f"  ⚠️ 深度相机数据同步失败,本帧无深度")
             print(f"  [2/6] 相机采集 (RGB+Depth): {(time.time()-step_start)*1000:.1f}ms")
@@ -497,10 +593,12 @@ def main():
             # Step 3: 采集LiDAR数据
             step_start = time.time()
             try:
-                lidar_data = semantic_lidar.get_data(timeout=2.0)
+                lidar_data = semantic_lidar.get_data(timeout=5.0, frame=sim_frame)
                 print(f"  [3/6] LiDAR采集: {(time.time()-step_start)*1000:.1f}ms")
             except Exception as e:
                 print(f"  ❌ LiDAR失败 ({e}),跳过")
+                ego_pose_prev = None
+                data_saver.generate_sample_id()
                 continue
 
             # Step 4: 获取 Ego Pose
@@ -513,19 +611,15 @@ def main():
             # Step 5: 生成体素 (最耗时)
             step_start = time.time()
             # 5.1 生成原始全透视体素
-            occupancy, actor_ids = voxel_generator.generate(
-                world,
-                vehicle,
-                visibility_data=None
-            )
-            # 5.2 生成 Flow (基于真实速度)
+            occupancy, actor_ids = voxel_generator.generate(world, vehicle)
+            # 5.2 生成 Flow (基于真实速度)：位移时长 = 相邻两个保存帧的间隔，与 ego_motion 对应同一段时间
             flow, flow_mask = voxel_generator.generate_flow(
                 world,
                 vehicle,
-                dt=0.05
+                dt=FIXED_DELTA_SECONDS * args.frame_skip
             )
-            # 5.3 可见性过滤 (基于 LiDAR)
-            # 使用 Semantic LiDAR 过滤被遮挡的物体，但保留地面和 Ego
+            # 5.3 可见性过滤 (基于 LiDAR)：LiDAR 一个点都没打到的物体实例整体置 free (保留地面和 Ego)。
+            # 之后还有相机自由空间雕刻 + 观测掩码 (见下面 5.5)
             occupancy, actor_ids = visibility_filter.run(
                 occupancy,
                 actor_ids,
@@ -538,8 +632,6 @@ def main():
             voxel_time = (time.time() - step_start) * 1000
             print(f"  [5/6] 体素生成 + Flow + 过滤: {voxel_time:.1f}ms ⭐")
 
-            non_empty_count = np.count_nonzero(occupancy)
-
             if ego_pose_prev is not None:
                 ego_motion = np.linalg.inv(ego_pose) @ ego_pose_prev
             else:
@@ -551,8 +643,24 @@ def main():
 
             # 提取深度数据 (如果可用)
             depth_dict = None
+            mask_camera = None
             if depth_data is not None:
                 depth_dict = {cam['id']: depth_data[cam['id']]['data'] for cam in TESLA_CAMERAS}
+                if camera_vis is not None:
+                    t_mask = time.time()
+                    # camera_vis.cameras 按 intrinsics.json 的 cam_i 顺序 = TESLA_CAMERAS 的 index 顺序
+                    by_index = sorted(TESLA_CAMERAS, key=lambda c: c['index'])
+                    mask_camera, seen_through = camera_vis.analyze([depth_dict[c['id']] for c in by_index])
+                    # 静态物体 AABB 实心填充里相机视线明确穿过的部分改成 free (见 camera_visibility.py)
+                    n_carved = carve_static(occupancy, actor_ids, seen_through)
+                    print(f"  [5.5/6] 相机可见性掩码 + 自由空间雕刻: {(time.time()-t_mask)*1000:.0f}ms, "
+                          f"观测体素 {mask_camera.mean()*100:.1f}%, 雕掉 {n_carved:,} 个静态体素")
+            elif camera_vis is not None:
+                # 没有深度就没有掩码和雕刻，这一帧的真值和其他帧口径不一致，宁可丢掉
+                print(f"  ❌ 深度缺失，无法计算相机掩码,跳过")
+                ego_pose_prev = None
+                data_saver.generate_sample_id()
+                continue
 
             sample_id = data_saver.generate_sample_id()
 
@@ -568,13 +676,14 @@ def main():
                 ego_motion=ego_motion,
                 depth=depth_dict,  # ⭐ 保存深度图
                 actor_ids=actor_ids if args.debug_actor_ids else None,
+                mask_camera=mask_camera,
             )
             save_time = (time.time() - step_start) * 1000
             depth_info = "+ 8 Depth" if depth_dict else ""
             print(f"  [6/6] 数据保存 (8 DNG + 1 NPY {depth_info}): {save_time:.1f}ms")
 
             frame_time = (time.time() - frame_start) * 1000
-            print(f"  ✅ 帧完成: 总耗时={frame_time:.0f}ms, 非空体素={non_empty_count:,}")
+            print(f"  ✅ 帧完成: 总耗时={frame_time:.0f}ms, 非空体素={np.count_nonzero(occupancy):,}")
 
         # 9. 完成
         data_saver.finalize()

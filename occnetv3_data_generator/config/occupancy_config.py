@@ -55,48 +55,6 @@ IGNORE_LABEL = 255
 # 动态物体类别 (用于流场计算)
 DYNAMIC_CLASSES = {2, 3, 4, 5, 6, 7, 9, 10}  # bicycle ~ pedestrian ~ truck
 
-# ========== CARLA语义标签映射到18类 ==========
-CARLA_TO_OCCUPANCY = {
-    # 车辆类 (0 = Unlabeled, 10 = Vehicles)
-    10: 4,   # vehicle.* → car (默认)
-
-    # 行人类 (4 = Pedestrian)
-    4: 7,    # walker.pedestrian.* → pedestrian
-
-    # 道路类 (7 = Road, 6 = RoadLines)
-    7: 11,   # 路面 → driveable_surface
-    6: 11,   # 道路标线 → driveable_surface
-
-    # 人行道/停车区 (8 = Sidewalk, 9 = Parking)
-    8: 13,   # sidewalk → sidewalk
-    9: 12,   # parking → other_flat
-
-    # 建筑物 (1 = Buildings)
-    1: 15,   # building → manmade
-
-    # 围栏/墙 (2 = Fences, 3 = Other, 5 = Poles, 12 = Walls)
-    2: 1,    # fence → barrier
-    3: 1,    # other → barrier (保守)
-    5: 1,    # poles → barrier
-    12: 1,   # wall → barrier
-
-    # 植被 (21 = Vegetation)
-    21: 16,  # vegetation → vegetation
-
-    # 地形 (22 = Terrain)
-    22: 14,  # terrain → terrain
-
-    # 天空 (23 = Sky)
-    23: 0,   # sky → empty
-
-    # 交通设施 (18 = TrafficSigns, 19 = TrafficLight)
-    18: 8,   # traffic sign → traffic_cone (近似)
-    19: 8,   # traffic light → traffic_cone (近似)
-
-    # 其他 (默认)
-    0: 0,    # unlabeled → empty
-}
-
 # 强制保留的地面/标线类别 (不参与可见性过滤，即使LiDAR没有击中也保留)
 # 11:Driveable, 12:OtherFlat, 13:Sidewalk, 14:Terrain
 # 2026-08-27 修复: 曾经多了一个 "6"。这是旧版CARLA语义标签(RoadLines=6，见本文件
@@ -106,8 +64,18 @@ CARLA_TO_OCCUPANCY = {
 # 无条件强制保留，完全绕过了"不可见就归free"的可见性过滤规则。
 GROUND_LABELS = [11, 12, 13, 14]
 
-# ========== CARLA 语义标签 → Occupancy 映射（与 dense_occupancy_collection 对齐）==========
-# 用于 ground_truth_voxel_generator 的地面查询，消除对 dense_occupancy_collection 包的依赖
+# 真值语义版本号，写进 calibration/intrinsics.json 顶层 `label_version`。
+# 1 (缺省): 交通灯/标志→traffic_cone(8)，地面填充里车道线→8、路缘→barrier(1)
+# 2 (2026-10-14): 交通灯/标志/杆/墙→manmade(15)，车道线→driveable(11)，路缘→sidewalk(13)；
+#    新增 mask_camera/<sid>.npy 相机可见性掩码；静态物体 AABB 里相机视线穿过的部分雕成 free
+#    (camera_visibility.carve_static)；flow 改为物体自身速度 (不再减自车速度)。
+#    两个版本的类别/流场含义不同，不要混在一个训练集里。
+LABEL_VERSION = 2
+
+# ========== CARLA CityObjectLabel 编号 → Occupancy 映射 ==========
+# ground_truth_voxel_generator 给 world.get_environment_objects() 的静态环境物体分类用。
+# (2026-10-14 删除了从未被引用的旧版语义 ID 映射 CARLA_TO_OCCUPANCY、ACTOR_TYPE_MAPPING 和
+#  dense_occupancy_collection 时代的 6/8 路 cubemap 深度相机配置 DEPTH_CAMERA_CONFIG*)
 CARLA_TO_OCCUPANCY_MAPPING = {
     0: 0,   # NONE -> free
     1: 11,  # Roads -> driveable_surface
@@ -116,8 +84,8 @@ CARLA_TO_OCCUPANCY_MAPPING = {
     4: 15,  # Walls -> manmade
     5: 1,   # Fences -> barrier
     6: 15,  # Poles -> manmade
-    7: 8,   # TrafficLight -> traffic_cone
-    8: 8,   # TrafficSigns -> traffic_cone
+    7: 15,  # TrafficLight -> manmade (label_version 2 起；之前错标为 traffic_cone)
+    8: 15,  # TrafficSigns -> manmade
     9: 16,  # Vegetation -> vegetation
     10: 14, # Terrain -> terrain
     11: 0,  # Sky -> free
@@ -184,57 +152,6 @@ OCCUPANCY_COLORS = [
     (34, 139, 34),    # 16: vegetation
     (255, 0, 255),    # 17: general_object
 ]
-
-# ========== Actor类型映射 (更细粒度) ==========
-ACTOR_TYPE_MAPPING = {
-    # 车辆细分
-    'vehicle.car': 4,              # car
-    'vehicle.truck': 10,           # truck
-    'vehicle.bus': 3,              # bus
-    'vehicle.trailer': 9,          # trailer
-    'vehicle.motorcycle': 6,       # motorcycle
-    'vehicle.bicycle': 2,          # bicycle
-    'vehicle.construction': 5,     # construction_vehicle
-
-    # 行人
-    'walker.pedestrian': 7,        # pedestrian
-
-    # 交通设施
-    'static.prop.trafficcone': 8,  # traffic_cone
-    'static.prop.trafficwarning': 8,
-
-    # 默认
-    'vehicle.': 4,                 # 未知车辆默认 car
-    'walker.': 7,                  # 未知行人
-    'static.': 1,                  # 静态物体默认 barrier
-}
-
-# ========== Depth相机配置 (用于精确体素生成) ==========
-# 6路 CubeMap 深度相机配置 (来自 dense_occupancy_collection)
-# Front, Right, Back, Left, Up, Down
-# 统一高度 Z=2.2m (透波且不被车身遮挡)
-# 垂直 FOV 60度 (上30, 下30)
-DEPTH_CAMERA_CONFIG = {
-    'width': 512,
-    'height': 512,
-    'fov': 60.0,  # 垂直 60度
-    'cameras': [
-        {'id': 'depth_front',       'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 0,    'roll': 0}},
-        {'id': 'depth_front_right', 'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 45,   'roll': 0}},
-        {'id': 'depth_right',       'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 90,   'roll': 0}},
-        {'id': 'depth_back_right',  'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 135,  'roll': 0}},
-        {'id': 'depth_back',        'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': 180,  'roll': 0}},
-        {'id': 'depth_back_left',   'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': -135, 'roll': 0}},
-        {'id': 'depth_left',        'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': -90,  'roll': 0}},
-        {'id': 'depth_front_left',  'pos': {'x': 0, 'y': 0, 'z': 2.2}, 'rot': {'pitch': 0, 'yaw': -45,  'roll': 0}},
-    ]
-}
-
-# 旧配置保留 (兼容性)
-DEPTH_CAMERA_CONFIGS = DEPTH_CAMERA_CONFIG['cameras']
-DEPTH_CAMERA_POSITION = {'x': 0.0, 'y': 0.0, 'z': 2.2}
-DEPTH_IMAGE_SIZE = 512
-MAX_DEPTH = 100.0
 
 # ========== 语义激光雷达配置 (新增) ==========
 # 垂直 FOV 计算: 匹配相机最大垂直 FOV (约 110度)

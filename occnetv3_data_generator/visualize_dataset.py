@@ -2,8 +2,6 @@
 可视化 OccNetV3 数据集 (合并窗口版)
 支持加载 DNG (Bayer RGGB) 和 NPY 格式
 """
-import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -144,7 +142,6 @@ def visualize_sample(dataset_dir, sample_id):
         ax_front.set_ylabel("Z (Up)")
         
         # Draw Center Crosshair
-        cz = occupancy.shape[2]//2
         # Z range [-1.0, 5.4], center is 0.
         # Grid Z=0 is at index 5 (for 32 height) -> (0 - (-1.0)) / 0.2 = 5
         z_zero_idx = int((0 - (-1.0)) / 0.2)

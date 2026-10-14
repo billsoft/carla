@@ -55,6 +55,6 @@ python dataset_viewer_v2/server.py --dataset <out_dir>   # http://localhost:8085
 |---|---|---|
 | 输入 | `[B, 8, 1, 960, 1280]` | 8 相机 Bayer RAW，归一化到 `[0,1]`（位深见 `calibration/intrinsics.json` 的 `raw_bit_depth`） |
 | 输出 | `[B, 18, 400, 400, 32]` | 语义 logits，X/Y ±40m、Z −1~5.4m，0.2m/体素 |
-| 输出 | `[B, 3, 400, 400, 32]` | 占用流（相对自车位移，米/帧） |
+| 输出 | `[B, 3, 400, 400, 32]` | 占用流（物体自身位移，车辆系，米/帧） |
 
 18 类语义定义（权威来源）：`occnetv3_data_generator/config/occupancy_config.py`。

@@ -257,11 +257,18 @@ occnetv3_data_generator/
 │   └── semantic_lidar_sensor.py    # 语义激光雷达
 ├── processing/
 │   ├── ground_truth_voxel_generator.py  # 体素生成核心逻辑
-│   └── visibility_filter_simple.py      # 基于 LiDAR 的可见性过滤
+│   ├── visibility_filter_simple.py      # 基于 LiDAR 的实例可见性过滤
+│   ├── camera_visibility.py             # 相机可见性掩码 + 自由空间雕刻
+│   └── transform_utils.py               # 按 UE FRotator 约定的变换矩阵/包围盒顶点
 ├── data_utils/
 │   └── data_saver.py               # 数据集保存器 (DNG + NPY，异步 IO)
 ├── main_collection.py              # 主采集脚本
-├── visualize_dataset.py            # 数据集可视化工具
+├── batch_collection.py             # 批量采集 (多地图×多场景，断点续采)
+├── compute_camera_mask.py          # 离线补算/统计相机可见性掩码
+├── lighting_preview.py             # 曝光/光照对照 (我们的鱼眼 vs UE 针孔 vs rt_lens)
+├── render_benchmark.py             # 多相机渲染耗时测试
+├── survey_actor_types.py           # 核对 actor 类型映射覆盖度
+├── visualize_dataset.py            # 数据集可视化工具 (matplotlib；交互式预览用 dataset_viewer_v2)
 └── diagnose_ground_layer.py        # 地面层诊断工具
 ```
 
@@ -269,7 +276,8 @@ occnetv3_data_generator/
 
 ```
 连接CARLA → 设同步模式(20Hz) → 生成ego车辆 → 生成NPC → 附加传感器(8相机+深度+LiDAR)
-  → 等传感器就绪 → [World Tick → 相机采集 → LiDAR采集 → Ego Pose → 体素生成+Flow+可见性过滤 → 保存] × N帧
+  → 等传感器就绪 → 空跑 warmup → [World Tick×frame_skip → 按帧号取相机/深度/LiDAR → Ego Pose
+  → 体素生成 + Flow → LiDAR 实例过滤 → 相机自由空间雕刻 + 观测掩码 → 保存] × N帧
 ```
 
 `setup_carla` 里设 `synchronous_mode=True, fixed_delta_seconds=0.05`（20Hz）——这是
@@ -280,17 +288,42 @@ simulator`），因为服务端不会等客户端的 tick 请求，是按自己�
 
 输出：
 - `occupancy`: `(400,400,32)` uint8，语义类别 `[0-17]`
-- `flow`: `(3,400,400,32)` float16，场景流 `(dx,dy,dz)`
+- `flow`: `(3,400,400,32)` float16，场景流 `(dx,dy,dz)` = 物体自身速度 (车辆系，不减自车速度) × 保存帧间隔
+  (`frame_skip × 0.05s`)；停着的车为 0，自车运动由 `ego_motion` 表达
 - `flow_mask`: `(400,400,32)` uint8，动态区域掩码
 
-流程：初始化空网格 → 用 Map API 填充静态环境（地面/道路/建筑，向下填充地下层统一用
-Terrain）→ 按距离过滤（60m）+ OBB 光栅化填充动态 Actor → 计算相对速度生成场景流 →
-基于 LiDAR 点云的可见性过滤（ID 聚类保留 + 地面强制保留 `Z≤1.0m`）。
+流程：初始化空网格 → 用 Map API 填充静态环境（地面/道路/建筑，地下层向下复制本列地表
+标签）→ 静态环境物体按世界 AABB 实心填充 → 按距离过滤（60m）+ OBB 光栅化填充动态 Actor
+→ 生成场景流 → 基于 LiDAR 点云的实例可见性过滤（ID 聚类保留 + 地面类强制保留）→ 相机自由空间
+雕刻 + 可见性掩码 `mask_camera`（见下一节）。逐帧调试输出默认关闭（`--verbose` 打开）。
+
+## 相机可见性掩码 `mask_camera`（label_version 2，2026-10-14）
+
+LiDAR 可见性过滤之后的体素真值仍有大量相机根本看不到的部分。200 帧审计
+（`compute_camera_mask.py --stats`）：只有约 1/3 的占用体素被相机观测到，其余是地面往下
+填充的整列、建筑/车辆内部、被前车挡住的区域。拿它们监督一个只吃图像的网络，就是"照片
+和体素对不上"。做法（Occ3D 约定）：`processing/camera_visibility.py` 用与鱼眼同位姿的针孔
+深度图标出相机观测到的体素——(a) 每个深度像素反投影的表面点所在体素（及其后方/下方半格，
+避免掠射角下漏掉远处地面），(b) 视线在打到表面之前穿过的自由空间。存为 `mask_camera/<sid>.npy`
+（沿 Z 打包的位图）。训练时 `e2e_occ/dataset.py` 把未观测体素置 255 忽略；`occupancy/` 本身
+不改。车/人正下方的最上层路面默认仍监督（`camera_mask_keep_ground_surface`）。
+
+**自由空间雕刻**（同一模块的 `carve_static`，只在采集时做，需要 actor_ids）：静态环境物体按
+世界 AABB 实心填充，一棵树是一个实心长方体、斜放的栅栏是一大块、交通灯横臂的盒子悬在马路上。
+雕刻前 2 帧审计：植被 74%、护栏 67%、一般物体 31% 的占用体素被相机视线明确穿过。相机视线明确
+穿过（3×3 腐蚀后的深度 − 0.3m − 2%×距离 之前）的 barrier/traffic_cone/vegetation/general_object
+体素、以及小体积 manmade（杆/交通灯/路牌，≤4000 体素）改成 free。车辆/行人和大楼不雕：深度相机
+透过车窗、玻璃幕墙看进内部，雕了会把车和立面挖空。`compute_camera_mask.py` 离线补算只补掩码、
+不雕刻（旧数据没有 actor_ids）。
+采集时自动计算（每帧 ~0.5s）；已有数据集用 `compute_camera_mask.py --dataset <dir>` 离线补算。
+深度相机水平 FOV 改为 `depth_fov`（`camera_config.depth_camera_hfov`，120°鱼眼→143°），
+覆盖整幅鱼眼图（以前四角没有深度）。
 
 **地面双重渲染问题**（Map API 和 Static Mesh 同时生成地面导致"双层地面"/"浮空灰层"）：
 跳过 `Roads/Sidewalks/Terrain/Ground/RoadLines` 这几类 `EnvironmentObjects` 的 Static
-Mesh 光栅化，地下填充统一用 `Terrain(14)`（不复制地表材质，否则出现灰色墙体），Actor
-BBox 不覆盖已存在的地面体素（防止出现坑洞）。诊断工具：`diagnose_ground_layer.py`。
+Mesh 光栅化，Actor BBox 不覆盖已存在的地面体素（防止出现坑洞）。地下填充 2026-08-27 起
+改回向下复制本列地表标签（见 `ground_truth_voxel_generator.py` 注释）；地下这些体素相机看不到，
+训练时由 `mask_camera` 忽略。诊断工具：`diagnose_ground_layer.py`。
 
 **性能优化**：世界坐标 Grid Index 做 Map API 查询结果的 Cache Key（首帧慢，后续帧
 Cache 命中率接近 100%）+ NumPy 向量化批量赋值替代逐体素 Python 循环。
@@ -300,6 +333,13 @@ Cache 命中率接近 100%）+ NumPy 向量化批量赋值替代逐体素 Python
 18 类语义标签（对齐 nuScenes）权威定义见 `config/occupancy_config.py`，不要在文档里
 再维护一份拷贝。`0: free` 在损失函数里权重必须 ≥1.0，`11: driveable_surface` 与
 `13: sidewalk` 在可见性过滤中强制保留。
+
+**label_version 2（2026-10-14，写在 `calibration/intrinsics.json` 顶层）**：交通灯/交通标志
+（`CityObjectLabel` 与旧版语义 ID 两条映射）、杆、墙 → `manmade(15)`；地面填充里车道边缘
+0.2m 不再标 `traffic_cone(8)`（车道线就是路面 11），车道外 0.5m 的路缘不再标 `barrier(1)`
+而是 `sidewalk(13)`；`traffic_cone(8)` 只留给可移动锥桶/临时警示牌，路牌/广告牌 prop → 15，
+`streetbarrier`/警戒带 → 1，未知 `static.*` 默认 `general_object(17)`。label_version 1 的旧数据
+（无此字段）里 8 号类被几千个车道线/路牌体素污染，两版类别含义不同，不要混训。
 
 `actor_occupancy_mapping.py` 映射优先级：① `type_id` 精确匹配（如
 `vehicle.tesla.cybertruck`→truck）② `CityObjectLabel` 映射（静态物体）③ 兜底规则
@@ -370,8 +410,25 @@ python occnetv3_data_generator/visualize_dataset.py --dataset dataset_10k --samp
 
 主要参数：`--frames`（默认10）、`--output`（默认 `dataset_10k_bak`）、`--town`
 （默认 `Town10HD`）、`--num-vehicles`（默认30）、`--num-walkers`（默认10）、
-`--raw-bit-depth`（`8/10/12/14/16`，默认12）、`--clear-output`（生成前清空输出目录，
-默认开启）。
+`--raw-bit-depth`（`8/10/12/14/16`，默认12）、`--weather`（默认 `random`：太阳 8~70°、
+晴/少云/阴、轻雾）、`--seed`（固定天气/出生点/NPC）、`--frame-skip`（每 N 个仿真步存一帧，
+默认 1；相邻 0.05s 的帧几乎重复，批量采集建议 5）、`--warmup-ticks`、`--append`（追加到已有
+数据集，场景编号自动递增；不加时**清空输出目录**）、`--no-camera-mask`。
+
+传感器数据按 `world.tick()` 返回的帧号严格对齐（`get_synced_frame(frame=...)`），抽帧时
+中间帧的残留数据会被丢弃，不会把上一帧的图像和这一帧的真值配在一起。
+
+**批量采集**（多地图 × 多场景，每场景独立子进程，可断点续采）：
+
+```bash
+python occnetv3_data_generator/batch_collection.py --host 192.168.100.81 --output <dir> \
+    --towns Town10HD_Opt Town15 --scenes-per-town 10 --frames 150 --frame-skip 5
+```
+
+train/val/test 按**场景**哈希划分（`OccNetDataSaver.scene_split`），追加场景不改变已有场景的归属，
+同一场景的帧不会跨 train/val。实测每帧约 48MB（DNG 20MB + float16 深度图 20MB + 体素/掩码/压缩流场 ~8MB），3000 帧约 145GB；
+抽帧 5 时约 17s/帧（中间步 16 路相机照样渲染），3000 帧约 14 小时。输出不要放 C 盘。每个场景开始前
+自动跑 `remote/reset_carla_world.py` 复位常驻服务端（被超时杀掉的子进程会把车/传感器/同步模式留在服务端上）。
 
 采集前需要 CARLA 编辑器已经进入 Play/PIE 状态（RPC 端口 2000 才会起来）。编辑器带
 `-CarlaAutoPlay` 命令行参数启动可以省掉手动点 Play 这一步（见
@@ -382,20 +439,24 @@ python occnetv3_data_generator/visualize_dataset.py --dataset dataset_10k --samp
 ```
 dataset_10k/
 ├── calibration/
-│   ├── intrinsics.json      # 相机内参(fx,fy,cx,cy,fov,fov_vertical,distortion.model=equidistant) + 顶层 raw_bit_depth
+│   ├── intrinsics.json      # 相机内参(fx,fy,cx,cy,fov,fov_vertical,depth_fov,distortion.model=equidistant)
+│   │                        # + 顶层 raw_bit_depth、label_version
 │   └── extrinsics.json      # 相机安装外参 (Camera→Vehicle，恒定)
 ├── images/scene_XXXX_frame_YYYY/cam_{0-7}.dng   # Bayer RGGB DNG，位深见 raw_bit_depth
-├── depth/scene_XXXX_frame_YYYY/cam_{0-7}.npy    # (960,1280) float32，单位: 米
-├── occupancy/scene_XXXX_frame_YYYY.npy          # (400,400,32) uint8
-├── flow/scene_XXXX_frame_YYYY.npy               # (3,400,400,32) float16
+├── depth/scene_XXXX_frame_YYYY/cam_{0-7}.npy    # (960,1280) float16 针孔平面深度 (米，旧数据 float32)，水平 FOV=depth_fov
+├── occupancy/scene_XXXX_frame_YYYY.npy          # (400,400,32) uint8 全知真值
+├── mask_camera/scene_XXXX_frame_YYYY.npy        # (400,400,4) uint8 = packbits(观测掩码, axis=2)
+├── flow/scene_XXXX_frame_YYYY.npz               # 键 flow: (3,400,400,32) float16 (压缩；旧数据为 .npy)
 ├── flow_mask/scene_XXXX_frame_YYYY.npy          # (400,400,32) uint8
 ├── ego_pose/scene_XXXX_frame_YYYY.npy           # (4,4) float32, Vehicle→World
 ├── ego_motion/scene_XXXX_frame_YYYY.npy         # (4,4) float32, inv(pose_t)@pose_{t-1}
-├── train.txt / val.txt / test.txt
+├── scenes/scene_XXXX.json                       # 地图/天气参数/种子/frame_skip/frame_dt/label_version
+├── train.txt / val.txt / test.txt               # 按场景划分
 ```
 
-DNG 保存走线程池异步 IO（4 workers），不阻塞主采集线程；`piexif`/`Pillow` 不可用时
-自动降级为 `.npy`。
+DNG 保存走线程池异步 IO（4 workers），不阻塞主采集线程；`Pillow` 不可用时自动降级为 `.npy`。
+DNG 标签直接写进 TIFF IFD0：`CFAPattern=RGGB`、`WhiteLevel=2^raw_bit_depth-1`、`BlackLevel=0`、
+`DNGVersion=1.4`（2026-10-14 前用 piexif 构造的 exif 实际没写进文件，rawpy 读出 white_level=65535）。
 
 ## 常见问题
 

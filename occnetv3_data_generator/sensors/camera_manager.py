@@ -89,7 +89,12 @@ class CameraManager:
                                    
         if camera_bp.has_attribute('exposure_mode'):
             camera_bp.set_attribute('exposure_mode', CAMERA_SENSOR_CONFIG['exposure_mode'])
-            
+
+        for key in ('exposure_compensation', 'exposure_min_bright', 'exposure_max_bright',
+                    'exposure_speed_up', 'exposure_speed_down'):
+            if key in CAMERA_SENSOR_CONFIG and camera_bp.has_attribute(key):
+                camera_bp.set_attribute(key, str(CAMERA_SENSOR_CONFIG[key]))
+
         if camera_bp.has_attribute('shutter_speed'):
             camera_bp.set_attribute('shutter_speed', str(CAMERA_SENSOR_CONFIG['shutter_speed']))
             
@@ -180,8 +185,8 @@ class CameraManager:
         for cam_config in self.camera_configs:
             cam_id = cam_config['id']
 
-            # 设置 FOV (与 RGB 相机相同)
-            depth_bp.set_attribute('fov', str(cam_config['fov']))
+            # 水平 FOV 比鱼眼的 'fov' 大，保证针孔深度图覆盖鱼眼四角 (见 camera_config.depth_camera_hfov)
+            depth_bp.set_attribute('fov', str(cam_config['depth_fov']))
 
             # 创建 Transform (与 RGB 相机完全相同的位置和朝向)
             pos = cam_config['position']
@@ -371,25 +376,39 @@ class CameraManager:
         # 转换为float16
         return gray.astype(np.float16)
 
-    def get_synced_frame(self, timeout: float = 2.0) -> Optional[Dict]:
+    @staticmethod
+    def get_frame_from_queue(q: queue.Queue, timeout: float, frame: Optional[int] = None):
+        """从传感器队列取一条数据。给了 frame (world.tick() 的返回值) 时丢弃更早帧的残留数据、
+        只返回该帧；等到更晚的帧说明这一帧丢了，抛 queue.Empty。不给 frame 时取最早的一条
+        (旧行为：依赖"每 tick 恰好取一次"，抽帧采集时会拿到过期数据)。"""
+        import time
+        deadline = time.time() + timeout
+        while True:
+            item = q.get(timeout=max(0.0, deadline - time.time()))
+            if frame is None or item['frame'] == frame:
+                return item
+            if item['frame'] > frame:
+                raise queue.Empty(f"期望 frame {frame}，收到 {item['frame']}")
+
+    def get_synced_frame(self, timeout: float = 2.0, frame: Optional[int] = None) -> Optional[Dict]:
         """
         获取同步的一帧数据 (8个相机) - 并行等待所有相机，避免顺序等待超时级联失败
+        Args:
+            frame: world.tick() 返回的帧号；给了就严格按帧号对齐 (见 get_frame_from_queue)
         Returns:
             {cam_id: {'data': array, 'timestamp': float, 'frame': int, 'raw_type': str}}
             如果超时返回None
         """
-        import time
         import concurrent.futures as cf
 
         cam_ids = list(self.data_queues.keys())
 
         def _fetch(cam_id):
-            return cam_id, self.data_queues[cam_id].get(timeout=timeout)
+            return cam_id, self.get_frame_from_queue(self.data_queues[cam_id], timeout, frame)
 
         synced_data = {}
         with cf.ThreadPoolExecutor(max_workers=len(cam_ids)) as ex:
             futures = {ex.submit(_fetch, cid): cid for cid in cam_ids}
-            deadline = time.time() + timeout
             for fut in cf.as_completed(futures, timeout=timeout):
                 try:
                     cam_id, data = fut.result()
@@ -401,7 +420,7 @@ class CameraManager:
             return None
         return synced_data
 
-    def get_synced_depth_frame(self, timeout: float = 2.0) -> Optional[Dict]:
+    def get_synced_depth_frame(self, timeout: float = 2.0, frame: Optional[int] = None) -> Optional[Dict]:
         """
         获取同步的一帧深度数据 (8个相机) - 并行等待
         如果超时或未启用深度返回 None
@@ -414,7 +433,7 @@ class CameraManager:
         cam_ids = list(self.depth_queues.keys())
 
         def _fetch(cam_id):
-            return cam_id, self.depth_queues[cam_id].get(timeout=timeout)
+            return cam_id, self.get_frame_from_queue(self.depth_queues[cam_id], timeout, frame)
 
         synced_data = {}
         with cf.ThreadPoolExecutor(max_workers=len(cam_ids)) as ex:

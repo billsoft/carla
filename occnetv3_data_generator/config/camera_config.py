@@ -139,6 +139,36 @@ TESLA_CAMERAS = [
 # 确认相机数量
 assert len(TESLA_CAMERAS) == 8, f"相机数量错误: {len(TESLA_CAMERAS)}"
 
+
+def depth_camera_hfov(cam, width=1280, height=960):
+    """与鱼眼同位姿的针孔深度相机需要的水平 FOV(度)，使它完整覆盖整幅等距鱼眼图像。
+
+    等距鱼眼 r=f*θ 的四角离光轴最远：120° 鱼眼的角点视线偏离光轴 75°，而水平 FOV 同为 120° 的
+    针孔深度相机四角只到约 65°，鱼眼图的四角就没有深度/可见性。这里沿鱼眼图像边框逐点算出视线
+    方向，取能把它们全部装进 width×height 针孔画面的最小 FOV（120→~143°, 90→~100°, 50→~52°）。
+    label_version 1 的数据深度相机直接用 cam['fov']（不覆盖四角）。
+    """
+    import math
+    fov_v = math.radians(cam['fov_vertical'])
+    fov_h = math.radians(cam.get('fov_horizontal', cam['fov_vertical'] * width / height))
+    fx, fy = (width / 2.0) / (fov_h / 2.0), (height / 2.0) / (fov_v / 2.0)
+    need = 0.0
+    n = 64
+    border = ([(width * i / n, 0.0) for i in range(n + 1)] + [(width * i / n, float(height)) for i in range(n + 1)] +
+              [(0.0, height * i / n) for i in range(n + 1)] + [(float(width), height * i / n) for i in range(n + 1)])
+    for u, v in border:
+        xn, yn = (u - width / 2.0) / fx, (v - height / 2.0) / fy
+        theta = math.hypot(xn, yn)
+        if theta < 1e-9:
+            continue
+        s = math.tan(theta) / theta          # 等距角度 → 针孔归一化坐标
+        need = max(need, abs(xn * s), abs(yn * s) * width / height)
+    return math.degrees(2.0 * math.atan(need * 1.005))   # 0.5% 余量
+
+
+for _cam in TESLA_CAMERAS:
+    _cam.setdefault('depth_fov', round(depth_camera_hfov(_cam), 2))
+
 # ========== 相机传感器参数 ==========
 CAMERA_SENSOR_CONFIG = {
     'image_size_x': 1280,
@@ -150,9 +180,19 @@ CAMERA_SENSOR_CONFIG = {
     'gamma': 2.2,
     'motion_blur_intensity': 0.0,
 
-    # 曝光设置 (使用直方图自动曝光以匹配 dense_occupancy_collection)
+    # 曝光设置：直方图自动曝光，整台鱼眼相机只有一个曝光（6 个 cube 面共享面 0 的测光，引擎补丁
+    # SceneCaptureExposureSharing.h + SceneCaptureSensor_WideAngleLens::BeginPlay），不再有拼接接缝。
+    # 2026-10 修复前：5.8 上游鱼眼相机根本不读这些属性（只注册不消费），默认档位固定手动曝光 ~EV9.9、不随光线自适应；
+    # 现在 post_process_profile 为空（不设置）时由下面这些属性决定曝光（见 ActorBlueprintFunctionLibrary.cpp
+    # SetCamera(..., ASceneCaptureSensor_WideAngleLens*)）。
     'exposure_mode': 'histogram',
     'exposure_compensation': 0.0,
+    # 自动曝光范围（EV100，项目开了 ExtendDefaultLuminanceRange）：7~15 覆盖阴天/低太阳到正午强光；
+    # 上游默认 10~12 太窄，阴天会欠曝、正午会过曝。
+    'exposure_min_bright': 7.0,
+    'exposure_max_bright': 15.0,
+    'exposure_speed_up': 3.0,     # EV/s
+    'exposure_speed_down': 3.0,
     'shutter_speed': 1/200.0,  # 仅在 manual 模式下有效
     'iso': 100.0,              # 仅在 manual 模式下有效
 }

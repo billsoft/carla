@@ -93,14 +93,21 @@ def depth_to_bins(depth, config):
 
 
 def coarse_occupancy_target(voxels, config, ignore_index=255):
-    """[B, X, Y, Z] 语义真值 → [B, cx, cy, cz] 粗格是否含非空体素（max-pool）。"""
+    """[B, X, Y, Z] 语义真值 → ([B, cx, cy, cz] 粗格是否含非空体素, 同形状 有效掩码)。
+
+    粗格里只要有一个观测到的非空体素就是占用；全部体素都是 ignore（相机没观测到）的粗格无效、不监督——
+    否则 ignore 会被当成空，粗占用头学到"看不见的地方都是空的"。"""
     occ = ((voxels != 0) & (voxels != ignore_index)).float().unsqueeze(1)
+    seen = (voxels != ignore_index).float().unsqueeze(1)
     k = tuple(v // c for v, c in zip(config.voxel_size, config.coarse_size))
-    return F.max_pool3d(occ, kernel_size=k, stride=k).squeeze(1)
+    target = F.max_pool3d(occ, kernel_size=k, stride=k).squeeze(1)
+    valid = F.max_pool3d(seen, kernel_size=k, stride=k).squeeze(1) > 0
+    return target, valid
 
 
 def sample_implicit_points(voxels, config, num_points, ignore_index=255):
-    """隐式头训练采样：occupied_ratio 比例来自非空体素，其余均匀随机。
+    """隐式头训练采样：occupied_ratio 比例来自非空体素，其余从非 ignore 体素里均匀随机
+    （采到 ignore 的点不产生损失，白白浪费采样预算）。
 
     返回 flat_idx [B, P]（[X,Y,Z] 行优先索引）、points [B, P, 3]（grid_sample 归一化坐标）。
     """
@@ -115,7 +122,11 @@ def sample_implicit_points(voxels, config, num_points, ignore_index=255):
             pick = occ_idx[torch.randint(0, occ_idx.numel(), (n_occ,), device=voxels.device)]
         else:
             pick = torch.randint(0, flat.shape[1], (n_occ,), device=voxels.device)
-        rnd = torch.randint(0, flat.shape[1], (num_points - n_occ,), device=voxels.device)
+        seen_idx = torch.nonzero(flat[b] != ignore_index, as_tuple=False).squeeze(1)
+        if 0 < seen_idx.numel() < flat.shape[1]:
+            rnd = seen_idx[torch.randint(0, seen_idx.numel(), (num_points - n_occ,), device=voxels.device)]
+        else:
+            rnd = torch.randint(0, flat.shape[1], (num_points - n_occ,), device=voxels.device)
         idx_list.append(torch.cat([pick, rnd]))
     flat_idx = torch.stack(idx_list)
     ix = flat_idx // (Y * Z)
@@ -169,7 +180,8 @@ class E2ELoss(nn.Module):
             total = total + cfg.depth_loss_weight * d_loss
 
         if cfg.use_flow_head and 'flow' in targets:
-            mask = targets['flow_mask'].bool() & targets['has_flow'].view(-1, 1, 1, 1)
+            mask = (targets['flow_mask'].bool() & targets['has_flow'].view(-1, 1, 1, 1)
+                    & (voxels != self.ignore_index))
             if 'flow_points' in outputs and outputs['flow_points'] is not None:
                 idx = targets['point_idx']
                 B = voxels.shape[0]
@@ -191,8 +203,12 @@ class E2ELoss(nn.Module):
                 total = total + cfg.flow_loss_weight * f_loss
 
         if outputs.get('coarse_occ_logits') is not None and cfg.coarse_occ_loss_weight > 0:
-            occ_t = coarse_occupancy_target(voxels, cfg, self.ignore_index)
-            c_loss = F.binary_cross_entropy_with_logits(outputs['coarse_occ_logits'].float(), occ_t)
+            occ_t, occ_valid = coarse_occupancy_target(voxels, cfg, self.ignore_index)
+            if occ_valid.any():
+                c_loss = F.binary_cross_entropy_with_logits(outputs['coarse_occ_logits'].float()[occ_valid],
+                                                            occ_t[occ_valid])
+            else:
+                c_loss = outputs['coarse_occ_logits'].sum() * 0.0
             losses['coarse_occ'] = c_loss
             total = total + cfg.coarse_occ_loss_weight * c_loss
 

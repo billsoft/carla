@@ -6,7 +6,8 @@
 import carla
 import numpy as np
 import queue
-from typing import Optional, Dict, Tuple
+import time
+from typing import Optional, Dict
 
 from config.occupancy_config import SEMANTIC_LIDAR_CONFIG
 
@@ -97,9 +98,9 @@ class SemanticLidarSensor:
 
         self.sensor.listen(queue_callback)
 
-    def get_data(self, timeout: float = 2.0):
+    def get_data(self, timeout: float = 2.0, frame=None):
         """
-        获取一帧 LiDAR 数据
+        获取一帧 LiDAR 数据 (给了 frame = world.tick() 返回值时按帧号对齐，丢弃残留的旧帧)
         Returns:
             {
                 'points': (N, 3),
@@ -110,7 +111,13 @@ class SemanticLidarSensor:
             }
         """
         try:
-            data = self.data_queue.get(timeout=timeout)
+            deadline = time.time() + timeout
+            while True:
+                data = self.data_queue.get(timeout=max(0.0, deadline - time.time()))
+                if frame is None or data['frame'] == frame:
+                    break
+                if data['frame'] > frame:
+                    raise queue.Empty
             parsed = self._parse_lidar_data(data['raw_data']) # Pass bytes directly
             parsed['timestamp'] = data['timestamp']
             parsed['frame'] = data['frame']

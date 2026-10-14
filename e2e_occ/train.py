@@ -44,7 +44,10 @@ def run_sequence(model, batch, criterion, config, device, amp_dtype, use_amp, tr
     extrinsics = batch['extrinsics'].to(device)
     ego_motion_all = batch['ego_motion'].to(device)
     B, T = images.shape[:2]
-    time_delta = torch.full((B,), config.frame_dt, device=device)
+    if 'time_delta' in batch:                                          # 数据集按场景给出 (抽帧采集)
+        time_delta_all = batch['time_delta'].to(device).float()        # [B, T]
+    else:
+        time_delta_all = torch.full((B, T), config.frame_dt, device=device)
 
     memory = None
     logs = {}
@@ -66,7 +69,7 @@ def run_sequence(model, batch, criterion, config, device, amp_dtype, use_amp, tr
 
         with torch.autocast('cuda', dtype=amp_dtype, enabled=use_amp):
             out = model(images[:, t], intrinsics, extrinsics, memory=memory, ego_motion=ego_motion,
-                        time_delta=time_delta if t > 0 else None, query_points=query_points)
+                        time_delta=time_delta_all[:, t] if t > 0 else None, query_points=query_points)
             tg = frame_targets(batch, t, device, config, point_idx)
             losses = criterion(out, tg)
 

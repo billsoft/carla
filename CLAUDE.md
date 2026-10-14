@@ -30,7 +30,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 从 Claude Code 的 PowerShell/Bash 工具里启动编辑器时**不要带 `-log`、不要用 `Start-Process`**：编辑器会挂到工具的
   控制台上，之后任一条工具命令结束发出的控制台事件都会让它 `Engine exit requested (reason: ConsoleCtrl RequestExit)`
   静默退出。用 `Invoke-CimMethod Win32_Process Create` 完全脱离启动，日志用 `-abslog=<file>` 写文件。
-- 本目录修改均未提交（合并处于 MERGE_HEAD 状态），提交前先确认用户意愿。
+- **服务端放在 192.168.100.81 常驻**（`remote/README.md`），本地脚本加 `--host 192.168.100.81`；服务端状态跨连接保留，
+  脚本被中断后先跑 `remote/reset_carla_world.py`。
+- **真实感渲染设置（2026-10-14 在 81 实测）**：服务端启动参数开启 `r.Lumen.HardwareRayTracing=True`（玻璃/立面反射更准）
+  并把 `r.RayTracing.ResidentGeometryMemoryPoolSizeInMB` 提到 8000（默认 2000 会超预算），16 路相机每帧耗时不变
+  （~1.25s，瓶颈在传输/同步不在 GPU）。`r.RayTracing.Shadows` 保持关闭：光追不支持带 WPO 的植被，树/草阴影会错。
+  `sensor.camera.rt_lens`（路径追踪）不能与光栅化相机在同一帧渲染（`IsCompatible(EngineShowFlags)` 断言崩溃），
+  且 DLSS-RR 降噪在本机不可用（日志 "DLSS Ray Reconstruction is not available"），噪点很重，暂不用于采集。
+- **5.8 鱼眼相机曝光（2026-10 已修）**：6 个 cube 面共享面 0 的直方图自动曝光（引擎补丁
+  `Util/EnginePatches/ue58-scene-capture-shared-exposure.patch` + `SceneCaptureSensor_WideAngleLens::BeginPlay`），
+  `exposure_*` 属性在没有 `post_process_profile` 时生效，无拼接接缝。采集脚本 `--weather` 默认 `random`
+  （太阳 8~70°、晴/少云/阴、轻雾，不下雨），写 `scenes/<scene>.json`。
+- **数据集 label_version 2（2026-10-14）**：交通灯/标志→manmade、车道线→路面、路缘→人行道，新增相机可见性掩码
+  `mask_camera/`（训练时未观测体素置 255）、静态物体 AABB 的相机自由空间雕刻、flow 改为物体自身速度、深度图 float16、`depth_fov` 覆盖整幅鱼眼、flow 存压缩 `.npz`、`--frame-skip`、
+  `batch_collection.py` 批量采集（按场景划分 train/val）。详见 `occnetv3_data_generator/README.md`。
+- 改相机/传感器 C++ 后要重新打包部署 81：`build_package_development.bat` → `remote\carla_remote.ps1 -Action deploy`。
 
 ---
 
@@ -248,7 +262,7 @@ python dataset_viewer_v2/server.py --dataset <dir>   # http://localhost:8085/
 
 ### 数据集格式
 
-`dataset_10k*/` 下按 `scene_XXXX_frame_XXXX` 组织样本：`calibration/{intrinsics,extrinsics}.json`（静态，Camera→Vehicle）、`images/*.dng`（8 相机 Bayer）、`depth/*.npy`、`occupancy/*.npy`（`(400,400,32)` uint8）、`flow/*.npy`、`flow_mask/*.npy`、`ego_pose/*.npy`（`(4,4)` float32，Vehicle→World）、`ego_motion/*.npy`、`train.txt`/`val.txt`/`test.txt`。
+`dataset_10k*/` 下按 `scene_XXXX_frame_XXXX` 组织样本：`calibration/{intrinsics,extrinsics}.json`（静态，Camera→Vehicle）、`images/*.dng`（8 相机 Bayer）、`depth/*.npy`、`occupancy/*.npy`（`(400,400,32)` uint8）、`mask_camera/*.npy`（相机可见性，打包位图）、`flow/*.npz`（旧数据 `.npy`）、`flow_mask/*.npy`、`ego_pose/*.npy`（`(4,4)` float32，Vehicle→World）、`ego_motion/*.npy`、`scenes/*.json`、`train.txt`/`val.txt`/`test.txt`（按场景划分）。
 
 - 外参约定：`calibration/extrinsics.json` 存 Camera(UE 轴 x前 y右 z上)→Vehicle；`e2e_occ/dataset.py` 转成 Camera(OpenCV 轴)→Vehicle 喂给网络。旋转矩阵必须按 UE `FRotationMatrix`（pitch 正值=抬头，即引擎实际渲染朝向）；旧版采集代码在 pitch/roll≠0 时符号与之相反，新版在 json 顶层写 `rotation_convention: ue_frotator` 标记，dataset 对没有标记的旧数据自动修正。
 - **⚠️ 当前 LibCarla 的 `carla.Transform.get_matrix()` 与 UE 渲染不一致**：上游 #9751（2026-06）翻转了客户端 pitch/roll 符号，但 `Rotation→FRotator` 原样传递、UE 端未改。2026-10 起采集侧（真值生成器、`ego_pose`）改用 `occnetv3_data_generator/processing/transform_utils.py` 按 UE 公式自建矩阵和包围盒顶点，不再调用 `get_matrix()`/`get_world_vertices()`；此前采集的数据在坡道/倾斜路面上真值会歪（平地无影响）。上游 ue58-dev 已在 7c32b194a 撤销该翻转。
@@ -257,7 +271,7 @@ python dataset_viewer_v2/server.py --dataset <dir>   # http://localhost:8085/
 - 时序样本不跨场景拼接；`camera_params/*.npz`（`dense_occupancy_collection` 格式）已不再支持。
 - DNG 位深（`main_collection.py --raw-bit-depth`，默认 12）从 `calibration/intrinsics.json` 顶层 `raw_bit_depth` 字段读取，不要在 `dataset.py` 里硬编码某个位深的归一化除数——这类硬编码曾经导致过采集侧改了位深、加载侧没跟着改的静默数值错误。
 
-18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 若将来在损失里加类别权重，其权重不得低于 1.0（当前 `e2e_occ/loss.py` 是无类别权重的 CE + Lovász）；`11: driveable_surface` 与 `13: sidewalk` 在可见性过滤中强制保留。
+18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 若将来在损失里加类别权重，其权重不得低于 1.0（当前 `e2e_occ/loss.py` 是无类别权重的 CE + Lovász）；`11: driveable_surface` 与 `13: sidewalk` 在可见性过滤中强制保留（训练时被车/人挡住的最上层地面仍监督，其余相机未观测体素忽略，见 `e2e_occ/dataset.py`）。
 
 ---
 

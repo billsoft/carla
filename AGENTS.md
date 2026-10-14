@@ -228,7 +228,7 @@ python dataset_viewer_v2/server.py --dataset <dir>   # http://localhost:8085/
 
 ### 数据集格式
 
-`dataset_10k*/` 下按 `scene_XXXX_frame_XXXX` 组织样本：`calibration/{intrinsics,extrinsics}.json`（静态，Camera→Vehicle）、`images/*.dng`（8 相机 Bayer）、`depth/*.npy`、`occupancy/*.npy`（`(400,400,32)` uint8）、`flow/*.npy`、`flow_mask/*.npy`、`ego_pose/*.npy`（`(4,4)` float32，Vehicle→World）、`ego_motion/*.npy`、`train.txt`/`val.txt`/`test.txt`。
+`dataset_10k*/` 下按 `scene_XXXX_frame_XXXX` 组织样本：`calibration/{intrinsics,extrinsics}.json`（静态，Camera→Vehicle）、`images/*.dng`（8 相机 Bayer）、`depth/*.npy`、`occupancy/*.npy`（`(400,400,32)` uint8）、`mask_camera/*.npy`（相机可见性，打包位图）、`flow/*.npz`（旧数据 `.npy`）、`flow_mask/*.npy`、`ego_pose/*.npy`（`(4,4)` float32，Vehicle→World）、`ego_motion/*.npy`、`scenes/*.json`、`train.txt`/`val.txt`/`test.txt`（按场景划分）。
 
 - 外参约定：`calibration/extrinsics.json` 存 Camera(UE 轴 x前 y右 z上)→Vehicle；`e2e_occ/dataset.py` 转成 Camera(OpenCV 轴)→Vehicle 喂给网络。旋转矩阵必须按 UE `FRotationMatrix`（pitch 正值=抬头，即引擎实际渲染朝向）；旧版采集代码在 pitch/roll≠0 时符号与之相反，新版在 json 顶层写 `rotation_convention: ue_frotator` 标记，dataset 对没有标记的旧数据自动修正。
 - **⚠️ 当前 LibCarla 的 `carla.Transform.get_matrix()` 与 UE 渲染不一致**：上游 #9751（2026-06）翻转了客户端 pitch/roll 符号，但 `Rotation→FRotator` 原样传递、UE 端未改。2026-10 起采集侧（真值生成器、`ego_pose`）改用 `occnetv3_data_generator/processing/transform_utils.py` 按 UE 公式自建矩阵和包围盒顶点，不再调用 `get_matrix()`/`get_world_vertices()`；此前采集的数据在坡道/倾斜路面上真值会歪（平地无影响）。上游 ue58-dev 已在 7c32b194a 撤销该翻转。
@@ -237,7 +237,7 @@ python dataset_viewer_v2/server.py --dataset <dir>   # http://localhost:8085/
 - 时序样本不跨场景拼接；`camera_params/*.npz`（`dense_occupancy_collection` 格式）已不再支持。
 - DNG 位深（`main_collection.py --raw-bit-depth`，默认 12）从 `calibration/intrinsics.json` 顶层 `raw_bit_depth` 字段读取，不要在 `dataset.py` 里硬编码某个位深的归一化除数——这类硬编码曾经导致过采集侧改了位深、加载侧没跟着改的静默数值错误。
 
-18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 若将来在损失里加类别权重，其权重不得低于 1.0（当前 `e2e_occ/loss.py` 是无类别权重的 CE + Lovász）；`11: driveable_surface` 与 `13: sidewalk` 在可见性过滤中强制保留。
+18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 若将来在损失里加类别权重，其权重不得低于 1.0（当前 `e2e_occ/loss.py` 是无类别权重的 CE + Lovász）；`11: driveable_surface` 与 `13: sidewalk` 在可见性过滤中强制保留（训练时被车/人挡住的最上层地面仍监督，其余相机未观测体素忽略，见 `e2e_occ/dataset.py`）。
 
 ---
 

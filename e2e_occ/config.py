@@ -44,7 +44,12 @@ class E2EOccConfig:
     sequence_stride: int = 0                # 相邻训练序列起点间隔（帧）；0 = 等于 temporal_frames（不重叠，
                                             # 每帧每 epoch 只处理一次）；1 = 全部重叠（每帧处理 T 次，epoch 耗时×T）
     memory_dim: int = 256
-    frame_dt: float = 0.05                  # 相邻帧时间间隔（秒），与采集侧 fixed_delta_seconds 一致
+    frame_dt: float = 0.05                  # 相邻帧时间间隔（秒）的默认值；数据集 scenes/<scene>.json 有 frame_dt
+                                            # (抽帧采集) 时以数据集为准，按样本作为 time_delta 传入
+
+    # --- 真值监督范围（相机可见性掩码，见 dataset.py 文件头）---
+    use_camera_mask: bool = True            # 相机没观测到的体素不监督（Occ3D 约定），需要 mask_camera/
+    camera_mask_keep_ground_surface: bool = True   # 被车/人挡住的最上层地面体素仍监督（路面连续可推断）
 
     # --- 几何与体素定义（车辆坐标系：X前 Y右 Z上，CARLA 左手系，原点为车辆 transform 原点）---
     voxel_range: Tuple[float, ...] = (-40.0, -40.0, -1.0, 40.0, 40.0, 5.4)

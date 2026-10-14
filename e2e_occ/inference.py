@@ -29,12 +29,13 @@ class OccInference:
         print(f'[Inference] Model loaded from {checkpoint_path} ({self.config.head_type} head)')
 
     @torch.no_grad()
-    def predict(self, images, intrinsics, extrinsics, memory=None, ego_motion=None):
+    def predict(self, images, intrinsics, extrinsics, memory=None, ego_motion=None, frame_dt=None):
         """images [B,N,1,H,W]、intrinsics [B,N,3,3]、extrinsics [B,N,4,4]（Camera(cv)→Vehicle）
         返回 (pred [B,X,Y,Z] uint8 numpy, flow [B,3,X,Y,Z] 或 None, new_memory)"""
         cfg = self.config
         B = images.shape[0]
-        td = torch.full((B,), cfg.frame_dt, device=self.device) if memory is not None else None
+        dt = cfg.frame_dt if frame_dt is None else frame_dt
+        td = torch.full((B,), dt, device=self.device) if memory is not None else None
         with torch.autocast('cuda', dtype=torch.bfloat16, enabled=(self.device.type == 'cuda')):
             out = self.model(images.to(self.device), intrinsics.to(self.device), extrinsics.to(self.device),
                              memory=memory, ego_motion=None if ego_motion is None else ego_motion.to(self.device),
@@ -95,7 +96,8 @@ def run_inference_on_dataset(checkpoint_path, data_root, output_dir, split='val'
             ego_motion = (torch.linalg.inv(frame['pose']) @ prev_pose).float().unsqueeze(0)
         else:
             memory = None
-        pred, flow, memory = engine.predict(frame['images'].unsqueeze(0), K, E, memory, ego_motion)
+        pred, flow, memory = engine.predict(frame['images'].unsqueeze(0), K, E, memory, ego_motion,
+                                            frame_dt=ds.frame_dt(sid))
         np.save(out_dir / 'occupancy' / f'{sid}.npy', pred[0])
         if save_flow and flow is not None:
             np.save(out_dir / 'flow' / f'{sid}.npy', flow[0].astype(np.float16))
