@@ -5,8 +5,8 @@ echo ========================================================
 echo STARTING CARLA SIMULATION SERVER
 echo ========================================================
 
-set CARLA_ROOT=D:\code\carla
-set UE5_ROOT=D:\code\UnrealEngine5_carla
+set CARLA_ROOT=%~dp0.
+set UE5_ROOT=D:\code\UnrealEngine58_carla
 
 if not exist "%UE5_ROOT%\Engine\Binaries\Win64\UnrealEditor.exe" (
     echo ERROR: UnrealEditor.exe not found at %UE5_ROOT%\Engine\Binaries\Win64\UnrealEditor.exe

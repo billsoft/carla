@@ -46,7 +46,7 @@ protected:
   void SendHDRDataToClient(
     const TArrayView<const FLinearColor>& Pixels,
     FIntPoint Size,
-    uint64 FrameIndex);
+    const FSensorCaptureContext& CaptureContext);
 
 private:
 };

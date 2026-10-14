@@ -19,7 +19,9 @@ if not exist "%VS_DEV_CMD%" (
 )
 
 echo Using VS Toolchain: %VS_DEV_CMD%
-call "%VS_DEV_CMD%"
+rem UE5.8 的 UBT 固定选 MSVC 14.44 链接（引擎也是 14.44 编的），CMake 侧若用 VS2026 默认的 14.50，
+rem LibCarla/boost 会引用 14.44 运行库里没有的 __std_regex_transform_primary_char，链接 CarlaUnreal 时 LNK2019。
+call "%VS_DEV_CMD%" -vcvars_ver=14.44
 
 rem Verify cl.exe
 where cl.exe >nul 2>nul
@@ -38,7 +40,8 @@ rem 2026-09-20: 旧路径 C:\Users\bills\.conda\envs\carla 已不存在，
 rem conda 环境实际在 C:\ProgramData\anaconda3\envs\carla（Python 3.10.19）。
 set PYTHON_ROOT=C:\ProgramData\anaconda3\envs\carla
 
-cd /d D:\code\carla
+rem UE5.8 移植分支（worktree D:\code\carla_ue58）：在脚本所在目录编译，不写死 D:\code\carla
+cd /d "%~dp0"
 
 rem -- 2. CONFIGURE CMAKE --
 echo [3/4] Configuring CMake...
@@ -52,7 +55,7 @@ set C_FLAGS=/W1 /D_CRT_SECURE_NO_WARNINGS
 cmake -G Ninja -S . -B Build ^
     --toolchain=CMake/Toolchain.cmake ^
     -DCMAKE_BUILD_TYPE=Release ^
-    -DCARLA_UNREAL_ENGINE_PATH="D:\code\UnrealEngine5_carla" ^
+    -DCARLA_UNREAL_ENGINE_PATH="D:\code\UnrealEngine58_carla" ^
     -DPython_ROOT_DIR="%PYTHON_ROOT%" ^
     -DPython3_ROOT_DIR="%PYTHON_ROOT%" ^
     -DPython_FIND_REGISTRY=NEVER ^

@@ -60,7 +60,6 @@ void ASceneCaptureCamera_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick T
   if (!AreClientsListening())
     return;
 
-  auto FrameIndex = FCarlaEngine::GetFrameCounter();
 
   // ========== 根据 RawType 选择数据捕获方式（镜像 ASceneCaptureCamera::PostPhysTick） ==========
   if (RawType == TEXT("float32") || RawType == TEXT("uint16") || RawType == TEXT("bayer_rggb"))
@@ -72,14 +71,17 @@ void ASceneCaptureCamera_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick T
     // 关键：WideAngleLens 的 6 面 cubemap 捕获 + distort compute shader 不是每帧自动触发的
     // （不像普通 USceneCaptureComponent2D 的 bCaptureEveryFrame），而是要显式调用
     // EnqueueRenderSceneImmediate()（内部即 CaptureSceneExtended()）来触发。uint8 分支走的
-    // FPixelReader::SendPixelsInRenderThread 内部会自动调用它，但这里是自己发起的读取，必须
+    // CaptureAndSendToClient 内部会自动调用它，但这里是自己发起的读取，必须
     // 在读回纹理之前手动调用一次，否则读到的是上一帧甚至未初始化的显存内容。
     EnqueueRenderSceneImmediate();
+    const auto CaptureContext = MakeCaptureContext(*this);
 
-    ImageUtil::ReadImageDataAsyncFLinearColor(*GetCaptureRenderTarget(), [this, FrameIndex](
+    ImageUtil::ReadImageDataAsyncFLinearColor(*GetCaptureRenderTarget(), [this, CaptureContext](
       TArrayView<const FLinearColor> Pixels,
       FIntPoint Size) -> bool
     {
+      if (!IsValid(this))
+        return false;
       static bool bLoggedOnce = false;
       if (!bLoggedOnce)
       {
@@ -93,14 +95,16 @@ void ASceneCaptureCamera_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick T
           P0.R, P0.G, P0.B, P0.A,
           PCenter.R, PCenter.G, PCenter.B, PCenter.A);
       }
-      SendHDRDataToClient(Pixels, Size, FrameIndex);
+      SendHDRDataToClient(Pixels, Size, CaptureContext);
       return true;
-    });
+    },
+    /*bNonBlocking=*/false,
+    GetReadbackPool());   // 与上游 CaptureAndSendToClient 一致：走每 tick 批量回读、复用 staging buffer
   }
   else
   {
-    // 默认 uint8 模式：沿用原有 FColor 路径
-    FPixelReader::SendPixelsInRenderThread<ASceneCaptureCamera_WideAngleLens, FColor>(*this);
+    // 默认 uint8 模式：上游 5.8 路径（FPixelReader 在 5.8 的工作线程上会断言失败，已弃用）
+    CaptureAndSendToClient(*this);
   }
 }
 
@@ -110,7 +114,7 @@ void ASceneCaptureCamera_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick T
 void ASceneCaptureCamera_WideAngleLens::SendHDRDataToClient(
   const TArrayView<const FLinearColor>& Pixels,
   FIntPoint Size,
-  uint64 FrameIndex)
+  const FSensorCaptureContext& CaptureContext)
 {
   TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureCamera_WideAngleLens::SendHDRDataToClient);
 
@@ -125,9 +129,15 @@ void ASceneCaptureCamera_WideAngleLens::SendHDRDataToClient(
     ImageUtil::ConvertRGBToBayerRGGB(Pixels, Width, Height, BayerData);
 
     auto DataStream = GetDataStream(*this);
+    // 5.8：帧号/时间戳/位姿用采集时刻的快照（与 ASensor::SendDataToClient 一致），
+    // 而不是异步读回完成时的值
+    DataStream.SetFrameNumber(CaptureContext.FrameIndex);
+    DataStream.SetTimestamp(CaptureContext.Timestamp);
+    DataStream.SetTransform(CaptureContext.Transform);
+
     DataStream.SerializeAndSend(
         *this,
-        FrameIndex,
+        CaptureContext.FrameIndex,
         DataStream.PopBufferFromPool(),
         reinterpret_cast<const uint8*>(BayerData.GetData()),
         BayerData.Num() * sizeof(uint16),
@@ -153,9 +163,15 @@ void ASceneCaptureCamera_WideAngleLens::SendHDRDataToClient(
     }
 
     auto DataStream = GetDataStream(*this);
+    // 5.8：帧号/时间戳/位姿用采集时刻的快照（与 ASensor::SendDataToClient 一致），
+    // 而不是异步读回完成时的值
+    DataStream.SetFrameNumber(CaptureContext.FrameIndex);
+    DataStream.SetTimestamp(CaptureContext.Timestamp);
+    DataStream.SetTransform(CaptureContext.Transform);
+
     DataStream.SerializeAndSend(
         *this,
-        FrameIndex,
+        CaptureContext.FrameIndex,
         DataStream.PopBufferFromPool(),
         reinterpret_cast<const uint8*>(OutputData.GetData()),
         OutputData.Num(),
@@ -181,9 +197,15 @@ void ASceneCaptureCamera_WideAngleLens::SendHDRDataToClient(
     }
 
     auto DataStream = GetDataStream(*this);
+    // 5.8：帧号/时间戳/位姿用采集时刻的快照（与 ASensor::SendDataToClient 一致），
+    // 而不是异步读回完成时的值
+    DataStream.SetFrameNumber(CaptureContext.FrameIndex);
+    DataStream.SetTimestamp(CaptureContext.Timestamp);
+    DataStream.SetTransform(CaptureContext.Transform);
+
     auto Buffer = carla::sensor::s11n::ImageSerializer::Serialize(
         *this,
-        FrameIndex,
+        CaptureContext.FrameIndex,
         DataStream.PopBufferFromPool(),
         reinterpret_cast<const uint8*>(OutputData.GetData()),
         OutputData.Num(),
@@ -207,6 +229,6 @@ void ASceneCaptureCamera_WideAngleLens::SendHDRDataToClient(
       FColorPixels[i] = Pixels[i].ToFColor(true);
     }
 
-    SendDataToClient(*this, TArrayView<const FColor>(FColorPixels), FrameIndex);
+    SendDataToClient(*this, TArrayView<const FColor>(FColorPixels), CaptureContext);
   }
 }

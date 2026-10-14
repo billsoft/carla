@@ -8,6 +8,7 @@
 #include "Carla/Game/CarlaStatics.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 #include "Carla/Sensor/PostProcessConfig.h"
+#include "Carla/Sensor/SceneCaptureSensor.h"
 
 #include <util/ue-header-guard-begin.h>
 #include "Engine/Engine.h"
@@ -81,6 +82,9 @@ ASceneCaptureSensor_WideAngleLens::ASceneCaptureSensor_WideAngleLens(const FObje
         0.008587261043925865F,
         0.0008542188930970716F
     },
+    LensLUT(),
+    LensThetaMax(PI * 0.5F),
+    LensIntrinsics(0.0F, 0.0F, 0.5F, 0.5F),
     YFOVAngle(PI * 0.5F),
     XFOVAngle(VerticalToHorizontal(YFOVAngle)),
     YFocalLength(
@@ -107,7 +111,8 @@ ASceneCaptureSensor_WideAngleLens::ASceneCaptureSensor_WideAngleLens(const FObje
     bEnable16BitFormat(false),
     bRenderPerspective(false),
     bRenderEquirectangular(false),
-    bFOVMaskEnable(false)
+    bFOVMaskEnable(false),
+    bExplicitIntrinsics(false)
 {
     FaceCaptures.SetNum(6);
     FaceRenderTargets.SetNum(6);
@@ -197,7 +202,7 @@ ASceneCaptureSensor_WideAngleLens::ASceneCaptureSensor_WideAngleLens(const FObje
         FaceCapture->bUseCustomProjectionMatrix = true;
         FaceCapture->CustomProjectionMatrix = ProjectionMatrix;
         // Propagate ray-tracing flag to this face capture.
-        FaceCapture->bUseRayTracingIfEnabled = bUseRayTracing;
+        FaceCapture->bUseRayTracingIfEnabled = ASceneCaptureSensor::ResolveCameraRayTracing(bUseRayTracing, false);
         SceneCaptureSensorWideAngleLens_local_ns::SetCameraDefaultOverrides(*FaceCapture);
     }
 
@@ -297,20 +302,29 @@ void ASceneCaptureSensor_WideAngleLens::SetFOVAngle(float NewFOV)
     YFOVAngle = NewFOV;
     XFOVAngle = NewXFOV;
 
-    YFocalLength = CameraModelUtil::ComputeDistance(
-        CameraModel,
-        NewFOV,
-        ImageHeight,
-        KannalaBrandtCameraCoefficients);
+    // LUT1D and BrownConrady carry their own scale (the LUT samples / the
+    // explicit intrinsics); ComputeDistance has no closed form for them.
+    if (CameraModel != ECameraModel::LUT1D && CameraModel != ECameraModel::BrownConrady)
+    {
+        YFocalLength = CameraModelUtil::ComputeDistance(
+            CameraModel,
+            NewFOV,
+            ImageHeight,
+            KannalaBrandtCameraCoefficients);
+    }
 
     // Keep XFocalLength tracking the aspect-ratio-derived XFOVAngle by
     // default (isotropic fx=fy, the pre-existing behavior). A later explicit
     // SetFOVAngleX() call overrides both again — see its own comment.
-    XFocalLength = CameraModelUtil::ComputeDistance(
-        CameraModel,
-        XFOVAngle,
-        ImageWidth,
-        KannalaBrandtCameraCoefficients);
+    // 与上面 YFocalLength 同样的防护：ComputeDistance 对 LUT1D/BrownConrady 会 check(false)。
+    if (CameraModel != ECameraModel::LUT1D && CameraModel != ECameraModel::BrownConrady)
+    {
+        XFocalLength = CameraModelUtil::ComputeDistance(
+            CameraModel,
+            XFOVAngle,
+            ImageWidth,
+            KannalaBrandtCameraCoefficients);
+    }
 
     if (UpdateRenderMask)
     {
@@ -327,11 +341,14 @@ void ASceneCaptureSensor_WideAngleLens::SetFOVAngleX(float NewFOV)
 
     XFOVAngle = NewFOV;
 
-    XFocalLength = CameraModelUtil::ComputeDistance(
-        CameraModel,
-        NewFOV,
-        ImageWidth,
-        KannalaBrandtCameraCoefficients);
+    if (CameraModel != ECameraModel::LUT1D && CameraModel != ECameraModel::BrownConrady)
+    {
+        XFocalLength = CameraModelUtil::ComputeDistance(
+            CameraModel,
+            NewFOV,
+            ImageWidth,
+            KannalaBrandtCameraCoefficients);
+    }
 
     if (UpdateRenderMask)
     {
@@ -354,6 +371,22 @@ float ASceneCaptureSensor_WideAngleLens::GetPrincipalPointX() const
 float ASceneCaptureSensor_WideAngleLens::GetPrincipalPointY() const
 {
     return PrincipalPointY;
+}
+
+void ASceneCaptureSensor_WideAngleLens::SetLensLUT(const TArray<float>& Samples, float ThetaMaxRadians)
+{
+    LensLUT = Samples;
+    LensThetaMax = ThetaMaxRadians > 0.0F ? ThetaMaxRadians : PI * 0.5F;
+    CubemapRenderMask = ComputeCubemapRenderMask();
+    UpdateFrontFaceProjection();
+}
+
+void ASceneCaptureSensor_WideAngleLens::SetLensIntrinsics(float Fx, float Fy, float Cx, float Cy)
+{
+    bExplicitIntrinsics = Fx > 0.0F;
+    LensIntrinsics = FVector4f(Fx, Fy > 0.0F ? Fy : Fx, Cx, Cy);
+    CubemapRenderMask = ComputeCubemapRenderMask();
+    UpdateFrontFaceProjection();
 }
 
 void ASceneCaptureSensor_WideAngleLens::SetTargetGamma(float Gamma)
@@ -496,7 +529,7 @@ void ASceneCaptureSensor_WideAngleLens::SetUseRayTracing(bool Enable)
     for (auto FaceCapture : FaceCaptures)
     {
         if (FaceCapture != nullptr)
-            FaceCapture->bUseRayTracingIfEnabled = Enable;
+            FaceCapture->bUseRayTracingIfEnabled = ASceneCaptureSensor::ResolveCameraRayTracing(Enable, false);
     }
 }
 
@@ -509,7 +542,19 @@ void ASceneCaptureSensor_WideAngleLens::EnqueueRenderSceneImmediate()
 uint8 ASceneCaptureSensor_WideAngleLens::FindFaceIndex(FVector2D UV) const
 {
     const float R = hypotf(UV.X, UV.Y);
-    const float Theta = CameraModelUtil::ComputeAngle(CameraModel, R, KannalaBrandtCameraCoefficients);
+    float Theta;
+    switch (CameraModel)
+    {
+    case ECameraModel::LUT1D:
+        Theta = CameraModelUtil::LUT1D::SampleInverse(R, LensLUT, LensThetaMax);
+        break;
+    case ECameraModel::BrownConrady:
+        Theta = CameraModelUtil::ComputeAngle(ECameraModel::Perspective, R, KannalaBrandtCameraCoefficients);
+        break;
+    default:
+        Theta = CameraModelUtil::ComputeAngle(CameraModel, R, KannalaBrandtCameraCoefficients);
+        break;
+    }
     const float HalfPi = PI / 2.0f;
     const float Phi = HalfPi - Theta;
     const float Rho = atan2f(UV.Y, UV.X);
@@ -550,7 +595,13 @@ uint8 ASceneCaptureSensor_WideAngleLens::ComputeCubemapRenderMask() const
 
     auto Mask = 1U << CubeFace_PosX; // Render front face by default.
 
-    const auto FOV = FVector2D(GetFOVAngleX(), GetFOVAngleY()) * (GetFOVMaskEnable() ? 1 : Sqrt2);
+    // LUT1D: the table's acceptance angle bounds the field of view on both
+    // axes (the principal point may sit anywhere, so assume the full circle).
+    // Otherwise the fov attribute does, widened to the frame corners unless
+    // the FOV mask crops them.
+    const auto FOV = CameraModel == ECameraModel::LUT1D
+        ? FVector2D(2.0F * LensThetaMax, 2.0F * LensThetaMax)
+        : FVector2D(GetFOVAngleX(), GetFOVAngleY()) * (GetFOVMaskEnable() ? 1 : Sqrt2);
 
     if (FOV.Y > HalfPi)
     {
@@ -588,7 +639,10 @@ void ASceneCaptureSensor_WideAngleLens::UpdateFrontFaceProjection()
     // Narrowing the face is only valid when SampleCubemap() (WideAngleLens.usf)
     // is guaranteed to only ever look up FaceIndex 0 for this camera — every
     // other face's UV math still assumes the untouched +/-45 deg convention.
-    const bool bSingleFace = CubemapRenderMask == (1U << CubeFace_PosX);
+    // 5.8 上游新增的 LUT1D 镜头和显式内参（fx/fy/cx/cy）下，实际视场由 LUT/内参决定，
+    // 与 XFOVAngle/YFOVAngle 不一定一致，按 FOV 收窄可能裁掉画面——这两种情况保持 90 度原行为。
+    const bool bSingleFace = CubemapRenderMask == (1U << CubeFace_PosX) &&
+        CameraModel != ECameraModel::LUT1D && !bExplicitIntrinsics;
 
     if (bSingleFace)
     {
@@ -647,6 +701,16 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
         }
     }
 
+    // Show-only mode: refresh the actor list (rescans only when the world's
+    // actor count changed) and push it into every face capture.
+    if (ShowOnlyFilter.IsEnabled())
+    {
+        ShowOnlyFilter.Refresh(GetWorld(), &GetEpisode());
+        for (auto FaceCapture : FaceCaptures)
+            if (FaceCapture != nullptr)
+                ShowOnlyFilter.ApplyTo(*FaceCapture);
+    }
+
     for (uint8 i = 0; i < 6; ++i)
         if (CubemapRenderMask & (1U << i))
             FaceCaptures[i]->CaptureScene();
@@ -670,6 +734,19 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
 
     CameraModelUtil::FDistortCubemapToImageOptions DistortedOptions = { };
     DistortedOptions.KannalaBrandtCoefficients = KannalaBrandtCameraCoefficients;
+    DistortedOptions.LUT = LensLUT;
+    DistortedOptions.ThetaMax = LensThetaMax;
+    DistortedOptions.bExplicitIntrinsics = bExplicitIntrinsics;
+    // Normalized viewport units -> pixels (x by width, y by height).
+    DistortedOptions.Intrinsics = FVector4f(
+        LensIntrinsics.X * static_cast<float>(ImageWidth),
+        LensIntrinsics.Y * static_cast<float>(ImageHeight),
+        LensIntrinsics.Z * static_cast<float>(ImageWidth),
+        LensIntrinsics.W * static_cast<float>(ImageHeight));
+    {
+        const FLinearColor Invalid = GetInvalidPixelColor();
+        DistortedOptions.InvalidColor = FVector4f(Invalid.R, Invalid.G, Invalid.B, Invalid.A);
+    }
     DistortedOptions.YFOVAngle = YFOVAngle;
     DistortedOptions.YFocalLength = YFocalLength;
     DistortedOptions.XFocalLength = XFocalLength;
@@ -730,6 +807,9 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
             TEXT("Equisolid"),
             TEXT("Orthographic"),
             TEXT("KannalaBrandt"),
+            TEXT("BrownConrady"),
+            TEXT("LUT1D"),
+            TEXT("FTheta"),
         };
 
         auto CameraTypeName = Names[(uint8)CameraModel];
@@ -857,7 +937,11 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
     // attaching RenderDoc or PIX to see what the first tick's GPU timeline
     // looks like; further guessing at cap values or camera counts is not
     // going to find this bug.
-    const int32 Side = static_cast<int32>(std::max(GetImageWidth(), GetImageHeight()));
+    // 5.8 上游新增 FaceSize 属性：>0 时所有 6 个面统一用该尺寸（统一尺寸，不触发上面记录的
+    // 非均匀面尺寸卡死问题）；默认 0 时与原行为一致。
+    const auto Side = FaceSize > 0 ?
+        static_cast<uint32>(FaceSize) :
+        std::max(GetImageWidth(), GetImageHeight());
 
     CaptureRenderTarget->InitCustomFormat(
         GetImageWidth(),
@@ -921,6 +1005,9 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
     if (Weather != nullptr)
         Weather->NotifyWeather(this);
 
+    ReadbackPool = MakeShared<FRHIGPUReadbackPool, ESPMode::ThreadSafe>(
+        TEXT("WideAngleLensReadback"));
+
     Super::BeginPlay();
 }
 
@@ -955,6 +1042,30 @@ void ASceneCaptureSensor_WideAngleLens::EndPlay(const EEndPlayReason::Type EndPl
     // surviving sibling sensor collide with the indices of the next spawned
     // sensor.
     FlushRenderingCommands();
+
+    // Release the GPU memory now rather than at the next garbage collection:
+    // six persistent face view states (Lumen scene, TSR history, shadow
+    // caches; several GB at 2048^2) plus the seven render targets. The
+    // UObjects stay alive until GC, but without their resources.
+    for (auto FaceCapture : FaceCaptures)
+    {
+        if (FaceCapture == nullptr)
+            continue;
+        FaceCapture->Deactivate();
+        FaceCapture->TextureTarget = nullptr;
+        FaceCapture->ReleaseViewStates();
+    }
+    for (auto FaceRenderTarget : FaceRenderTargets)
+    {
+        if (FaceRenderTarget != nullptr)
+            FaceRenderTarget->ReleaseResource();
+    }
+    if (CaptureRenderTarget != nullptr)
+        CaptureRenderTarget->ReleaseResource();
+    FlushRenderingCommands();
+    // In-flight readback tasks keep their own reference; the pool dies with the
+    // last of them (see ASceneCaptureSensor::EndPlay).
+    ReadbackPool.Reset();
 }
 
 TArrayView<USceneCaptureComponent2D_CARLA*> ASceneCaptureSensor_WideAngleLens::GetCaptureComponents2D()

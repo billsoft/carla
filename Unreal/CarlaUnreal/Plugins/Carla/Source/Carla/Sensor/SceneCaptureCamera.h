@@ -49,7 +49,7 @@ protected:
   /// HDR 数据发送函数
   void SendHDRDataToClient(
     const TArrayView<const FLinearColor>& Pixels,
-    uint64 FrameIndex);
+    const FSensorCaptureContext& CaptureContext);
   
   virtual void OnFirstClientConnected() override;
   virtual void OnLastClientDisconnected() override;

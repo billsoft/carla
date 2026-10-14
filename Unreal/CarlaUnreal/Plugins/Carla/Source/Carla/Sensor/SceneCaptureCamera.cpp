@@ -59,30 +59,27 @@ void ASceneCaptureCamera::PostPhysTick(UWorld *World, ELevelTick TickType, float
   if (!AreClientsListening())
       return;
 
-  auto FrameIndex = FCarlaEngine::GetFrameCounter();
+  auto CaptureContext = MakeCaptureContext(*this);
 
-  // ========== 新增: 根据 RawType 选择数据捕获方式 ==========
-
-  // 检查用户设置的输出格式
+  // ========== 根据 RawType 选择数据捕获方式（本仓库扩展：Bayer RAW / HDR） ==========
   if (RawType == TEXT("float32") || RawType == TEXT("uint16") || RawType == TEXT("bayer_rggb"))
   {
     // HDR 模式: 使用 FLinearColor (float32 × 4)
-    ImageUtil::ReadSensorImageDataAsyncFLinearColor(*this, [this, FrameIndex](
+    ImageUtil::ReadSensorImageDataAsyncFLinearColor(*this, [this, CaptureContext](
       TArrayView<const FLinearColor> Pixels,
       FIntPoint Size) -> bool
     {
-      SendHDRDataToClient(Pixels, FrameIndex);
+      SendHDRDataToClient(Pixels, CaptureContext);
       return true;
     });
   }
   else
   {
-    // 默认 uint8 模式: 使用 FColor (uint8 × 4)
-    ImageUtil::ReadSensorImageDataAsyncFColor(*this, [this, FrameIndex](
+    ImageUtil::ReadSensorImageDataAsyncFColor(*this, [this, CaptureContext](
       TArrayView<const FColor> Pixels,
       FIntPoint Size) -> bool
     {
-      SendDataToClient(*this, Pixels, FrameIndex);
+      SendDataToClient(*this, Pixels, CaptureContext);
       return true;
     });
   }
@@ -97,7 +94,7 @@ void ASceneCaptureCamera::SendGBufferTextures(FGBufferRequest& GBuffer)
 
 void ASceneCaptureCamera::SendHDRDataToClient(
   const TArrayView<const FLinearColor>& Pixels,
-  uint64 FrameIndex)
+  const FSensorCaptureContext& CaptureContext)
 {
   TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureCamera::SendHDRDataToClient);
 
@@ -116,9 +113,15 @@ void ASceneCaptureCamera::SendHDRDataToClient(
 
     // 发送数据
     auto DataStream = GetDataStream(*this);
+    // 5.8：帧号/时间戳/位姿用采集时刻的快照（与 ASensor::SendDataToClient 一致），
+    // 而不是异步读回完成时的值
+    DataStream.SetFrameNumber(CaptureContext.FrameIndex);
+    DataStream.SetTimestamp(CaptureContext.Timestamp);
+    DataStream.SetTransform(CaptureContext.Transform);
+
     DataStream.SerializeAndSend(
         *this,
-        FrameIndex,
+        CaptureContext.FrameIndex,
         DataStream.PopBufferFromPool(),
         reinterpret_cast<const uint8*>(BayerData.GetData()),
         BayerData.Num() * sizeof(uint16),  // 单通道 × 2 bytes
@@ -148,9 +151,15 @@ void ASceneCaptureCamera::SendHDRDataToClient(
 
     // 发送数据 (rename Stream -> DataStream to avoid shadowing)
     auto DataStream = GetDataStream(*this);
+    // 5.8：帧号/时间戳/位姿用采集时刻的快照（与 ASensor::SendDataToClient 一致），
+    // 而不是异步读回完成时的值
+    DataStream.SetFrameNumber(CaptureContext.FrameIndex);
+    DataStream.SetTimestamp(CaptureContext.Timestamp);
+    DataStream.SetTransform(CaptureContext.Transform);
+
     DataStream.SerializeAndSend(
         *this,
-        FrameIndex,
+        CaptureContext.FrameIndex,
         DataStream.PopBufferFromPool(),
         reinterpret_cast<const uint8*>(OutputData.GetData()),
         OutputData.Num(),
@@ -178,9 +187,15 @@ void ASceneCaptureCamera::SendHDRDataToClient(
 
     // 发送数据
     auto DataStream = GetDataStream(*this);
+    // 5.8：帧号/时间戳/位姿用采集时刻的快照（与 ASensor::SendDataToClient 一致），
+    // 而不是异步读回完成时的值
+    DataStream.SetFrameNumber(CaptureContext.FrameIndex);
+    DataStream.SetTimestamp(CaptureContext.Timestamp);
+    DataStream.SetTransform(CaptureContext.Transform);
+
     auto Buffer = carla::sensor::s11n::ImageSerializer::Serialize(
         *this,
-        FrameIndex,
+        CaptureContext.FrameIndex,
         DataStream.PopBufferFromPool(),
         reinterpret_cast<const uint8*>(OutputData.GetData()),
         OutputData.Num(),
@@ -207,6 +222,6 @@ void ASceneCaptureCamera::SendHDRDataToClient(
     }
 
     // Cast TArray to TArrayView
-    SendDataToClient(*this, TArrayView<const FColor>(FColorPixels), FrameIndex);
+    SendDataToClient(*this, TArrayView<const FColor>(FColorPixels), CaptureContext);
   }
 }

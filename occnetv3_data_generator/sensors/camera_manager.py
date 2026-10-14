@@ -112,7 +112,9 @@ class CameraManager:
             #    实验室标定出来的系数可以原样填进来，不需要转换。只有
             #    lens_model='kannala-brandt' 时才生效。
             # ③ principal_point=(cx,cy)：像素单位的真实光心，不设置时引擎侧默认为
-            #    精确几何中心 (width/2, height/2)。
+            #    精确几何中心 (width/2, height/2)。UE5.8 分支：引擎侧改用上游的显式内参
+            #    属性 fx/fy/cx/cy（归一化单位：fx=fx_px/宽, cx=cx_px/宽, fy/cy 除以高），
+            #    这里由 get_intrinsics() 的像素内参换算后传入。
             # ④ fov_horizontal：独立于 fov_vertical 的水平 FOV（度）。不设置时引擎侧
             #    保持"水平 FOV 按宽高比从垂直 FOV 线性推导"的行为，即当前实际生效的
             #    fov_horizontal = fov_vertical * (width/height)，和 camera_config.py
@@ -128,9 +130,13 @@ class CameraManager:
                 camera_bp.set_attribute('k3', str(k3))
 
             if 'principal_point' in cam_config:
-                cx, cy = cam_config['principal_point']
-                camera_bp.set_attribute('cx', str(cx))
-                camera_bp.set_attribute('cy', str(cy))
+                K = self.get_intrinsics(cam_id)
+                width = CAMERA_SENSOR_CONFIG['image_size_x']
+                height = CAMERA_SENSOR_CONFIG['image_size_y']
+                camera_bp.set_attribute('fx', str(float(K[0, 0]) / width))
+                camera_bp.set_attribute('fy', str(float(K[1, 1]) / height))
+                camera_bp.set_attribute('cx', str(float(K[0, 2]) / width))
+                camera_bp.set_attribute('cy', str(float(K[1, 2]) / height))
 
             if 'fov_horizontal' in cam_config:
                 camera_bp.set_attribute('fov_horizontal', str(cam_config['fov_horizontal']))
