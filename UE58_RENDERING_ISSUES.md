@@ -166,6 +166,11 @@ cube 面 mip/采样器（`SampleLevel(…, 0)`）、渲染百分比（默认 100
 上限 1536 时约 4.9 s/帧；显存采集时稳定在 23.3~23.9 GB（UE 按预算填满纹理/光追池，采集结束回落到约 8 GB），
 两种配置都稳定跑完。要降负担可不重编，在 `carla_remote.ps1` 的 `$CarlaArgs` 里加
 `[SystemSettings]:Carla.WideAngleLens.MaxFaceSide=1536,[SystemSettings]:Carla.WideAngleLens.FaceOversample=1.5`。
+**81 的默认启动参数（`carla_remote.ps1 $CarlaArgs`）已采用这组较轻的设置**，纹理流送池 4000→3000 MB。
+光追几何常驻池保持 8000 MB：试过 4000 MB，采集中出现光追 shader 显存页错误（`MMU Fault`, `ray_tracing_*`）
+GPU 崩溃（同时有采集中途销毁/生成 NPC，两个因素都已撤掉）。nvidia-smi 采集时显示约 23.5 GB，但该次崩溃日志里
+D3D12 自己的统计是 Local Used 15.4 GB / Budget 23.4 GB：驻留管理会把资源留到预算附近、有压力才换出。抽帧采集时被丢弃的
+中间 tick 也会完整渲染 24 路相机（约占总时间 65%），可改为相机只在保存帧渲染，但触发相位需要对齐，暂未做。
 
 **附带修复**：`carla_remote.ps1 -Action restart` 之前不把 `-CarlaArgs` 传给子调用（自定义 cvar 被静默丢掉）；
 `dataset_viewer_v2` 解码 DNG 不再按线性 RAW 叠伽马/自动亮度（数据本身是色调映射后的 sRGB 编码，问题 3），

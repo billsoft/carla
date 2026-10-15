@@ -13,6 +13,33 @@ import argparse
 import carla
 
 
+def reset_world(client, tm_port=8000, keep_weather=False):
+    """关同步模式、销毁全部传感器/车辆/行人(及控制器)，可选恢复默认天气。返回 (销毁数, 剩余 type_id 列表)。
+    occnetv3_data_generator/main_collection.py 启动时和控制台被关闭时也调用它 (服务端不会在客户端断开时
+    自动销毁该客户端创建的 actor：直接关掉终端会把 24 路相机留在服务端一直渲染、占满显存)。"""
+    world = client.get_world()
+    s = world.get_settings()
+    s.synchronous_mode = False
+    s.fixed_delta_seconds = None
+    world.apply_settings(s)
+    try:
+        client.get_trafficmanager(tm_port).set_synchronous_mode(False)
+    except RuntimeError:
+        pass
+
+    actors = world.get_actors()
+    groups = [a for a in actors if a.type_id.startswith('sensor.')]         + [a for a in actors if a.type_id.startswith('controller.')]         + [a for a in actors if a.type_id.startswith(('vehicle.', 'walker.'))]
+    for a in groups:
+        if a.type_id.startswith('sensor.') and a.is_listening:
+            a.stop()
+    client.apply_batch_sync([carla.command.DestroyActor(a.id) for a in groups])
+
+    if not keep_weather:
+        world.set_weather(carla.WeatherParameters.Default)
+    left = [a.type_id for a in world.get_actors() if a.type_id.startswith(('sensor.', 'vehicle.', 'walker.'))]
+    return len(groups), left
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='192.168.100.81')
@@ -23,32 +50,10 @@ def main():
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(30)
+    destroyed, left = reset_world(client, args.tm_port, args.keep_weather)
     world = client.get_world()
-
-    s = world.get_settings()
-    s.synchronous_mode = False
-    s.fixed_delta_seconds = None
-    world.apply_settings(s)
-    try:
-        client.get_trafficmanager(args.tm_port).set_synchronous_mode(False)
-    except RuntimeError:
-        pass
-
-    actors = world.get_actors()
-    groups = [a for a in actors if a.type_id.startswith('sensor.')] \
-        + [a for a in actors if a.type_id.startswith('controller.')] \
-        + [a for a in actors if a.type_id.startswith(('vehicle.', 'walker.'))]
-    for a in groups:
-        if a.type_id.startswith('sensor.') and a.is_listening:
-            a.stop()
-    client.apply_batch_sync([carla.command.DestroyActor(a.id) for a in groups])
-
-    if not args.keep_weather:
-        world.set_weather(carla.WeatherParameters.Default)
-
     w = world.get_weather()
-    left = [a.type_id for a in world.get_actors() if a.type_id.startswith(('sensor.', 'vehicle.', 'walker.'))]
-    print(f'map={world.get_map().name} sync={world.get_settings().synchronous_mode} destroyed={len(groups)} '
+    print(f'map={world.get_map().name} sync={world.get_settings().synchronous_mode} destroyed={destroyed} '
           f'remaining={left} sun_alt={w.sun_altitude_angle:.1f} sun_az={w.sun_azimuth_angle:.1f}')
 
 

@@ -35,6 +35,8 @@ import numpy as np
 
 # 导入我们的模块
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'remote'))
+from reset_carla_world import reset_world  # noqa: E402
 from config.camera_config import TESLA_CAMERAS
 from config.occupancy_config import (
     X_RANGE, Y_RANGE, Z_RANGE, RESOLUTION
@@ -45,11 +47,15 @@ from processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
 from processing.transform_utils import transform_to_matrix
 from processing.visibility_filter_simple import VisibilityFilterSimple # ⭐ 新增
 from processing.camera_visibility import CameraVisibility, finalize_ground_truth
+from processing.npc_recycler import NpcRecycler, sidewalk_point, start_walker_controllers
 from data_utils.data_saver import OccNetDataSaver
 
 FIXED_DELTA_SECONDS = 0.05   # 同步模式仿真步长 (20Hz)
 # 真值生成算法版本，写进每帧 meta/<sid>.json (算法改了但 label_version 语义没变时用它区分批次)
 GENERATOR_VERSION = '2026-10-15 obb+slope+instance-flow+rgb-fov-mask'
+# 每帧等待传感器数据的上限 (秒)。2026-10-15 鱼眼面按像素密度渲染 + 每面 Lumen 后，30 辆车 + 30 行人时
+# 单路相机偶尔超过 5s 才到 (之前的值)，整个场景因此 0 帧退出
+SENSOR_TIMEOUT = 30.0
 
 
 def choose_weather(name, rng):
@@ -83,6 +89,28 @@ def choose_weather(name, rng):
     return w, {k: float(getattr(w, k)) for k in keys}
 
 
+def install_console_close_cleanup(client):
+    """Windows：直接关闭控制台窗口 (CTRL_CLOSE_EVENT) / 注销 / 关机时，进程会被强杀、finally 不执行。
+    系统给控制台处理函数约 5 秒，这里在其中批量销毁服务端上的 actor 并关掉同步模式。
+    Ctrl+C 不在这里处理 (返回 0 交给 Python 的 KeyboardInterrupt，走正常清理)。"""
+    if sys.platform != 'win32':
+        return
+    import ctypes
+    handler_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+
+    def handler(event):
+        if event in (2, 5, 6):            # CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT
+            try:
+                client.set_timeout(4.0)
+                reset_world(client, keep_weather=True)
+            except Exception:
+                pass
+        return 0
+
+    install_console_close_cleanup.handler = handler_type(handler)    # 保持引用，防止被回收
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(install_console_close_cleanup.handler, True)
+
+
 def setup_carla(host='localhost', port=2000, town='Town10HD', weather=None):
     """连接CARLA并设置同步模式 (参考 dense_occupancy_collection)"""
     print(f"[CARLA] 连接到 {host}:{port}")
@@ -101,6 +129,13 @@ def setup_carla(host='localhost', port=2000, town='Town10HD', weather=None):
     else:
         print(f"  ✓ 使用当前地图: {current}")
     client.set_timeout(30.0)
+
+    # 清掉上次被强制中断 (关掉终端/杀进程，finally 来不及执行) 的采集留下的传感器/车辆/行人：
+    # 服务端不会在客户端断开时自动销毁它们，24 路相机会一直渲染、占满显存
+    destroyed, _ = reset_world(client, keep_weather=True)
+    if destroyed:
+        print(f"  ✓ 清理了上次残留的 {destroyed} 个 actor (传感器/车辆/行人)")
+    world = client.get_world()
 
     world.set_weather(weather if weather is not None else carla.WeatherParameters.ClearNoon)
 
@@ -213,13 +248,20 @@ def spawn_vehicle(world, tm_port, spawn_point=None):
     return vehicle
 
 
-def spawn_npcs(client, world, num_vehicles=30, num_walkers=10, tm_port=8000):
-    """生成 NPC 车辆和行人 (参考 scenario_manager.py)"""
+def spawn_npcs(client, world, num_vehicles=30, num_walkers=10, tm_port=8000, center=None, rng=None):
+    """生成 NPC 车辆和行人 (参考 scenario_manager.py)。
+    center (自车位置) 给定时以它为中心就近生成：车辆按生成点离自车的距离由近到远取，行人放在自车
+    5~60m 内的人行道上 (之前车辆铺满整张地图、大多从来进不了体素范围，见 processing/npc_recycler.py)。"""
     import time
     total_start = time.time()
+    rng = rng if rng is not None else np.random.default_rng()
 
     bp_lib = world.get_blueprint_library()
     spawn_points = world.get_map().get_spawn_points()
+    if center is not None:
+        # 离自车 <8m 的生成点跳过，免得贴着自车生成
+        spawn_points = sorted((sp for sp in spawn_points if sp.location.distance(center) >= 8.0),
+                              key=lambda sp: sp.location.distance(center))
     npc_actors = []
 
     print(f"\n[NPC] 生成 NPC: {num_vehicles} 辆车, {num_walkers} 个行人...")
@@ -274,9 +316,10 @@ def spawn_npcs(client, world, num_vehicles=30, num_walkers=10, tm_port=8000):
             if spawn_idx >= len(spawn_points):
                 break
 
-            bp = np.random.choice(bps)
+            bp = bps[int(rng.integers(len(bps)))]
             if bp.has_attribute('color'):
-                color = np.random.choice(bp.get_attribute('color').recommended_values)
+                colors = bp.get_attribute('color').recommended_values
+                color = colors[int(rng.integers(len(colors)))]
                 bp.set_attribute('color', color)
 
             while spawn_idx < len(spawn_points):
@@ -350,13 +393,19 @@ def spawn_npcs(client, world, num_vehicles=30, num_walkers=10, tm_port=8000):
             if spawned_walkers >= num_walkers:
                 break
 
-            spawn_point = np.random.choice(spawn_points)
-            loc = spawn_point.location
-            loc.x += np.random.uniform(-20, 20)
-            loc.y += np.random.uniform(-20, 20)
-            loc.z += 1.0
+            if center is not None:
+                loc = sidewalk_point(world.get_map(), center, (5.0, 60.0), rng)
+                if loc is None:
+                    continue
+                loc = carla.Location(loc.x, loc.y, loc.z + 1.0)
+            else:
+                spawn_point = spawn_points[int(rng.integers(len(spawn_points)))]
+                loc = spawn_point.location
+                loc.x += rng.uniform(-20, 20)
+                loc.y += rng.uniform(-20, 20)
+                loc.z += 1.0
 
-            bp = np.random.choice(walker_bps)
+            bp = walker_bps[int(rng.integers(len(walker_bps)))]
             if bp.has_attribute('is_invincible'):
                 bp.set_attribute('is_invincible', 'false')
 
@@ -372,12 +421,9 @@ def spawn_npcs(client, world, num_vehicles=30, num_walkers=10, tm_port=8000):
 
         # 启动行人 AI
         world.tick()
-        for controller in controllers:
-            controller.start()
-            # ⭐ 性能优化: 移除 go_to_location() 调用
-            # go_to_location(world.get_random_location_from_navigation()) 查询导航网格极慢
-            # (~15秒/个 × 10个 = 150秒), 直接使用 start() 让行人随机游荡
-            controller.set_max_speed(1.0 + np.random.random())
+        # 只 start() 不给目标的行人多数原地不动；目标点用人行道路点就近投影，不用导航网格随机查询
+        # (go_to_location(world.get_random_location_from_navigation()) 实测 ~15 秒/个)
+        start_walker_controllers(world.get_map(), controllers, rng)
 
         print(f"  - pedestrian: {spawned_walkers} 个")
 
@@ -431,6 +477,11 @@ def main():
                              '遮挡已由相机掩码 mask_camera 处理，这个过滤只剩副作用')
     parser.add_argument('--warmup-ticks', type=int, default=0,
                         help='正式采集前额外空跑的仿真步数，让车辆离开出生点、交通流散开')
+    parser.add_argument('--npc-recycle-radius', type=float, default=80.0,
+                        help='NPC 围绕自车：离自车超过该距离 (m) 的车/人销毁并在 45~75m 环形区域重生；'
+                             '0 = 关闭 (NPC 铺满整张地图的旧行为)。默认 80 = 体素半径 40m 的 2 倍')
+    parser.add_argument('--npc-recycle-every', type=int, default=2,
+                        help='每多少个采集帧检查一次 NPC 回收')
     parser.add_argument('--debug-actor-ids', action='store_true', default=False,
                          help='调试开关: 额外保存每帧 actor_ids (400,400,32) 到 debug_actor_ids/ '
                               '目录，用于配合 dataset_viewer_v2 点击体素查具体是哪个 actor/环境物体 '
@@ -468,6 +519,7 @@ def main():
     semantic_lidar = None
     visibility_filter = None # ⭐ 初始化变量
     npc_actors = []
+    exit_code = 0
 
     try:
         # 1. 设置CARLA
@@ -478,6 +530,7 @@ def main():
             np.random.seed(args.seed)       # NPC 车型/颜色/行人位置
         weather, weather_params = choose_weather(args.weather, np.random.default_rng(args.seed))
         client, world, tm_port = setup_carla(args.host, args.port, args.town, weather)
+        install_console_close_cleanup(client)
         if args.seed is not None:
             # 交通流和行人导航的随机性也固定下来 (之前只设了 Python/NumPy 种子，同一个 --seed 交通仍不同)
             client.get_trafficmanager(tm_port).set_random_device_seed(args.seed)
@@ -496,7 +549,13 @@ def main():
         step_start = time.time()
         # 与自车同一个 Traffic Manager：setup_carla 只把这个端口设成了同步模式。2026-10-15 前 NPC 写死 8001，
         # 那个 TM 从没设同步，NPC 在同步仿真里由异步 TM 控制，行为不可复现
-        npc_actors = spawn_npcs(client, world, args.num_vehicles, args.num_walkers, tm_port=tm_port)
+        npc_rng = np.random.default_rng(None if args.seed is None else args.seed + 7919)
+        world.tick()                         # 同步模式下自车位置要 tick 一次才可靠
+        ego_center = vehicle.get_location()
+        npc_actors = spawn_npcs(client, world, args.num_vehicles, args.num_walkers, tm_port=tm_port,
+                                center=None if args.npc_recycle_radius <= 0 else ego_center, rng=npc_rng)
+        npc_recycler = NpcRecycler(client, world, vehicle, npc_actors, tm_port,
+                                   recycle_radius=args.npc_recycle_radius, rng=npc_rng)
         print(f"  ✅ NPC 生成完成，耗时: {(time.time()-step_start):.2f}s")
 
         # 4. 附加传感器
@@ -579,8 +638,15 @@ def main():
             semantic_lidar.clear_queues()
         if args.warmup_ticks > 0:
             print(f"  空跑 {args.warmup_ticks} 步让交通流散开...")
-            for _ in range(args.warmup_ticks):
+            for t in range(args.warmup_ticks):
+                if t % 10 == 0:
+                    npc_recycler.recycle()
                 world.tick()
+                if npc_recycler.pending_controllers:
+                    npc_recycler.start_pending()
+            nv, nw = npc_recycler.nearby_counts()
+            print(f"  ✓ 自车 40m 内: 车 {nv} 人 {nw} (累计回收 车 {npc_recycler.stats['vehicles']} "
+                  f"人 {npc_recycler.stats['walkers']})")
 
         # 8. 开始采集
         print(f"\n{'='*60}")
@@ -593,24 +659,32 @@ def main():
             frame_start = time.time()
             print(f"\n[帧 {frame_idx+1}/{args.frames}]")
 
+            # Step 0: NPC 回收 (在 tick 之前做：本帧真值对应的就是回收后的世界状态；重生点在体素范围外)
+            if args.npc_recycle_every > 0 and frame_idx % args.npc_recycle_every == 0:
+                rv, rw = npc_recycler.recycle()
+                nv, nw = npc_recycler.nearby_counts()
+                print(f"  [0/6] NPC 回收: 车 {rv} 人 {rw} | 自车 40m 内 车 {nv} 人 {nw}")
+
             # Step 1: World Tick (抽帧：前 frame_skip-1 步只推进仿真，传感器数据由帧号对齐丢弃)
             step_start = time.time()
-            for _ in range(args.frame_skip):
+            for k in range(args.frame_skip):
                 sim_frame = world.tick()
+                if k == 0 and npc_recycler.pending_controllers:
+                    npc_recycler.start_pending()          # 新行人的控制器要在一次 tick 之后才能 start
             print(f"  [1/6] World Tick x{args.frame_skip}: {(time.time()-step_start)*1000:.1f}ms")
 
             # Step 2: 采集相机数据 (RGB + 深度)，按帧号严格对齐
             step_start = time.time()
-            camera_data = camera_manager.get_synced_frame(timeout=5.0, frame=sim_frame)
+            camera_data = camera_manager.get_synced_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
             if camera_data is None:
                 print(f"  ❌ RGB 相机数据同步失败,跳过")
                 ego_pose_prev = None          # 断帧：下一帧的 ego_motion/时序不能跨过这个缺口
                 data_saver.generate_sample_id()   # 空占一个帧号，dataset 按帧号连续性切序列时能看到缺口
                 continue
-            depth_data = camera_manager.get_synced_depth_frame(timeout=5.0, frame=sim_frame)
+            depth_data = camera_manager.get_synced_depth_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
             if depth_data is None:
                 print(f"  ⚠️ 深度相机数据同步失败,本帧无深度")
-            sem_data = camera_manager.get_synced_semantic_frame(timeout=5.0, frame=sim_frame)
+            sem_data = camera_manager.get_synced_semantic_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
             print(f"  [2/6] 相机采集 (RGB+Depth+Semantic): {(time.time()-step_start)*1000:.1f}ms")
 
             # Step 3: 采集LiDAR数据 (只有 --lidar-filter 时需要)
@@ -618,7 +692,7 @@ def main():
             if semantic_lidar:
                 step_start = time.time()
                 try:
-                    lidar_data = semantic_lidar.get_data(timeout=5.0, frame=sim_frame)
+                    lidar_data = semantic_lidar.get_data(timeout=SENSOR_TIMEOUT, frame=sim_frame)
                     print(f"  [3/6] LiDAR采集: {(time.time()-step_start)*1000:.1f}ms")
                 except Exception as e:
                     print(f"  ❌ LiDAR失败 ({e}),跳过")
@@ -713,6 +787,7 @@ def main():
                         'semantic': sorted({int(v['frame']) for v in sem_data.values()}) if sem_data else [],
                     },
                     'label_version': LABEL_VERSION,
+                    'npc_nearby_40m': dict(zip(('vehicles', 'walkers'), npc_recycler.nearby_counts())),
                     'generator': GENERATOR_VERSION,
                     'flow_definition': 'v_actor + w x r, world velocity extrapolated over frame_dt, ego frame',
                     'postprocess': None if camera_vis is None else st,
@@ -733,11 +808,13 @@ def main():
 
     except KeyboardInterrupt:
         print("\n用户中断")
+        exit_code = 130
 
     except Exception as e:
         print(f"\n❌ 错误: {e}")
         import traceback
         traceback.print_exc()
+        exit_code = 1     # 之前出错也返回 0，batch_collection 看到 rc=0 分不清失败
 
     finally:
         # 清理资源
@@ -785,7 +862,8 @@ def main():
                 pass
 
         print("  ✓ 清理完成")
+    return exit_code
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

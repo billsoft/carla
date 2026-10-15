@@ -487,12 +487,17 @@ class CameraManager:
         synced_data = {}
         with cf.ThreadPoolExecutor(max_workers=len(cam_ids)) as ex:
             futures = {ex.submit(_fetch, cid): cid for cid in cam_ids}
-            for fut in cf.as_completed(futures, timeout=timeout):
-                try:
-                    cam_id, data = fut.result()
-                    synced_data[cam_id] = data
-                except Exception:
-                    return None  # 任一相机失败立即返回
+            try:
+                for fut in cf.as_completed(futures, timeout=timeout):
+                    try:
+                        cam_id, data = fut.result()
+                        synced_data[cam_id] = data
+                    except Exception:
+                        return None  # 任一相机失败立即返回
+            except cf.TimeoutError:
+                # as_completed 超时会抛异常而不是返回：之前直接冒泡到 main_collection 让整个场景退出，
+                # "跳过这一帧" 的分支从没生效
+                return None
 
         if len(synced_data) != len(cam_ids):
             return None
@@ -516,12 +521,15 @@ class CameraManager:
         synced_data = {}
         with cf.ThreadPoolExecutor(max_workers=len(cam_ids)) as ex:
             futures = {ex.submit(_fetch, cid): cid for cid in cam_ids}
-            for fut in cf.as_completed(futures, timeout=timeout):
-                try:
-                    cam_id, data = fut.result()
-                    synced_data[cam_id] = data
-                except Exception:
-                    return None
+            try:
+                for fut in cf.as_completed(futures, timeout=timeout):
+                    try:
+                        cam_id, data = fut.result()
+                        synced_data[cam_id] = data
+                    except Exception:
+                        return None
+            except cf.TimeoutError:
+                return None
 
         if len(synced_data) != len(cam_ids):
             return None
