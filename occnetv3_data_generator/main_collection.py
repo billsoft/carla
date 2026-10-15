@@ -558,13 +558,17 @@ def main():
         # "time-out while waiting for the simulator"，和引擎侧是否卡死无关，纯粹是客户端
         # 等得不够久。这里临时调高超时覆盖这几次 tick，后面各步骤远用不到这么久，
         # 不用再调回去。
+        # 2026-10-15：鱼眼 cube 面改为按镜头像素密度渲染 (多数 2048²) 且每个面都开 Lumen 后，24 路相机
+        # (RGB+深度+语义) 刚挂上的首帧要初始化约 30 个面视图的 Lumen 场景数据，81 实测超过 60s；
+        # 超时与引擎侧 render fence 上限 (300s) 对齐，并打印每次 tick 耗时
         print("\n[4/5] 等待传感器初始化...")
         step_start = time.time()
-        client.set_timeout(60.0)
+        client.set_timeout(300.0)
         for i in range(10):
+            t_tick = time.time()
             world.tick()
-            if i % 2 == 0:
-                print(f"  {(i+1)*10}%")
+            if i % 2 == 0 or time.time() - t_tick > 30:
+                print(f"  {(i+1)*10}% (本次 tick {time.time() - t_tick:.1f}s)")
         print(f"  ✓ 传感器就绪，耗时: {(time.time()-step_start):.2f}s")
 
         # 7.5 清空队列 (关键: 修复前3帧数据不同步问题)

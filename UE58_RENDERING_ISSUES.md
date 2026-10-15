@@ -135,3 +135,42 @@ k0~k3）每台先恢复默认再覆盖，避免串到下一台。
 
 **仍未做**：曝光共享的测光区域是前向源面，不等于最终鱼眼画面（广角相机侧面明暗代表性不足）；
 Bayer RAW 仍来自色调映射后的 LDR（问题 3）。
+
+## 9. 🟢 鱼眼相机比同视场针孔糊一个量级 / 没有 Lumen（2026-10-15）
+
+**现象**：用户反馈"仿真截图像低画质游戏"。81 同帧同位姿对照（中心区域拉普拉斯方差，鱼眼/同水平视场针孔）：
+front_narrow 35° 只有 0.03、front_main 50° 0.15、90° 相机 0.3~0.4、120° 相机 0.5~0.66——视场越窄越糊，
+与物理相机（同分辨率下长焦角分辨率更高）正好相反。逐步排除：Bayer 采样（采样前 RGB 与采样后几乎一样）、
+cube 面 mip/采样器（`SampleLevel(…, 0)`）、渲染百分比（默认 100）、运动模糊（`r.MotionBlurQuality=0` 无变化）。
+
+**根因与修复**（`SceneCaptureSensor_WideAngleLens.cpp`、`WideAngleLens.usf`、`CameraModelUtil`）：
+
+1. **地图后处理体积的景深作用在鱼眼各面上（长焦发糊的主因）**。scene capture 会混入地图后处理体积
+   （`FSceneView::StartFinalPostprocessSettings` → `UWorld::AddPostProcessingSettings`）；针孔对约 40 个相机字段设了
+   `bOverride_`，鱼眼各面只有 3 个。景深模糊随焦距放大、与面分辨率无关：front_narrow 面加到 4096 也不变，
+   启动参数加 `r.DepthOfFieldQuality=0` 后从 0.07 倍变为 1.30 倍（像素对齐、分块中位数）。各面现在关掉景深
+   （车载定焦镜头近处到无穷远都清晰），色差/胶片颗粒覆盖为 0。
+2. **鱼眼各面一直没有 Lumen**。引擎对 scene capture 默认把 GI/反射设为 None、表面缓存减半，只有组件自己的
+   后处理设置能重新打开（`SceneCaptureRendering.cpp`）。针孔有，鱼眼没有。各面现在使用与针孔相同的 Lumen 设置。
+3. **cube 面上的 TSR 历史累积失败**：同帧收敛曲线针孔 268→760→1948 持续上升，鱼眼 423→104→286 不升反降；
+   TSR 对运动的车/人还会拖影。RGB 鱼眼改为确定性超采样：各面关掉时序 AA，面按约 2 倍角密度渲染，
+   畸变 shader 对每个输出像素取 4 个旋转网格子样本求平均（像素面积积分，`WAL_SHADER_FLAGS_SUPERSAMPLE`，
+   只对 RGB 开，深度/语义/实例分割不受影响）。代价：帧间逐像素时域噪声约 2/255（针孔 0.5），来自残余锯齿和 Lumen。
+4. **面尺寸按镜头有效像素密度推算**（`ComputeRequiredFaceSide`）：逐点把相邻输出像素投到所在 cube 面上，
+   要求面纹素间距 ≤ 输出像素间距 / `Carla.WideAngleLens.FaceOversample`（默认 2.0，上限
+   `Carla.WideAngleLens.MaxFaceSide` 默认 2048）。之前固定 max(宽,高)=1280，90° 相机面中心每弧度只有 640 像素、
+   输出要 815，等于放大采样。`face_size` 属性 > 0 时仍按它（`camera_config.py` 的 `face_size` 可不重编回退）。
+5. `motion_blur_*` 属性以前注册了却从没应用（各面一直是引擎默认 0.5），现在按属性应用，采集配置为 0 即关闭。
+
+**代价**（81，8 相机 + 深度 + 语义生产配置）：渲染部分（tick + 取相机数据）约 6.8 s/帧（面上限 2048），
+上限 1536 时约 4.9 s/帧；显存采集时稳定在 23.3~23.9 GB（UE 按预算填满纹理/光追池，采集结束回落到约 8 GB），
+两种配置都稳定跑完。要降负担可不重编，在 `carla_remote.ps1` 的 `$CarlaArgs` 里加
+`[SystemSettings]:Carla.WideAngleLens.MaxFaceSide=1536,[SystemSettings]:Carla.WideAngleLens.FaceOversample=1.5`。
+
+**附带修复**：`carla_remote.ps1 -Action restart` 之前不把 `-CarlaArgs` 传给子调用（自定义 cvar 被静默丢掉）；
+`dataset_viewer_v2` 解码 DNG 不再按线性 RAW 叠伽马/自动亮度（数据本身是色调映射后的 sRGB 编码，问题 3），
+之前预览发白发灰。`Carla.WideAngleLens.DumpAllFrames.Cubemap` 导出 8 位面渲染目标会触发 D3D12 格式断言崩溃，
+不要在服务端打开。
+
+**仍未做**：镜头光学 MTF/色差/渐晕建模；线性 RAW（问题 3）；地图体积的调色仍会混进鱼眼（针孔用
+`ApplyPostProcessVolumeToSensor` 选择性吸收，两者调色可能略有差异）。

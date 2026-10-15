@@ -1205,6 +1205,23 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
                 FaceCapture->ShowFlags.SetTemporalAA(false);
                 FaceCapture->ShowFlags.SetAntiAliasing(false);
             }
+
+            // 景深与镜头瑕疵 (2026-10-15，鱼眼长焦发糊的根因)：scene capture 会混入地图的后处理体积
+            // (FSceneView::StartFinalPostprocessSettings → UWorld::AddPostProcessingSettings)。针孔相机对几乎所有
+            // 相机字段都设了 bOverride_ (SceneCaptureSensor.cpp SetCameraDefaultOverrides)，地图体积的景深进不来；
+            // 鱼眼各面只覆盖了 3 个字段，Town10 体积里的景深直接作用在各面上。景深模糊随焦距放大、与面分辨率无关：
+            // 81 像素对齐对照，front_narrow (35°) 清晰度只有同视场针孔的 0.07 倍，面加到 4096 也不变；
+            // 启动参数 r.DepthOfFieldQuality=0 后变为 1.30 倍。车载相机是定焦超焦距镜头 (近处到无穷远都清晰)，
+            // 这里直接关掉景深，并把色差、胶片颗粒覆盖为 0 (与针孔的默认覆盖一致)
+            FaceCapture->ShowFlags.SetDepthOfField(false);
+            PP.bOverride_DepthOfFieldFocalDistance = true;
+            PP.DepthOfFieldFocalDistance = 0.0f;
+            PP.bOverride_DepthOfFieldDepthBlurRadius = true;
+            PP.DepthOfFieldDepthBlurRadius = 0.0f;
+            PP.bOverride_SceneFringeIntensity = true;
+            PP.SceneFringeIntensity = 0.0f;
+            PP.bOverride_FilmGrainIntensity = true;
+            PP.FilmGrainIntensity = 0.0f;
         }
 
         FaceCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
