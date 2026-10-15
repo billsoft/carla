@@ -44,7 +44,7 @@ from sensors.semantic_lidar_sensor import SemanticLidarSensor
 from processing.ground_truth_voxel_generator import GroundTruthVoxelGenerator
 from processing.transform_utils import transform_to_matrix
 from processing.visibility_filter_simple import VisibilityFilterSimple # ⭐ 新增
-from processing.camera_visibility import CameraVisibility, carve_static
+from processing.camera_visibility import CameraVisibility, finalize_ground_truth
 from data_utils.data_saver import OccNetDataSaver
 
 FIXED_DELTA_SECONDS = 0.05   # 同步模式仿真步长 (20Hz)
@@ -422,6 +422,10 @@ def main():
     parser.add_argument('--no-camera-mask', action='store_true',
                         help='不计算 mask_camera (相机可见性掩码，见 processing/camera_visibility.py)')
     parser.add_argument('--verbose', action='store_true', help='打印体素生成器的逐帧调试信息')
+    parser.add_argument('--lidar-filter', action='store_true',
+                        help='启用旧的 LiDAR 实例可见性过滤 (默认关闭)。LiDAR 装在 1.0m，看不到的东西比相机多，'
+                             '逐像素核对显示它把相机看得见的行人 (85%%)、交通灯 (68%%)、部分建筑整块删成 free；'
+                             '遮挡已由相机掩码 mask_camera 处理，这个过滤只剩副作用')
     parser.add_argument('--warmup-ticks', type=int, default=0,
                         help='正式采集前额外空跑的仿真步数，让车辆离开出生点、交通流散开')
     parser.add_argument('--debug-actor-ids', action='store_true', default=False,
@@ -489,15 +493,18 @@ def main():
         # 4. 附加传感器
         print("\n[3/5] 附加传感器...")
         step_start = time.time()
-        camera_manager = CameraManager(world, vehicle, enable_depth=True)  # ⭐ 启用深度相机
+        # 语义分割相机只给相机侧后处理 (地面语义重绘) 用，关掉相机掩码时不需要
+        camera_manager = CameraManager(world, vehicle, enable_depth=True,
+                                       enable_semantic=not args.no_camera_mask)
         camera_manager.start_listening()
         print(f"  ✓ RGB 相机: {len(TESLA_CAMERAS)} 个")
         print(f"  ✓ 深度相机: {len(TESLA_CAMERAS)} 个 (与 RGB 重合)")
 
-        # 强制 256 线配置 (使用默认 SEMANTIC_LIDAR_CONFIG)
-        semantic_lidar = SemanticLidarSensor(world, vehicle, config=None)
-        semantic_lidar.listen_to_queue() # ⭐ 必须启动监听
-        print(f"  ✓ 语义激光雷达: 256线 (Using Default Config)")
+        if args.lidar_filter:
+            # 强制 256 线配置 (使用默认 SEMANTIC_LIDAR_CONFIG)
+            semantic_lidar = SemanticLidarSensor(world, vehicle, config=None)
+            semantic_lidar.listen_to_queue() # ⭐ 必须启动监听
+            print(f"  ✓ 语义激光雷达: 256线 (LiDAR 实例过滤已启用)")
         print(f"  耗时: {(time.time()-step_start):.2f}s")
 
         # 5. 初始化生成器和保存器
@@ -509,7 +516,8 @@ def main():
             resolution=RESOLUTION,
             verbose=args.verbose,
         )
-        visibility_filter = VisibilityFilterSimple() # ⭐ 新增
+        if args.lidar_filter:
+            visibility_filter = VisibilityFilterSimple()
         data_saver = OccNetDataSaver(args.output, args.scene, raw_bit_depth=args.raw_bit_depth,
                                       save_actor_ids=args.debug_actor_ids, scene_index=args.scene_index)
         data_saver.save_scene_meta({
@@ -554,7 +562,8 @@ def main():
         # 传感器初始化期间积累了旧数据，必须在正式采集前清空
         print("\n[4.5/5] 清空传感器队列...")
         camera_manager.clear_queues()
-        semantic_lidar.clear_queues()
+        if semantic_lidar:
+            semantic_lidar.clear_queues()
         if args.warmup_ticks > 0:
             print(f"  空跑 {args.warmup_ticks} 步让交通流散开...")
             for _ in range(args.warmup_ticks):
@@ -588,18 +597,21 @@ def main():
             depth_data = camera_manager.get_synced_depth_frame(timeout=5.0, frame=sim_frame)
             if depth_data is None:
                 print(f"  ⚠️ 深度相机数据同步失败,本帧无深度")
-            print(f"  [2/6] 相机采集 (RGB+Depth): {(time.time()-step_start)*1000:.1f}ms")
+            sem_data = camera_manager.get_synced_semantic_frame(timeout=5.0, frame=sim_frame)
+            print(f"  [2/6] 相机采集 (RGB+Depth+Semantic): {(time.time()-step_start)*1000:.1f}ms")
 
-            # Step 3: 采集LiDAR数据
-            step_start = time.time()
-            try:
-                lidar_data = semantic_lidar.get_data(timeout=5.0, frame=sim_frame)
-                print(f"  [3/6] LiDAR采集: {(time.time()-step_start)*1000:.1f}ms")
-            except Exception as e:
-                print(f"  ❌ LiDAR失败 ({e}),跳过")
-                ego_pose_prev = None
-                data_saver.generate_sample_id()
-                continue
+            # Step 3: 采集LiDAR数据 (只有 --lidar-filter 时需要)
+            lidar_data = None
+            if semantic_lidar:
+                step_start = time.time()
+                try:
+                    lidar_data = semantic_lidar.get_data(timeout=5.0, frame=sim_frame)
+                    print(f"  [3/6] LiDAR采集: {(time.time()-step_start)*1000:.1f}ms")
+                except Exception as e:
+                    print(f"  ❌ LiDAR失败 ({e}),跳过")
+                    ego_pose_prev = None
+                    data_saver.generate_sample_id()
+                    continue
 
             # Step 4: 获取 Ego Pose
             step_start = time.time()
@@ -618,16 +630,15 @@ def main():
                 vehicle,
                 dt=FIXED_DELTA_SECONDS * args.frame_skip
             )
-            # 5.3 可见性过滤 (基于 LiDAR)：LiDAR 一个点都没打到的物体实例整体置 free (保留地面和 Ego)。
-            # 之后还有相机自由空间雕刻 + 观测掩码 (见下面 5.5)
-            occupancy, actor_ids = visibility_filter.run(
-                occupancy,
-                actor_ids,
-                {'x_range': X_RANGE, 'y_range': Y_RANGE, 'z_range': Z_RANGE, 'resolution': RESOLUTION},
-                lidar_data,
-                ego_id=vehicle.id
-            )
-            # print(f"  [Visibility] Filter Disabled (Full Ground Truth)")
+            # 5.3 (可选) LiDAR 实例过滤：LiDAR 一个点都没打到的物体实例整体置 free。默认关闭，见 --lidar-filter
+            if visibility_filter is not None:
+                occupancy, actor_ids = visibility_filter.run(
+                    occupancy,
+                    actor_ids,
+                    {'x_range': X_RANGE, 'y_range': Y_RANGE, 'z_range': Z_RANGE, 'resolution': RESOLUTION},
+                    lidar_data,
+                    ego_id=vehicle.id
+                )
 
             voxel_time = (time.time() - step_start) * 1000
             print(f"  [5/6] 体素生成 + Flow + 过滤: {voxel_time:.1f}ms ⭐")
@@ -646,18 +657,20 @@ def main():
             mask_camera = None
             if depth_data is not None:
                 depth_dict = {cam['id']: depth_data[cam['id']]['data'] for cam in TESLA_CAMERAS}
-                if camera_vis is not None:
+                if camera_vis is not None and sem_data is not None:
                     t_mask = time.time()
                     # camera_vis.cameras 按 intrinsics.json 的 cam_i 顺序 = TESLA_CAMERAS 的 index 顺序
                     by_index = sorted(TESLA_CAMERAS, key=lambda c: c['index'])
-                    mask_camera, seen_through = camera_vis.analyze([depth_dict[c['id']] for c in by_index])
-                    # 静态物体 AABB 实心填充里相机视线明确穿过的部分改成 free (见 camera_visibility.py)
-                    n_carved = carve_static(occupancy, actor_ids, seen_through)
-                    print(f"  [5.5/6] 相机可见性掩码 + 自由空间雕刻: {(time.time()-t_mask)*1000:.0f}ms, "
-                          f"观测体素 {mask_camera.mean()*100:.1f}%, 雕掉 {n_carved:,} 个静态体素")
-            elif camera_vis is not None:
-                # 没有深度就没有掩码和雕刻，这一帧的真值和其他帧口径不一致，宁可丢掉
-                print(f"  ❌ 深度缺失，无法计算相机掩码,跳过")
+                    # 地面语义重绘 → 观测掩码 → 自由空间雕刻 (见 processing/camera_visibility.py)
+                    mask_camera, st = finalize_ground_truth(
+                        camera_vis, occupancy, actor_ids,
+                        [depth_dict[c['id']] for c in by_index],
+                        [sem_data[c['id']]['data'] for c in by_index])
+                    print(f"  [5.5/6] 相机侧后处理: {(time.time()-t_mask)*1000:.0f}ms, 观测体素 {st['observed']*100:.1f}%, "
+                          f"地面重绘 {st['ground_cols_repainted']:,} 列, 雕掉 {st['carved']:,} 个静态体素")
+            if camera_vis is not None and mask_camera is None:
+                # 没有深度/语义就没有掩码、重绘和雕刻，这一帧的真值和其他帧口径不一致，宁可丢掉
+                print(f"  ❌ 深度或语义分割缺失，无法做相机侧后处理,跳过")
                 ego_pose_prev = None
                 data_saver.generate_sample_id()
                 continue

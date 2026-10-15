@@ -639,8 +639,18 @@ class GroundTruthVoxelGenerator:
             return
 
         count_filled = 0
-        
-        for i, obj in enumerate(env_objs):
+
+        # 填充顺序：包围盒体积从大到小，小物体后填、覆盖大物体。AABB 重叠时更小的盒子更贴合真实几何——
+        # 树冠的大盒子会罩住树下停的车、长椅、花坛，先填树再填它们，它们才不会被标成植被
+        # (2026-10-14 逐像素核对：UE 渲染为 Car/Static 的表面点分别有 11%、37~47% 落在 vegetation 体素里)。
+        # 虚拟 ID 仍用 env_objs 里的原始下标 i (-(i+10000))，debug_actor_ids 反查不受影响。
+        def _bb_volume(o):
+            e = o.bounding_box.extent
+            return e.x * e.y * e.z
+        fill_order = sorted(range(len(env_objs)), key=lambda k: -_bb_volume(env_objs[k]))
+
+        for i in fill_order:
+            obj = env_objs[i]
             # 1. 类型过滤
             if obj.type not in static_type_mapping:
                 continue

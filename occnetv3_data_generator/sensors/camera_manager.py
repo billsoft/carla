@@ -13,15 +13,18 @@ from config.camera_config import TESLA_CAMERAS, CAMERA_SENSOR_CONFIG, DEPTH_SENS
 
 class CameraManager:
     """
-    管理8个RGB相机 + 8个深度相机, 支持 Bayer RGGB 转换
+    管理8个RGB相机 + 8个深度相机 (+ 可选 8 个语义分割相机), 支持 Bayer RGGB 转换
     """
 
-    def __init__(self, world: carla.World, vehicle: carla.Vehicle, enable_depth: bool = True):
+    def __init__(self, world: carla.World, vehicle: carla.Vehicle, enable_depth: bool = True,
+                 enable_semantic: bool = False):
         """
         Args:
             world: CARLA世界对象
             vehicle: 车辆actor
             enable_depth: 是否启用深度相机 (默认: True)
+            enable_semantic: 是否启用与深度相机同位姿的 UE 语义分割相机 (地面语义重绘用，
+                见 processing/camera_visibility.py paint_ground)
         """
         self.world = world
         self.vehicle = vehicle
@@ -30,11 +33,16 @@ class CameraManager:
         self.camera_configs = TESLA_CAMERAS
         self.data_queues = {}  # {cam_id: queue.Queue}
         self.depth_queues = {}  # {cam_id: queue.Queue} 深度数据队列
+        self.semantic_cameras = {}
+        self.semantic_queues = {}
         self.enable_depth = enable_depth
+        self.enable_semantic = enable_semantic
 
         self._setup_cameras()
         if self.enable_depth:
             self._setup_depth_cameras()
+        if self.enable_semantic:
+            self._setup_semantic_cameras()
 
     def _setup_cameras(self):
         """创建并附加8个相机 (等距投影/鱼眼相机, sensor.camera.rgb_fisheye)"""
@@ -205,6 +213,21 @@ class CameraManager:
 
         print(f"[CameraManager] 已创建 {len(self.depth_cameras)} 个深度相机 (与 RGB 重合)")
 
+    def _setup_semantic_cameras(self):
+        """8 个 UE 语义分割针孔相机，与深度相机同位姿、同分辨率、同 FOV (逐像素对应)"""
+        bp = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+        bp.set_attribute('image_size_x', str(DEPTH_SENSOR_CONFIG['image_size_x']))
+        bp.set_attribute('image_size_y', str(DEPTH_SENSOR_CONFIG['image_size_y']))
+        bp.set_attribute('sensor_tick', str(DEPTH_SENSOR_CONFIG['sensor_tick']))
+        for cam_config in self.camera_configs:
+            bp.set_attribute('fov', str(cam_config['depth_fov']))
+            pos, rot = cam_config['position'], cam_config['rotation']
+            transform = carla.Transform(carla.Location(x=pos[0], y=pos[1], z=pos[2]),
+                                        carla.Rotation(pitch=rot[0], yaw=rot[1], roll=rot[2]))
+            self.semantic_cameras[cam_config['id']] = self.world.spawn_actor(bp, transform, attach_to=self.vehicle)
+            self.semantic_queues[cam_config['id']] = queue.Queue(maxsize=2)
+        print(f"[CameraManager] 已创建 {len(self.semantic_cameras)} 个语义分割相机 (与深度相机重合)")
+
     def start_listening(self):
         """开始监听所有相机 (RGB + 深度)"""
         # RGB 相机
@@ -226,6 +249,10 @@ class CameraManager:
             print(f"[CameraManager] 已启动所有相机监听 (RGB: {len(self.cameras)}, Depth: {len(self.depth_cameras)})")
         else:
             print(f"[CameraManager] 已启动 RGB 相机监听 ({len(self.cameras)} 个)")
+
+        for cam_id, sem_camera in self.semantic_cameras.items():
+            weak_self = weakref.ref(self)
+            sem_camera.listen(lambda image, cid=cam_id: CameraManager._semantic_callback(weak_self, cid, image))
 
     @staticmethod
     def _camera_callback(weak_self, cam_id: str, image: carla.Image, raw_type: str):
@@ -267,6 +294,33 @@ class CameraManager:
 
         except Exception as e:
             print(f"[CameraManager] {cam_id} 回调错误: {e}")
+
+    @staticmethod
+    def _semantic_callback(weak_self, cam_id: str, image: carla.Image):
+        """语义分割图：BGRA，标签 (CityObjectLabel 编号) 在 R 通道"""
+        self = weak_self()
+        if self is None:
+            return
+        try:
+            a = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(image.height, image.width, 4)
+            q = self.semantic_queues[cam_id]
+            if q.full():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+            q.put({'data': a[:, :, 2].copy(), 'frame': image.frame})
+        except Exception as e:
+            print(f"[CameraManager] Semantic {cam_id} 回调错误: {e}")
+
+    def get_synced_semantic_frame(self, timeout: float = 2.0, frame: Optional[int] = None) -> Optional[Dict]:
+        """按帧号取 8 个语义分割相机的标签图 {cam_id: {'data': (H,W) uint8, 'frame'}}，失败返回 None"""
+        if not self.enable_semantic:
+            return None
+        try:
+            return {cid: self.get_frame_from_queue(q, timeout, frame) for cid, q in self.semantic_queues.items()}
+        except queue.Empty:
+            return None
 
     @staticmethod
     def _depth_callback(weak_self, cam_id: str, image: carla.Image):
@@ -466,6 +520,13 @@ class CameraManager:
                     except queue.Empty:
                         break
 
+        for q in self.semantic_queues.values():
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+
         print(f"[CameraManager] 已清空所有数据队列 (RGB + Depth)")
 
     def get_intrinsics(self, cam_id: str) -> np.ndarray:
@@ -577,8 +638,14 @@ class CameraManager:
             if depth_camera.is_alive:
                 depth_camera.destroy()
 
+        for sem_camera in self.semantic_cameras.values():
+            if sem_camera.is_alive:
+                sem_camera.destroy()
+
         self.cameras.clear()
         self.depth_cameras.clear()
+        self.semantic_cameras.clear()
         self.data_queues.clear()
         self.depth_queues.clear()
+        self.semantic_queues.clear()
         print(f"[CameraManager] 已销毁所有相机 (RGB + Depth)")

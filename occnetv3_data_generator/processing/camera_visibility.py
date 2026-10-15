@@ -24,6 +24,15 @@
   carve_margin + carve_rel×距离 以上 (默认 0.3m + 2%)。
 只雕刻静态类别；车辆/行人不雕 (深度相机透过车窗看进车内，车按实心盒标注是常规做法)；
 manmade 只雕体积小的物体 (杆/交通灯/路牌)，大楼不雕——深度同样透过玻璃幕墙，雕了立面会千疮百孔。
+任何相机拍到表面的体素也不雕 (半透明的树叶/铁丝网)。
+
+地面语义重绘 paint_ground()：地面类别 (路面/人行道/地形) 原本靠 Map API 推断 (车道中心线 + 车道宽度)，
+逐像素核对发现标成 terrain 的体素 84% 在 UE 渲染里其实是路面 (路肩/停车区/路口不在 Driving 车道里)，
+标成 sidewalk 的 35% 也是路面。这里用与深度相机同位姿的 UE 语义分割相机：地面类像素按深度反投影，
+在所在列里投票，票数最多的地面类别覆盖该列的全部地面体素 (表面 + 向下填充)。相机看不到的列保持
+Map API 结果 (训练时多半被掩码忽略)。
+
+finalize_ground_truth() 把 重绘 → 掩码 → 雕刻 串起来，main_collection.py 和 audit_labels.py 共用。
 
 深度相机是针孔 sensor.camera.depth (平面 z 深度)，水平 FOV = intrinsics.json 的 depth_fov
 (新数据，覆盖整幅鱼眼) 或 fov (旧数据，鱼眼四角没有覆盖)。
@@ -33,6 +42,11 @@ import math
 from pathlib import Path
 
 import numpy as np
+
+from config.occupancy_config import CARLA_TO_OCCUPANCY_MAPPING, GROUND_LABELS
+
+# UE 语义分割标签 (= CityObjectLabel 编号) → 地面类 (只取映射到 GROUND_LABELS 的那些)
+GROUND_TAG_TO_CLASS = {tag: c for tag, c in CARLA_TO_OCCUPANCY_MAPPING.items() if c in GROUND_LABELS}
 
 
 def save_mask(path, mask):
@@ -156,6 +170,7 @@ class CameraVisibility:
         """一次遍历同时返回 (观测掩码, 视线明确穿过的体素)，两者都是 (X, Y, Z) bool。"""
         flat = np.zeros(int(np.prod(self.shape)), dtype=bool)
         through = np.zeros_like(flat)
+        hit = np.zeros_like(flat)                 # 某个相机的表面点落进的体素
         half = 0.5 * self.res
         for cam, (vidx, pidx, vdepth), (ray_v, unit), depth in zip(self.cameras, self._proj, self._rays,
                                                                   depth_maps):
@@ -167,14 +182,58 @@ class CameraVisibility:
             d_min = _erode3(depth).reshape(-1)
             through[vidx[vdepth < d_min[pidx] - (carve_margin + carve_rel * vdepth)]] = True
             # (a) 表面命中
-            hit = d < self.max_hit_depth
-            dh = d[hit, None]
-            pts = ray_v[hit] * dh + cam['t'].astype(np.float32)
-            self._mark_points(flat, pts)
-            self._mark_points(flat, pts + unit[hit] * half)          # 视线往后半格 (竖直表面)
+            ok = d < self.max_hit_depth
+            pts = ray_v[ok] * d[ok, None] + cam['t'].astype(np.float32)
+            self._mark_points(hit, pts)
+            self._mark_points(hit, pts + unit[ok] * half)            # 视线往后半格 (竖直表面)
             pts[:, 2] -= half
-            self._mark_points(flat, pts)                             # 往下半格 (路面/地面)
+            self._mark_points(hit, pts)                              # 往下半格 (路面/地面)
+        flat |= hit
+        # 被任何一个相机拍到表面的体素不雕：树叶/铁丝网这类半透明物体，同一个体素可能一个相机拍到叶子、
+        # 另一个相机从叶缝看穿；没有这条时 13% 的植被表面点落进了被雕空的体素 (逐像素核对)
+        through &= ~hit
         return flat.reshape(self.shape), through.reshape(self.shape)
+
+
+    def paint_ground(self, occupancy, depth_maps, sem_maps, min_votes=2):
+        """用 UE 语义分割重绘地面列的类别 (原地修改 occupancy)。返回被改动的列数。"""
+        X, Y, Z = self.shape
+        classes = np.array(sorted(set(GROUND_TAG_TO_CLASS.values())), dtype=np.uint8)
+        cls_index = np.full(256, -1, np.int64)
+        lut = np.zeros(256, np.uint8)
+        for tag, c in GROUND_TAG_TO_CLASS.items():
+            lut[tag] = c
+            cls_index[tag] = int(np.flatnonzero(classes == c)[0])
+        votes = np.zeros(X * Y * len(classes), np.int32)
+        for cam, (ray_v, _), depth, sem in zip(self.cameras, self._rays, depth_maps, sem_maps):
+            d = np.asarray(depth, np.float32).reshape(-1)
+            t = np.asarray(sem).reshape(-1)
+            ok = (d < self.max_hit_depth) & (cls_index[t] >= 0)
+            pts = ray_v[ok] * d[ok, None] + cam['t'].astype(np.float32)
+            ix = np.floor((pts[:, 0] - self.x0) / self.res).astype(np.int64)
+            iy = np.floor((pts[:, 1] - self.y0) / self.res).astype(np.int64)
+            inb = (ix >= 0) & (ix < X) & (iy >= 0) & (iy < Y)
+            np.add.at(votes, (ix[inb] * Y + iy[inb]) * len(classes) + cls_index[t[ok][inb]], 1)
+        votes = votes.reshape(X, Y, len(classes))
+        total = votes.sum(2)
+        new = classes[votes.argmax(2)]                                   # (X, Y)
+        is_ground = np.isin(occupancy, GROUND_LABELS)
+        col = (total >= min_votes) & is_ground.any(2)
+        change = is_ground & col[..., None] & (occupancy != new[..., None])
+        occupancy[change] = np.broadcast_to(new[..., None], occupancy.shape)[change]
+        return int(np.count_nonzero(change.any(2)))
+
+
+def finalize_ground_truth(vis, occupancy, actor_ids, depth_maps, sem_maps=None):
+    """生成器输出之后的相机侧后处理 (原地修改 occupancy/actor_ids)：地面语义重绘 → 观测掩码 → 自由空间雕刻。
+    返回 (mask_camera, 统计 dict)。"""
+    stats = {}
+    if sem_maps is not None:
+        stats['ground_cols_repainted'] = vis.paint_ground(occupancy, depth_maps, sem_maps)
+    mask, through = vis.analyze(depth_maps)
+    stats['carved'] = carve_static(occupancy, actor_ids, through)
+    stats['observed'] = float(mask.mean())
+    return mask, stats
 
 
 def _erode3(img):

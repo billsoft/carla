@@ -14,10 +14,11 @@
 
 - 8 相机环视等距投影（equidistant fisheye）Bayer RAW 图像采集（Tesla 相机布局）
 - 深度图采集（与 RGB 相机重合，用于调试/校验，网络训练不直接用深度）
-- 256 线语义激光雷达点云采集
+- 与深度相机同位姿的 UE 语义分割相机（地面语义重绘、真值核对用，不保存）
 - 3D 占用网格真值生成（400×400×32 体素，18 类语义，对齐 nuScenes）
 - 场景流（Scene Flow）生成
-- 基于 LiDAR 的可见性过滤（遮挡剔除）
+- 相机可见性掩码 + 自由空间雕刻 + 地面语义重绘（相机侧后处理，见下文）
+- 256 线语义 LiDAR 实例过滤（旧方案，默认关闭，`--lidar-filter` 打开）
 
 ## 相机管线
 
@@ -275,9 +276,9 @@ occnetv3_data_generator/
 ## 主采集流程（`main_collection.py`）
 
 ```
-连接CARLA → 设同步模式(20Hz) → 生成ego车辆 → 生成NPC → 附加传感器(8相机+深度+LiDAR)
-  → 等传感器就绪 → 空跑 warmup → [World Tick×frame_skip → 按帧号取相机/深度/LiDAR → Ego Pose
-  → 体素生成 + Flow → LiDAR 实例过滤 → 相机自由空间雕刻 + 观测掩码 → 保存] × N帧
+连接CARLA → 设同步模式(20Hz) → 生成ego车辆 → 生成NPC → 附加传感器(8 鱼眼 + 8 深度 + 8 语义分割)
+  → 等传感器就绪 → 空跑 warmup → [World Tick×frame_skip → 按帧号取鱼眼/深度/语义 → Ego Pose
+  → 体素生成 + Flow → 相机侧后处理 (地面语义重绘 → 观测掩码 → 自由空间雕刻) → 保存] × N帧
 ```
 
 `setup_carla` 里设 `synchronous_mode=True, fixed_delta_seconds=0.05`（20Hz）——这是
@@ -294,8 +295,12 @@ simulator`），因为服务端不会等客户端的 tick 请求，是按自己�
 
 流程：初始化空网格 → 用 Map API 填充静态环境（地面/道路/建筑，地下层向下复制本列地表
 标签）→ 静态环境物体按世界 AABB 实心填充 → 按距离过滤（60m）+ OBB 光栅化填充动态 Actor
-→ 生成场景流 → 基于 LiDAR 点云的实例可见性过滤（ID 聚类保留 + 地面类强制保留）→ 相机自由空间
-雕刻 + 可见性掩码 `mask_camera`（见下一节）。逐帧调试输出默认关闭（`--verbose` 打开）。
+→ 生成场景流 → 相机侧后处理 `finalize_ground_truth`（见下一节）。静态环境物体按包围盒体积
+从大到小填充，小盒子覆盖大盒子（树冠盒子不再吞掉树下的车/长椅）。逐帧调试输出默认关闭（`--verbose`）。
+
+**LiDAR 实例过滤默认关闭（2026-10-14）**：`audit_labels.py` 逐像素核对发现，LiDAR（装在 1.0m）没打到
+的实例被整块删成 free，而相机看得见它们——UE 渲染为行人的表面点 85.6%、交通灯 67.8% 落在 free。
+遮挡由相机掩码处理，这个过滤只剩副作用；`--lidar-filter` 可恢复旧行为。
 
 ## 相机可见性掩码 `mask_camera`（label_version 2，2026-10-14）
 
@@ -332,7 +337,13 @@ Cache 命中率接近 100%）+ NumPy 向量化批量赋值替代逐体素 Python
 
 18 类语义标签（对齐 nuScenes）权威定义见 `config/occupancy_config.py`，不要在文档里
 再维护一份拷贝。`0: free` 在损失函数里权重必须 ≥1.0，`11: driveable_surface` 与
-`13: sidewalk` 在可见性过滤中强制保留。
+`13: sidewalk`：车/人正下方的最上层地面在训练时即使看不见也监督（`e2e_occ/dataset.py`）。
+
+**真值核对 `audit_labels.py`**：8 个相机位姿各挂针孔深度 + UE 语义分割相机，用与采集相同的流程生成真值，
+把每个语义像素按深度反投影到体素，统计"UE 说是什么 vs 体素标的是什么"。2026-10-14 Town10 5 帧
+（同一种子同一场景）：修复前语义一致 82.3%、落在 free 4.0%；关掉 LiDAR 过滤 + 地面语义重绘 + 雕刻保护
+表面体素 + 小盒子优先后 95.7% / 2.6%。剩余主要是接触面量化（轮胎/脚/楼底落进地面那层体素）、
+Rider 标成 bicycle（包围盒含骑手，nuScenes 同样做法）、部分路缘高度差（人行道表面点 11% 落在 free）。
 
 **label_version 2（2026-10-14，写在 `calibration/intrinsics.json` 顶层）**：交通灯/交通标志
 （`CityObjectLabel` 与旧版语义 ID 两条映射）、杆、墙 → `manmade(15)`；地面填充里车道边缘
@@ -427,7 +438,7 @@ python occnetv3_data_generator/batch_collection.py --host 192.168.100.81 --outpu
 
 train/val/test 按**场景**哈希划分（`OccNetDataSaver.scene_split`），追加场景不改变已有场景的归属，
 同一场景的帧不会跨 train/val。实测每帧约 48MB（DNG 20MB + float16 深度图 20MB + 体素/掩码/压缩流场 ~8MB），3000 帧约 145GB；
-抽帧 5 时约 17s/帧（中间步 16 路相机照样渲染），3000 帧约 14 小时。输出不要放 C 盘。每个场景开始前
+抽帧 5 时 Town10HD_Opt 约 13s/帧、Town15 约 25s/帧（大地图，切图加载约 1 分钟；中间步各相机照样渲染），两图各半 3000 帧约 16 小时。输出不要放 C 盘。每个场景开始前
 自动跑 `remote/reset_carla_world.py` 复位常驻服务端（被超时杀掉的子进程会把车/传感器/同步模式留在服务端上）。
 
 采集前需要 CARLA 编辑器已经进入 Play/PIE 状态（RPC 端口 2000 才会起来）。编辑器带

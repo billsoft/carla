@@ -234,7 +234,7 @@ GPU 读回没等完成、客户端反序列化按错误格式解析、16-bit 格
 
 详细架构、坑点、性能数据见其自带的 `README.md`（内容很完整，不要重复造轮子）。要点：
 - `main_collection.py` 是主入口，依赖本仓库自编译的 CARLA（上面的 Bayer RAW 增强），标准 CARLA 发行版跑不了。
-- 输出：8 相机 Bayer RAW DNG（Tesla 环视布局）+ 深度图 + 256 线语义 LiDAR + 400×400×32（0.2m/体素，X/Y ±40m，Z -1~5.4m）体素真值（18 类语义）+ 场景流。
+- 输出：8 相机 Bayer RAW DNG（Tesla 环视布局）+ 深度图 + 400×400×32（0.2m/体素，X/Y ±40m，Z -1~5.4m）体素真值（18 类语义）+ 场景流。
 - 相机布局在 `config/camera_config.py`，体素空间定义在 `config/occupancy_config.py`，CARLA `type_id` → 18 类语义的映射在 `config/actor_occupancy_mapping.py`。
 
 ```bash
@@ -271,7 +271,7 @@ python dataset_viewer_v2/server.py --dataset <dir>   # http://localhost:8085/
 - 时序样本不跨场景拼接；`camera_params/*.npz`（`dense_occupancy_collection` 格式）已不再支持。
 - DNG 位深（`main_collection.py --raw-bit-depth`，默认 12）从 `calibration/intrinsics.json` 顶层 `raw_bit_depth` 字段读取，不要在 `dataset.py` 里硬编码某个位深的归一化除数——这类硬编码曾经导致过采集侧改了位深、加载侧没跟着改的静默数值错误。
 
-18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 若将来在损失里加类别权重，其权重不得低于 1.0（当前 `e2e_occ/loss.py` 是无类别权重的 CE + Lovász）；`11: driveable_surface` 与 `13: sidewalk` 在可见性过滤中强制保留（训练时被车/人挡住的最上层地面仍监督，其余相机未观测体素忽略，见 `e2e_occ/dataset.py`）。
+18 类语义标签（对齐 nuScenes）的完整定义见 `occnetv3_data_generator/config/occupancy_config.py`（权威来源）；`0: free` 若将来在损失里加类别权重，其权重不得低于 1.0（当前 `e2e_occ/loss.py` 是无类别权重的 CE + Lovász）；车/人正下方最上层的 `11: driveable_surface`/`13: sidewalk` 等地面体素训练时即使看不见也监督（训练时被车/人挡住的最上层地面仍监督，其余相机未观测体素忽略，见 `e2e_occ/dataset.py`）。
 
 ---
 

@@ -1,15 +1,22 @@
 import argparse
+import math
 import os
+import random
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import E2EOccConfig
+from config import E2EOccConfig, upgrade_config
 from e2e_occ_net import build_model
 from loss import E2ELoss, sample_implicit_points, update_confusion, miou_from_confusion
+
+CLASS_NAMES = ['free', 'barrier', 'bicycle', 'bus', 'car', 'construction', 'motorcycle', 'pedestrian',
+               'traffic_cone', 'trailer', 'truck', 'driveable', 'other_flat', 'sidewalk', 'terrain',
+               'manmade', 'vegetation', 'general_obj']
 from dataset import get_dataloader
 
 # conda activate deepsys
@@ -89,21 +96,28 @@ def run_sequence(model, batch, criterion, config, device, amp_dtype, use_amp, tr
     return logs
 
 
+def optimizer_step(model, optimizer, scaler, scheduler):
+    scaler.unscale_(optimizer)
+    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    scaler.step(optimizer)
+    scaler.update()
+    scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
+
+
 def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, device, epoch, config, args, amp_dtype):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     totals, n = {}, 0
+    pending = 0                                   # 已累积梯度、还没 step 的 batch 数
     start = time.time()
     for i, batch in enumerate(loader):
         logs = run_sequence(model, batch, criterion, config, device, amp_dtype, args.amp, train=True,
                             tbptt=args.tbptt, grad_scale=args.grad_accum, scaler=scaler)
-        if (i + 1) % args.grad_accum == 0:
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
+        pending += 1
+        if pending == args.grad_accum:
+            optimizer_step(model, optimizer, scaler, scheduler)
+            pending = 0
         for k, v in logs.items():
             totals[k] = totals.get(k, 0.0) + v
         n += 1
@@ -111,6 +125,13 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, device, 
         print(f'Epoch {epoch} [{i + 1}/{len(loader)}] {msg} Time: {time.time() - start:.1f}s', flush=True)
         if args.max_steps and i + 1 >= args.max_steps:
             break
+    if pending:
+        # epoch 末尾凑不满 grad_accum 的 batch：之前直接在下个 epoch 开头 zero_grad 丢掉 (白算)。
+        # 梯度按 grad_accum 缩放过，这里补回实际 batch 数的比例再 step
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad.mul_(args.grad_accum / pending)
+        optimizer_step(model, optimizer, scaler, scheduler)
     return {k: v / max(1, n) for k, v in totals.items()}
 
 
@@ -128,9 +149,16 @@ def validate(model, loader, criterion, device, config, args, amp_dtype):
         if args.max_steps and i + 1 >= args.max_steps:
             break
     torch.cuda.empty_cache()
-    miou, _ = miou_from_confusion(confusion)
+    miou, iou = miou_from_confusion(confusion)
     out = {k: v / max(1, n) for k, v in totals.items()}
     out['miou'] = miou
+    present = (confusion.sum(1) > 0).tolist()
+    # 几何 IoU (占用/空，不分类别；Occ3D 常用的第二个指标)，只在观测体素上 (confusion 已排除 255)
+    occ_tp = confusion[1:, 1:].sum().item()
+    occ_union = confusion.sum().item() - confusion[0, 0].item()
+    out['geo_iou'] = occ_tp / max(1, occ_union)
+    out['per_class'] = ' '.join(f'{CLASS_NAMES[c]}={iou[c].item():.3f}' for c in range(1, config.num_classes)
+                                if present[c])
     return out
 
 
@@ -156,11 +184,15 @@ def main():
                              '显存与单帧相同）；2 及以上让梯度穿过记忆，显存按帧数线性增长')
     parser.add_argument('--compile', action='store_true', help='torch.compile（Windows 上 Triton 不稳定，仅供尝试）')
     parser.add_argument('--max_steps', type=int, default=0, help='每个 epoch 最多跑多少个 batch（冒烟测试用）')
+    parser.add_argument('--seed', type=int, default=0, help='随机种子 (样本顺序、隐式头采样点、参数初始化)')
     parser.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
                         help='覆盖配置字段，例如 --set use_sparse_fine=False head_type=implicit')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     amp_dtype = torch.bfloat16 if args.amp_dtype == 'bf16' else torch.float16
 
@@ -169,7 +201,7 @@ def main():
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if 'config' in ckpt:
-            config = ckpt['config']
+            config = upgrade_config(ckpt['config'])
     for kv in args.set:
         k, v = kv.split('=', 1)
         cur = getattr(config, k)
@@ -191,8 +223,31 @@ def main():
         print(f'已加载预训练骨干参数 {len(loadable)}/{len(sd)} 个')
 
     criterion = E2ELoss(config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # 偏置、归一化层、可学习位置/查询嵌入 (1 维参数) 不做 weight decay：对它们衰减只会把尺度往 0 拉
+    decay = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
+    no_decay = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+    optimizer = torch.optim.AdamW([{'params': decay, 'weight_decay': args.weight_decay},
+                                   {'params': no_decay, 'weight_decay': 0.0}], lr=args.lr)
     scaler = torch.amp.GradScaler('cuda', enabled=(args.amp and amp_dtype == torch.float16))
+
+    train_loader = get_dataloader(args.data_root, 'train', args.batch_size, args.num_workers, config)
+    val_loader = get_dataloader(args.data_root, 'val', args.batch_size, args.num_workers, config)
+
+    max_batches = min(len(train_loader), args.max_steps) if args.max_steps else len(train_loader)
+    steps_per_epoch = max(1, math.ceil(max_batches / args.grad_accum))
+    total_steps = steps_per_epoch * args.epochs
+    # 预热不超过总步数的 1/5：小数据集上默认 500 步预热可能比整个训练还长，学习率永远升不上去
+    warmup = min(args.warmup_steps, max(1, total_steps // 5))
+    if warmup < args.warmup_steps:
+        print(f'预热步数 {args.warmup_steps} 超过总优化步数 {total_steps} 的 1/5，改为 {warmup}')
+
+    def lr_lambda(step):
+        if step < warmup:
+            return (step + 1) / warmup
+        progress = min(1.0, (step - warmup) / max(1, total_steps - warmup))
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     start_epoch = 0
     best_miou = -1.0
@@ -200,23 +255,17 @@ def main():
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         start_epoch = ckpt['epoch'] + 1
-        best_miou = ckpt.get('miou', -1.0)
-        print(f'从 epoch {start_epoch - 1} 恢复')
-
-    train_loader = get_dataloader(args.data_root, 'train', args.batch_size, args.num_workers, config)
-    val_loader = get_dataloader(args.data_root, 'val', args.batch_size, args.num_workers, config)
-
-    steps_per_epoch = max(1, len(train_loader) // args.grad_accum)
-    total_steps = steps_per_epoch * args.epochs
-
-    def lr_lambda(step):
-        if step < args.warmup_steps:
-            return (step + 1) / args.warmup_steps
-        progress = (step - args.warmup_steps) / max(1, total_steps - args.warmup_steps)
-        return 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.141592653589793)).item())
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda,
-                                                  last_epoch=start_epoch * steps_per_epoch - 1 if ckpt else -1)
+        # 之前用 ckpt['miou']：从 last_model 恢复时那是最后一个 epoch 的分数而不是历史最好，
+        # 之后更差的模型也可能覆盖 best_model.pth
+        best_miou = ckpt.get('best_miou', ckpt.get('miou', -1.0))
+        if 'scheduler' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler'])
+        else:                                     # 旧 checkpoint：按 epoch 推算步数
+            for _ in range(start_epoch * steps_per_epoch):
+                scheduler.step()
+        if 'scaler' in ckpt:
+            scaler.load_state_dict(ckpt['scaler'])
+        print(f'从 epoch {start_epoch - 1} 恢复 (历史最好 mIoU {best_miou:.4f})')
 
     train_model = torch.compile(model) if args.compile else model
     print(f'模型参数量: {model.get_num_params() / 1e6:.2f}M | 样本: train {len(train_loader.dataset)} '
@@ -229,13 +278,17 @@ def main():
 
         va = validate(model, val_loader, criterion, device, config, args, amp_dtype)
         print(f"Epoch {epoch}: train_total={tr.get('total', 0):.4f} val_total={va.get('total', 0):.4f} "
-              f"val_mIoU={va['miou']:.4f} lr={optimizer.param_groups[0]['lr']:.2e}", flush=True)
+              f"val_mIoU={va['miou']:.4f} val_geoIoU={va['geo_iou']:.4f} lr={optimizer.param_groups[0]['lr']:.2e}",
+              flush=True)
+        print(f"  per-class IoU: {va['per_class']}", flush=True)
 
+        is_best = va['miou'] > best_miou
+        best_miou = max(best_miou, va['miou'])
         state = {'epoch': epoch, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
-                 'loss': va.get('total', 0.0), 'miou': va['miou'], 'config': config}
+                 'scheduler': scheduler.state_dict(), 'scaler': scaler.state_dict(),
+                 'loss': va.get('total', 0.0), 'miou': va['miou'], 'best_miou': best_miou, 'config': config}
         torch.save(state, os.path.join(args.output_dir, 'last_model.pth'))
-        if va['miou'] > best_miou:
-            best_miou = va['miou']
+        if is_best:
             torch.save(state, os.path.join(args.output_dir, 'best_model.pth'))
             print(f'Saved best model at epoch {epoch} (mIoU {best_miou:.4f})', flush=True)
 

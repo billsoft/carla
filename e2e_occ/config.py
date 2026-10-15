@@ -112,3 +112,12 @@ class E2EOccConfig:
     @property
     def num_fine_queries(self) -> int:
         return self.fine_size[0] * self.fine_size[1] * self.fine_size[2]
+
+
+def upgrade_config(cfg):
+    """checkpoint 里存的是 pickle 的配置对象：旧 checkpoint 缺少后来新增的字段 (如 use_camera_mask)，
+    --set 覆盖或 inference 读字段时会 AttributeError。按当前字段表重建，缺的字段用默认值。"""
+    if cfg is None:
+        return E2EOccConfig()
+    default = E2EOccConfig()
+    return E2EOccConfig(**{k: getattr(cfg, k, getattr(default, k)) for k in E2EOccConfig.__dataclass_fields__})

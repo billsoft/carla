@@ -9,8 +9,8 @@ train/val/test 按场景名哈希划分 (data_saver.scene_split)，每个场景�
         --towns Town10HD_Opt Town15 --scenes-per-town 10 --frames 150 --frame-skip 5
 
 每个场景 150 帧 × 抽帧 5 = 37.5 秒行驶；10 场景 × 2 地图 = 3000 帧。实测 (test_v2)：每帧约 48MB
-(8 DNG ~20MB + 8 张 float16 深度图 ~20MB + 体素/掩码/压缩流场 ~8MB)，3000 帧约 145GB；速度约 17s/帧
-(抽帧时中间步的 16 路相机照样渲染)，3000 帧约 14 小时。输出务必放在空间足够的盘 (不要放 C 盘)。
+(8 DNG ~20MB + 8 张 float16 深度图 ~20MB + 体素/掩码/压缩流场 ~8MB)，3000 帧约 145GB；速度 Town10HD_Opt 约 13s/帧、
+Town15 约 25s/帧 (抽帧时中间步的各路相机照样渲染)，两图各半 3000 帧约 16 小时。输出务必放在空间足够的盘 (不要放 C 盘)。
 每个场景开始前都用 remote/reset_carla_world.py 复位常驻服务端。
 """
 import argparse
@@ -57,8 +57,8 @@ def main():
     ap.add_argument('--seed', type=int, default=1000, help='场景 i 用 seed+i，整批可复现')
     ap.add_argument('--raw-bit-depth', type=int, default=12)
     ap.add_argument('--scene-name', default='scene')
-    ap.add_argument('--sec-per-tick', type=float, default=5.0,
-                    help='超时估算用的每仿真步秒数 (实测 16 路相机约 2.5s/步，留一倍余量)；'
+    ap.add_argument('--sec-per-tick', type=float, default=8.0,
+                    help='超时估算用的每仿真步秒数 (实测 Town10 约 2.6s/步、Town15 约 5s/步，留余量)；'
                          '子进程超时 = (frames×frame_skip + warmup)×此值 + 600s')
     args = ap.parse_args()
 

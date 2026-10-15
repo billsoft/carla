@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from config import E2EOccConfig
+from config import upgrade_config
 from e2e_occ_net import build_model
 from dataset import OccupancyDataset, _SAMPLE_RE, default_calibration
 
@@ -22,7 +22,7 @@ class OccInference:
     def __init__(self, checkpoint_path, device='cuda'):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        self.config = ckpt.get('config', E2EOccConfig())
+        self.config = upgrade_config(ckpt.get('config'))
         self.model = build_model(self.config).to(self.device)
         self.model.load_state_dict(ckpt['model'])
         self.model.eval()
@@ -67,7 +67,7 @@ class OccInference:
 def run_inference_on_dataset(checkpoint_path, data_root, output_dir, split='val', num_samples=100,
                              device='cuda', save_flow=False):
     engine = OccInference(checkpoint_path, device=device)
-    cfg = E2EOccConfig(**{k: getattr(engine.config, k) for k in E2EOccConfig.__dataclass_fields__})
+    cfg = upgrade_config(engine.config)
     # 推理逐帧读取，时序记忆由这里自己携带；不需要加载深度/流场真值
     cfg.use_temporal = False
     cfg.use_depth_aux = False

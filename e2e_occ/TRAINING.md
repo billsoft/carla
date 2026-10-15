@@ -79,11 +79,14 @@ tbptt=1 时 `loss·w/w` 会把加权完全抵消）。
   回注到当前帧输出（否则 GRU 输出只在被 detach 的下一帧用到，永远没有梯度）。
   `--tbptt 2+` 让梯度穿过记忆，显存按帧数线性增长。
 - **混合精度**：`--amp_dtype bf16`（默认）不需要 loss scaling；`fp16` 时启用 `GradScaler`。
-- **学习率**：AdamW(lr=2e-4, wd=0.01)，前 `--warmup_steps`(500) 步线性 warmup，之后按优化步
-  余弦退火（不再是每 epoch 一步）。
-- 梯度裁剪 1.0；`--grad_accum` 梯度累积。
-- **验证**：计算各损失项 + **mIoU**（不含 0:free，与 Occ3D 等基准一致）；按 mIoU 保存
-  `best_model.pth`，每个 epoch 另存 `last_model.pth`。
+- **学习率**：AdamW(lr=2e-4, wd=0.01；偏置/归一化/1 维嵌入参数不做 weight decay)，前 `--warmup_steps`(500)
+  步线性 warmup（不超过总优化步数的 1/5，小数据集上自动缩短），之后按优化步余弦退火。
+- 梯度裁剪 1.0；`--grad_accum` 梯度累积，epoch 末尾凑不满一组的 batch 按实际个数缩放后也会 step（不再丢弃）。
+- `--seed` 固定样本顺序/隐式采样/初始化。
+- **验证**：各损失项 + **mIoU**（不含 0:free，与 Occ3D 等基准一致）+ **几何 IoU**（占用/空二分类）+ 每类 IoU，
+  都只在相机观测体素上统计。按 mIoU 保存 `best_model.pth`，每个 epoch 另存 `last_model.pth`。
+- **断点恢复** `--resume last_model.pth`：恢复模型、优化器、学习率调度器、GradScaler 状态和历史最好 mIoU
+  （2026-10-14 前只存了当前 epoch 的 mIoU，从 last 恢复后更差的模型可能覆盖 best）。
 - 隐式头（`head_type=implicit`）训练时每帧采样 `implicit_train_points`(262,144) 个点：
   一半来自非空体素，一半均匀随机；验证时对整个网格分块查询。
 
