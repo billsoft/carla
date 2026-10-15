@@ -59,3 +59,25 @@ def bbox_world_vertices(bb, actor_transform=None):
         return local
     m = transform_to_matrix(actor_transform)
     return local @ m[:3, :3].T + m[:3, 3]
+
+
+def bbox_frame(bb, actor_transform=None):
+    """carla.BoundingBox 的盒子坐标系：返回 (中心世界坐标 [3], R [3,3] 盒子局部轴 → 世界)。
+
+    环境物体 (actor_transform=None) 的 bounding_box 已在世界坐标，但**带旋转**：UE5.8
+    BoundingBoxCalculator::ApplyTransformToBB 保留了组件旋转 (Town10 实测 76% 的环境物体包围盒旋转不为 0，
+    植被 97%、停放车辆 68%)。Actor 的 bounding_box 在 Actor 局部坐标，同样可能带 bb.rotation。
+    体素判定、裁剪范围、流场都必须用同一个盒子坐标系，见 points_in_bbox。
+    """
+    c = np.array([bb.location.x, bb.location.y, bb.location.z], dtype=np.float64)
+    r_bb = rotation_matrix(bb.rotation.pitch, bb.rotation.yaw, bb.rotation.roll)
+    if actor_transform is None:
+        return c, r_bb
+    m = transform_to_matrix(actor_transform)
+    return m[:3, :3] @ c + m[:3, 3], m[:3, :3] @ r_bb
+
+
+def points_in_bbox(points_world, center, R, half_extent):
+    """points_world [N,3] 是否在盒内 (盒子局部坐标 |p_local| <= half_extent，half_extent 可含膨胀量)。"""
+    local = (np.asarray(points_world, dtype=np.float64) - center) @ R       # 世界 → 盒子局部 (R 正交)
+    return np.all(np.abs(local) <= np.asarray(half_extent, dtype=np.float64), axis=1)

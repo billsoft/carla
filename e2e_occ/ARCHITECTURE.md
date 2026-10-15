@@ -87,6 +87,7 @@ images [B,8,1,960,1280]
 | P1 | `use_flow_head` | True | 无流场输出 |
 | P1 | `cam_visibility_norm` | True | 8 相机直接累加（重构前行为） |
 | P2 | `use_sparse_fine` / `fine_keep_ratio` | True / 0.25 | 102,400 个细查询全部做交叉注意力 |
+| P2 | `fine_select_mode` / `fine_select_quota` | `'topk'` / (0.5,0.25,0.25) | `'mixed'`：名额拆成 占用最高/最不确定/最近场，对照实验用 |
 | P2 | `temporal_attn_type` | `'deformable'` | `'global'`：5000×5000 全局注意力 |
 | P2 | `use_time_embedding` | True | — |
 | P2 | `head_type` | `'dense'` | `'implicit'`：可查询隐式头 |
@@ -109,6 +110,19 @@ RTX 4090，batch=1，bf16 autocast，随机输入。测量时机器上有其他�
 单帧训练 forward+loss+backward 约 3~5 s（`profile_network.py` 分阶段：decoder 前向约 2 s、
 backward 约 2.2 s）。这些是结构/资源数字，不是精度指标；mIoU 需要在真实数据集上完整训练后测量。
 
+## 6.5 数值精度与推理开销（2026-10-15 评审后修复）
+
+- **几何一律 FP32**：混合精度 (bf16 autocast) 会把投影里的 einsum 降成 BF16，实测细网格投影误差中位 0.97px、
+  P95 3.45px、最大 7.6px 并有可见性翻转。现在 `geometry.no_autocast()` 包住相机投影、射线反投影、射线 Fourier
+  编码、时序记忆对齐；所有几何采样走 `geometry.grid_sample_fp32()`（特征与坐标都 FP32）。卷积/注意力/FFN
+  仍为混合精度。代价：训练峰值显存约 +1.9GB（采样用的 value 以 FP32 保存给反向），推理不变。
+- **BN 与梯度检查点**：稠密头检查点反向重算时用 `voxel_head.frozen_bn_stats` 冻结 BN 统计，否则每个 batch
+  被计入两次，训练态/推理态归一化不一致。
+- **推理只算需要的**：`model(..., need_aux=None, need_flow=True)`，`need_aux` 默认等于 `self.training`——eval
+  时不算深度辅助头（约占 14% 运算量）；`need_flow=False` 不算流场分支。`OccInference.predict(to_cpu=False)`
+  结果留在设备上，接下游网络时不做每帧几十 MB 的回传。
+- 回归检查见 `verify_network.py` 第 5 节。
+
 ## 7. 未实现 / 推迟的项
 
 | 项 | 原因 |
@@ -116,3 +130,5 @@ backward 约 2.2 s）。这些是结构/资源数字，不是精度指标；mIoU
 | Mamba / SSM 记忆 | `mamba-ssm` 依赖 Triton/CUDA 自定义核，在 Windows 上基本不可用；当前 GRU + 局部时序注意力保留 |
 | 世界模型式预训练（预测未来占用） | 需要独立的训练管线和评估方式；占用流头已覆盖部分"动态"监督 |
 | `torch.compile` 默认开启 | Windows 上 Triton 不稳定，只提供 `train.py --compile` 选项 |
+| 视觉大模型教师蒸馏、BEV/channel-to-height 轻量输出头、全稀疏表示 | 先用完整数据集训出基线，再用距离分段/小目标召回/长时序指标做同预算对照 (2026-10-15 评审建议) |
+| 输出 latent 特征 + 观测有效性 + 不确定性给下游规划 | 端到端衔接阶段再定接口；`mask_camera` 已提供观测有效性的真值 |

@@ -8,7 +8,7 @@ import numpy as np
 import math
 
 # 不用客户端 get_matrix()/get_world_vertices()：5.5 客户端的 pitch/roll 符号与 UE 渲染相反，见 transform_utils.py
-from processing.transform_utils import transform_to_matrix, bbox_world_vertices
+from processing.transform_utils import transform_to_matrix, bbox_world_vertices, bbox_frame, points_in_bbox
 from config.occupancy_config import (
     CARLA_TO_OCCUPANCY_MAPPING
 )
@@ -27,8 +27,11 @@ class GroundTruthVoxelGenerator:
                  y_range=(-40.0, 40.0),  # ⭐ 更新默认值
                  z_range=(-1.0, 5.4),
                  resolution=0.2,  # ⭐ 修正默认值: 0.5 -> 0.2
-                 verbose=False):
+                 verbose=False, legacy=False):
         self.verbose = verbose
+        # legacy=True 复现 2026-10-15 之前的两处几何错误 (静态包围盒按世界轴对齐判定、地面高度 = h - ego.z)，
+        # 只给 audit_labels.py --legacy 做同一场景的 A/B 对比用，采集不要开
+        self.legacy = legacy
         self.x_range = x_range
         self.y_range = y_range
         self.z_range = z_range
@@ -44,6 +47,10 @@ class GroundTruthVoxelGenerator:
         # Key: (int(world_x/resolution), int(world_y/resolution)) - 使用体素分辨率网格索引
         # Value: {'label': 11/13/14, 'z': world_z}
         self.ground_cache = {}
+        # 每帧填进网格的静态环境物体：虚拟 ID → 原始包围盒体积 (m³)。相机侧雕刻按物体真实尺寸判断
+        # "小物体"，而不是按裁剪进网格后剩下的体素数 (网格边缘的大楼会被截成"小物体")
+        self.static_object_volume = {}
+        self.static_object_rotated = {}        # 虚拟 ID → 包围盒是否带旋转 (审计统计用)
         # self.cache_resolution = 0.5 # Deprecated: use self.resolution
 
         # ⭐ 添加验证
@@ -52,126 +59,59 @@ class GroundTruthVoxelGenerator:
             print(f"[警告] 体素网格尺寸 {self.grid_size} 与标准 {expected_grid_size} 不一致")
 
         
-    def generate_flow(self, world, ego_vehicle, dt=0.05):
+    def generate_flow(self, world, ego_vehicle, actor_ids, dt=0.05):
         """
         生成 3D 场景流 (Scene Flow) 和 动态掩码 (Flow Mask)
 
-        Flow = 物体自身的世界速度旋转到当前自车坐标系 × dt (OpenOcc/Occ3D 占用流约定)：
+        Flow = 物体上该点在帧间隔 dt 内的世界位移，旋转到当前自车坐标系 (OpenOcc/Occ3D 占用流约定)：
+            位移 = (v + ω × (p - c)) · dt     v/ω 为 Actor 的世界线速度/角速度，c 为 Actor 原点
         停着的车 flow=0，和旁边的建筑一致；自车自己的运动由 ego_motion 单独表达。
-        2026-10-14 之前是"物体速度 - 自车速度"(相对速度)，结果停着的车 flow=-v_ego·dt 而
-        建筑恒为 0，同一个静止世界里两种物体的流场互相矛盾。
-        
+        - 2026-10-14 之前是"物体速度 - 自车速度"(相对速度)，停着的车与建筑的流场互相矛盾。
+        - 2026-10-15：(1) 只写在最终语义体素里属于该 Actor 的体素上 (actor_ids 归属)，不再按原始包围盒
+          另做一遍光栅化——之前车辆语义按 95% 盒子、流场按 100% 盒子，多出来的一圈 free 体素被赋了车速；
+          (2) 加角速度项，转弯车辆的各点位移不同 (实测 0.05s 内车角点误差 4.0cm → 0.5cm，抽帧 0.25s 时差距更大)。
+          仍是"当前速度外推"，不是相邻帧的精确对应：急加速/急转弯、行人肢体等非刚体运动有残差。
+
         Args:
             world: carla.World
             ego_vehicle: carla.Actor (hero vehicle)
-            dt: float, 帧间时间 (秒)
-            
+            actor_ids: (X, Y, Z) int32，generate() 返回的体素实例归属 (真实 Actor 为正 ID)，
+                       需与最终保存的 occupancy 一致 (相机侧后处理之后)
+            dt: float, 相邻保存帧的时间间隔 (秒)
+
         Returns:
-            flow: (3, X, Y, Z) float32 array - 位移向量 (dx, dy, dz)
-            flow_mask: (X, Y, Z) bool array - 动态区域掩码
+            flow: (3, X, Y, Z) float32 array - 位移向量 (dx, dy, dz)，自车坐标系，米
+            flow_mask: (X, Y, Z) bool array - 属于车辆/行人的体素
         """
         flow = np.zeros((3,) + tuple(self.grid_size), dtype=np.float32)
         flow_mask = np.zeros(self.grid_size, dtype=bool)
-        
-        ego_transform = ego_vehicle.get_transform()
-        grid_to_world_matrix = transform_to_matrix(ego_transform)
-        
-        # World -> Grid (Ego) 旋转矩阵 (3x3)
-        # V_ego = R_world_to_ego * V_world
-        # R_world_to_ego = R_grid_to_world.T (因为是正交矩阵)
-        world_to_grid_rot = grid_to_world_matrix[:3, :3].T
-        
-        # 获取所有动态 Actor
+
+        idx = np.nonzero(actor_ids > 0)
+        if len(idx[0]) == 0:
+            return flow, flow_mask
+        ids = actor_ids[idx]
+        grid_to_world = transform_to_matrix(ego_vehicle.get_transform())
+        world_to_grid_rot = grid_to_world[:3, :3].T
+        centers = np.stack([self.x_range[0] + (idx[0] + 0.5) * self.resolution,
+                            self.y_range[0] + (idx[1] + 0.5) * self.resolution,
+                            self.z_range[0] + (idx[2] + 0.5) * self.resolution], axis=1)
+        pts_world = centers @ grid_to_world[:3, :3].T + grid_to_world[:3, 3]
+
         actors = world.get_actors()
-        vehicles = actors.filter('vehicle.*')
-        walkers = actors.filter('walker.pedestrian.*')
-        dynamic_actors = list(vehicles) + list(walkers)
-        
-        # 遍历动态 Actor
-        for actor in dynamic_actors:
-            # 距离粗筛
-            if actor.get_location().distance(ego_vehicle.get_location()) > 60.0:
+        for aid in np.unique(ids):
+            actor = actors.find(int(aid))
+            if actor is None or not (actor.type_id.startswith('vehicle.') or actor.type_id.startswith('walker.')):
                 continue
-                
-            # 1. 获取 Actor 速度 (World Frame)
-            v_actor_world = actor.get_velocity()
-            v_actor_vec_world = np.array([v_actor_world.x, v_actor_world.y, v_actor_world.z])
-            
-            # 2. 物体自身速度 (不减自车速度) 旋转到当前自车坐标系，× dt 得到位移
-            displacement = (world_to_grid_rot @ v_actor_vec_world) * dt
-            
-            # 5. 填充 Flow Grid (Rasterize Actor BBox)
-            # 复用 _fill_actor_bb 的逻辑，但不修改 occupancy，而是填充 flow
-            # 为了代码复用，我们将核心光栅化逻辑提取出来，或者简化处理
-            # 这里简化处理：直接光栅化 BBox
-            
-            try:
-                bb = actor.bounding_box
-                actor_transform = actor.get_transform()
-            except:
-                continue
-
-            # World -> Grid Transform
-            try:
-                world_to_grid_matrix = np.linalg.inv(grid_to_world_matrix)
-            except np.linalg.LinAlgError:
-                continue
-
-            verts_world = bbox_world_vertices(bb, actor_transform)  # [8, 3]
-            
-            verts_world_np = np.concatenate([verts_world, np.ones((8, 1))], axis=1).T
-            verts_grid_np = world_to_grid_matrix @ verts_world_np
-            
-            xs, ys, zs = verts_grid_np[0, :], verts_grid_np[1, :], verts_grid_np[2, :]
-            
-            min_ix = max(0, int(np.floor((np.min(xs) - self.x_range[0]) / self.resolution)))
-            max_ix = min(self.grid_size[0], int(np.ceil((np.max(xs) - self.x_range[0]) / self.resolution)))
-            min_iy = max(0, int(np.floor((np.min(ys) - self.y_range[0]) / self.resolution)))
-            max_iy = min(self.grid_size[1], int(np.ceil((np.max(ys) - self.y_range[0]) / self.resolution)))
-            min_iz = max(0, int(np.floor((np.min(zs) - self.z_range[0]) / self.resolution)))
-            max_iz = min(self.grid_size[2], int(np.ceil((np.max(zs) - self.z_range[0]) / self.resolution)))
-            
-            if min_ix >= max_ix or min_iy >= max_iy or min_iz >= max_iz:
-                continue
-                
-            # 简化版 OBB 检测 (为了速度，直接使用 AABB 填充 Flow)
-            # 如果需要更精确，可以复制 _fill_actor_bb 的 OBB 逻辑
-            # 考虑到 Flow 主要是用于运动补偿，AABB 覆盖通常是可以接受的，
-            # 或者我们可以复用 occupancy 的 mask (如果先生成了 occupancy)
-            # 但这里是独立的 flow 生成。
-            
-            # 使用简单的 AABB 填充
-            # flow[:, min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = displacement[:, None, None, None]
-            # flow_mask[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz] = True
-            
-            # 为了更精确，我们还是使用 OBB check (复制简化版)
-            lx = self.x_range[0] + (np.arange(min_ix, max_ix) + 0.5) * self.resolution
-            ly = self.y_range[0] + (np.arange(min_iy, max_iy) + 0.5) * self.resolution
-            lz = self.z_range[0] + (np.arange(min_iz, max_iz) + 0.5) * self.resolution
-            sub_xv, sub_yv, sub_zv = np.meshgrid(lx, ly, lz, indexing='ij')
-            sub_points_grid = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
-            
-            sub_points_world = sub_points_grid @ grid_to_world_matrix.T
-            box_matrix_inv = np.linalg.inv(transform_to_matrix(actor_transform))
-            points_in_actor = sub_points_world[:, :3] @ box_matrix_inv[:3, :3].T + box_matrix_inv[:3, 3]
-            
-            in_x = np.abs(points_in_actor[:, 0] - bb.location.x) <= bb.extent.x
-            in_y = np.abs(points_in_actor[:, 1] - bb.location.y) <= bb.extent.y
-            in_z = np.abs(points_in_actor[:, 2] - bb.location.z) <= bb.extent.z
-            mask_in = (in_x & in_y & in_z).reshape(max_ix-min_ix, max_iy-min_iy, max_iz-min_iz)
-            
-            if np.any(mask_in):
-                # 填充 Flow
-                # displacement shape: (3,)
-                # target slice shape: (3, nx, ny, nz)
-                flow_slice = flow[:, min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
-                # Broadcast displacement to mask
-                for i in range(3):
-                    flow_slice[i][mask_in] = displacement[i]
-                
-                flow_mask_slice = flow_mask[min_ix:max_ix, min_iy:max_iy, min_iz:max_iz]
-                flow_mask_slice[mask_in] = True
-
+            sel = ids == aid
+            vel, ang = actor.get_velocity(), actor.get_angular_velocity()
+            v = np.array([vel.x, vel.y, vel.z])
+            omega = np.radians([ang.x, ang.y, ang.z])     # CARLA 给 deg/s；符号已用转弯车辆实测验证
+            c = transform_to_matrix(actor.get_transform())[:3, 3]
+            disp_world = (v + np.cross(omega, pts_world[sel] - c)) * dt
+            disp = disp_world @ world_to_grid_rot.T
+            sub = tuple(a[sel] for a in idx)
+            flow[(slice(None),) + sub] = disp.T
+            flow_mask[sub] = True
         return flow, flow_mask
 
     def generate(self, world, ego_vehicle):
@@ -384,6 +324,10 @@ class GroundTruthVoxelGenerator:
                 wp = map_instance.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
                 if wp:
                     wp_loc = wp.transform.location
+                    if not self.legacy:
+                        # 车道外的地形默认取最近车道的高度，而不是自车所在路面的高度：丘陵地图 (Town15) 上
+                        # 离自车几十米的地形可能高低差好几米。相机看得见的列之后还会按观测高度再对齐
+                        z = wp_loc.z
                     dist = math.sqrt((wx - wp_loc.x)**2 + (wy - wp_loc.y)**2)
                     half_width = wp.lane_width / 2.0
 
@@ -452,11 +396,24 @@ class GroundTruthVoxelGenerator:
             hit_rate = hit_mask.sum() / len(hit_mask) * 100
             self._dbg(f"  [向量化填充] Cache命中率: {hit_mask.sum()}/{len(hit_mask)} ({hit_rate:.1f}%)")
 
-        # 计算 Z 索引
-        # ⭐⭐⭐ FIX: 使用 round() 替代 floor (int cast) ⭐⭐⭐
-        # 解决 Z 值在体素边界附近时产生的 1-voxel 抖动 (Random Gray Layer)
-        flat_gz = final_z_world - ego_location.z
-        flat_iz = np.round((flat_gz - self.z_range[0]) / self.resolution).astype(int)
+        # 计算 Z 索引：每个网格列是自车坐标系里的一条竖线 P(z) = P0 + z·u (P0 = 该列 z=0 处的世界点，
+        # u = 自车 z 轴在世界中的方向)，与世界地表高度 h 的交点 z = (h - P0.z) / u.z。
+        # 2026-10-15 前用的是 h - ego.z，只在车身水平时成立：车停在 10° 坡上时，前方 20m 的地面在自车
+        # 坐标里应在 z≈0，却被放到 z≈3.5m，地面保护规则还会把车/人的体素截掉 (Town15 有起伏)。
+        # 交点的水平漂移 z·u.xy (坡度 10°、|z|≤5m 时 ≤0.9m) 处的高度差忽略不计。
+        # ⭐ round() 而不是 floor：避免 Z 值在体素边界附近的 1 格抖动
+        up = grid_to_world_matrix[:3, 2]
+        if self.legacy:
+            flat_gz = final_z_world - ego_location.z
+        else:
+            flat_gz = (final_z_world - points_world_h[:, 2]) / max(up[2], 1e-3)
+        # 地表所在的最上层地面体素 = 中心低于地表高度的最高那一格 (与包围盒"体素中心在实体内"的判定一致)。
+        # 2026-10-15 前用 round((h - z0)/res)：地表 h=0 时得到覆盖 [0, 0.2m] 的那一格，整层地面比真实路面高
+        # 一个体素 (20cm)；留出相机实测 19% 的路面体素被视线从上方穿过。legacy 模式保留旧公式做 A/B
+        if self.legacy:
+            flat_iz = np.round((flat_gz - self.z_range[0]) / self.resolution).astype(int)
+        else:
+            flat_iz = (np.ceil((flat_gz - self.z_range[0]) / self.resolution - 0.5) - 1).astype(int)
 
         # 过滤有效 Z
         valid_z_mask = (flat_iz >= 0) & (flat_iz < self.grid_size[2])
@@ -661,9 +618,8 @@ class GroundTruthVoxelGenerator:
 
             occ_label = static_type_mapping[obj.type]
             
-            # 2. 距离过滤
-            # obj.transform.location 是世界坐标
-            dist = obj.transform.location.distance(ego_location)
+            # 2. 距离过滤 (用包围盒中心：交通灯等物体的 transform 与可见几何能差好几米)
+            dist = obj.bounding_box.location.distance(ego_location)
             
             # ⭐ 关键修改：增加到 100m 以覆盖整个体素网格范围 (此前为 60m)
             # 网格范围通常是 [-50, 50] 或类似，100m 足够覆盖对角线
@@ -671,13 +627,10 @@ class GroundTruthVoxelGenerator:
                 continue
                 
             # 3. 获取 Bounding Box 顶点 (World Frame)
-            # 经过调试发现：UE5 CARLA 0.10.0 中，EnvironmentObject.bounding_box 已经是世界坐标 (World Space AABB)
-            # 与 get_level_bbs 返回的一致。
-            # 因此，不能再应用 obj.transform，否则会导致双重变换（物体飞到天上或消失）
+            # EnvironmentObject.bounding_box 的中心与朝向已经在世界坐标 (不能再乘 obj.transform，否则双重变换)，
+            # 但它**不是**轴对齐盒：bb.rotation 保留了组件旋转，判定必须在盒子局部坐标里做 (见 bbox_frame)
             bb = obj.bounding_box
-            
-            # 使用 Identity Transform 获取世界顶点 (因为 BB 已经是 World AABB)
-            verts_world = bbox_world_vertices(bb, None)  # [8, 3]
+            verts_world = bbox_world_vertices(bb, None)  # [8, 3]，已含 bb.rotation
             
             # 4. 转换到 Grid Frame (对齐世界坐标轴)
             verts_world_np = np.concatenate([verts_world, np.ones((8, 1))], axis=1).T
@@ -732,19 +685,14 @@ class GroundTruthVoxelGenerator:
             sub_xv, sub_yv, sub_zv = np.meshgrid(lx, ly, lz, indexing='ij')
             sub_points_grid = np.stack([sub_xv, sub_yv, sub_zv, np.ones_like(sub_xv)], axis=-1).reshape(-1, 4)
             
-            # Grid -> World -> Local
-            # T_obj_inv * T_grid * P_grid
-            # 注意：由于 bb 已经是 World AABB，我们不需要转换到 Local Object Space
-            # 我们只需要检查 World Points 是否在 World AABB 内
-            # 也就是检查 abs(P_world - BB_Center) <= BB_Extent
-            
             # Grid -> World
             sub_points_world_h = sub_points_grid @ grid_to_world_matrix.T
             sub_points_world = sub_points_world_h[:, :3]
-            
-            # World AABB Check
-            # bb.location is World Center
-            diff = np.abs(sub_points_world - np.array([bb.location.x, bb.location.y, bb.location.z]))
+            # 2026-10-15 前这里按"世界轴对齐盒"判定 abs(P - 中心) <= extent，忽略了 bb.rotation：
+            # 转 45° 的细长护栏大半体素漏掉、转 90° 的物体长宽对调 (Town10 76% 的包围盒带旋转)
+            box_center, box_R = bbox_frame(bb, None)
+            if self.legacy:
+                box_R = np.eye(3)
             
             # ⭐ 关键改进：保守光栅化 (Conservative Rasterization)
             # 只要体素与物体有任何重叠，就应该被选中。
@@ -764,11 +712,8 @@ class GroundTruthVoxelGenerator:
                 padding = 0.0 # 大物体不需要额外 padding，中心点足够
             
             # 对于细小物体（Pole/Sign），我们希望它是"实心"的
-            in_x = diff[:, 0] <= (bb.extent.x + padding)
-            in_y = diff[:, 1] <= (bb.extent.y + padding)
-            in_z = diff[:, 2] <= (bb.extent.z + padding)
-            
-            mask_in = in_x & in_y & in_z
+            mask_in = points_in_bbox(sub_points_world, box_center, box_R,
+                                     (bb.extent.x + padding, bb.extent.y + padding, bb.extent.z + padding))
             
             if not np.any(mask_in):
                 continue
@@ -795,7 +740,10 @@ class GroundTruthVoxelGenerator:
             # 这里使用枚举索引生成唯一的小整数 ID
             # 加上 10000 偏移量，避免与潜在的小负数 ID 冲突
             virtual_id = -(i + 10000)
-            
+            self.static_object_volume[virtual_id] = 8.0 * bb.extent.x * bb.extent.y * bb.extent.z
+            self.static_object_rotated[virtual_id] = bool(
+                abs(bb.rotation.pitch) > 0.5 or abs(bb.rotation.roll) > 0.5 or abs(bb.rotation.yaw) > 0.5)
+
             roi[final_mask] = occ_label
             roi_ids[final_mask] = virtual_id
             
@@ -1015,23 +963,11 @@ class GroundTruthVoxelGenerator:
         # Step 1: Grid -> World (纯平移)
         sub_points_world = all_samples_h @ grid_to_world_matrix.T
 
-        # Step 2: World -> Actor Local (用于BBox内点检测)
-        box_matrix = transform_to_matrix(actor_transform)
-        try:
-            box_matrix_inv = np.linalg.inv(box_matrix)
-        except np.linalg.LinAlgError:
-            return
-            
-        points_in_actor = sub_points_world @ box_matrix_inv.T # (N*S, 4)
-        
-        # Subtract bb.location (which is local offset in actor frame)
-        # Note: In actor local frame, bb center is usually at (0,0,0) + bb.location
-        # But carla.BoundingBox.location is relative to actor origin.
-        # So points_in_actor is relative to actor origin.
-        # We need to shift by bb.location to center it around (0,0,0) for extent check.
-        rel_x = points_in_actor[:, 0] - bb.location.x
-        rel_y = points_in_actor[:, 1] - bb.location.y
-        rel_z = points_in_actor[:, 2] - bb.location.z
+        # Step 2: World -> 盒子局部坐标 (Actor 变换 + bb.location + bb.rotation，与静态物体、流场共用 bbox_frame；
+        # 之前只做了 Actor 变换，bb.rotation 不为 0 时盒子朝向错)
+        box_center, box_R = bbox_frame(bb, actor_transform)
+        local = (sub_points_world[:, :3] - box_center) @ box_R
+        rel_x, rel_y, rel_z = local[:, 0], local[:, 1], local[:, 2]
         
         # Determine Label first (needed for adaptive extent)
         if is_ego:

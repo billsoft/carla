@@ -149,7 +149,7 @@ def survey_environment_objects(world):
     for label, count in sorted(by_label.items(), key=lambda x: -x[1]):
         if label == carla.CityObjectLabel.Any:
             continue
-        mapped = CITY_OBJECT_MAPPING.get(label)
+        mapped = CITY_OBJECT_MAPPING.get(int(label))
         status = 'OK' if mapped is not None else 'GAP'
         if status == 'GAP':
             unmapped.append(label)

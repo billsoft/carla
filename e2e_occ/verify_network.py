@@ -32,7 +32,7 @@ from deformable_attention import get_reference_points
 from position_encoding import pixel_rays_vehicle
 from geometry import equidistant_project, equidistant_unproject, M_CV_TO_UE
 from temporal_fusion import TemporalFusionModule
-from loss import E2ELoss
+from loss import E2ELoss, miou_from_confusion
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 FAILS = []
@@ -106,9 +106,9 @@ def verify_shapes(name, cfg, write_table=None):
 
     def run():
         with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE.type == 'cuda'):
-            o1 = model(img, K, T)
+            o1 = model(img, K, T, need_aux=True)            # eval 默认不算深度辅助头，这里要验证其形状
             o2 = model(img, K, T, memory=o1['memory'], ego_motion=em,
-                       time_delta=torch.full((B,), cfg.frame_dt, device=DEVICE))
+                       time_delta=torch.full((B,), cfg.frame_dt, device=DEVICE), need_aux=True)
         outs['o1'], outs['o2'] = o1, o2
 
     if DEVICE.type == 'cuda':
@@ -364,6 +364,60 @@ def verify_train_step(name, cfg):
     return peak
 
 
+def verify_regressions():
+    """2026-10-15 评审发现并修复的问题，各自留一个回归检查。"""
+    header('5. 回归检查（混合精度几何 / BN 检查点 / 多 batch 时序 / 推理开销 / mIoU）')
+    import copy
+    cfg = E2EOccConfig()
+    K, T, _ = default_calibration(cfg.num_cameras, cfg.image_size)
+    K, T = K.unsqueeze(0).to(DEVICE), T.unsqueeze(0).to(DEVICE)
+    from geometry import voxel_centers
+    pts = voxel_centers(cfg.fine_size, cfg.voxel_range).unsqueeze(0).to(DEVICE)
+    r32, v32 = get_reference_points(pts, K, T, cfg.image_size)
+    ray32 = pixel_rays_vehicle(K, T, 120, 160, 8)
+    with torch.autocast(DEVICE.type, dtype=torch.bfloat16, enabled=DEVICE.type == 'cuda'):
+        r, v = get_reference_points(pts, K, T, cfg.image_size)
+        ray = pixel_rays_vehicle(K, T, 120, 160, 8)
+    err = ((r - r32) * torch.tensor([cfg.image_size[1] / 2, cfg.image_size[0] / 2], device=DEVICE)).norm(dim=-1)
+    check(r.dtype == torch.float32 and err[v & v32].max().item() < 1e-3 and bool((v == v32).all()),
+          f'bf16 autocast 下投影保持 FP32 (最大误差 {err[v & v32].max().item():.2e}px，可见性一致)')
+    check((ray - ray32).abs().max().item() < 1e-6, 'bf16 autocast 下射线方向保持 FP32')
+
+    model = build_model(cfg).to(DEVICE)
+    head = model.head.train()
+    if hasattr(head, 'conv1'):
+        ref = copy.deepcopy(head)
+        ref.config = copy.copy(cfg)
+        ref.config.checkpoint_head = False
+        bns = [m for m in head.modules() if isinstance(m, nn.BatchNorm3d)]
+        bns_ref = [m for m in ref.modules() if isinstance(m, nn.BatchNorm3d)]
+        n0 = int(bns[0].num_batches_tracked)
+        x = torch.randn(1, 20, 20, 4, cfg.embed_dim, device=DEVICE)
+        for h in (head, ref):
+            xi = x.clone().requires_grad_()
+            h(xi)['semantic'].float().mean().backward()
+        diff = max((a.running_var - b.running_var).abs().max().item() for a, b in zip(bns, bns_ref))
+        check(int(bns[0].num_batches_tracked) - n0 == 1 and diff < 1e-6,
+              f'梯度检查点重算不重复更新 BN 统计 (计数 +{int(bns[0].num_batches_tracked) - n0}，running_var 差 {diff:.1e})')
+
+    model.eval()
+    imgs = torch.rand(2, 2, cfg.num_cameras, 1, *cfg.image_size, device=DEVICE)
+    try:
+        with torch.no_grad(), torch.autocast(DEVICE.type, dtype=torch.bfloat16, enabled=DEVICE.type == 'cuda'):
+            out = model(imgs[:, 0], K.expand(2, -1, -1, -1), T.expand(2, -1, -1, -1), need_flow=False)
+        check(out['semantic'].shape[0] == 2, 'B=2 不连续时间切片 images[:, t] 前向正常')
+        check(out['depth_logits'] is None and out['flow'] is None, 'eval 默认不算深度辅助头；need_flow=False 不算流场')
+    except RuntimeError as e:
+        check(False, f'B=2 不连续时间切片前向: {str(e)[:80]}')
+    del model, imgs
+    if DEVICE.type == 'cuda':
+        torch.cuda.empty_cache()
+
+    c = torch.zeros(cfg.num_classes, cfg.num_classes, dtype=torch.long)
+    c[0, 0], c[1, 1], c[0, 2] = 1000, 100, 50          # 类别 1 全对，free 被错报成真值里没有的类别 2
+    check(abs(miou_from_confusion(c)[0] - 0.5) < 1e-6, 'mIoU 计入凭空预测出的类别 (=0.5，旧实现为 1.0)')
+
+
 def variant(**kw):
     c = E2EOccConfig()
     for k, v in kw.items():
@@ -379,6 +433,7 @@ def main():
 
     verify_geometry()
     verify_temporal_alignment()
+    verify_regressions()
 
     report = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shape_report.md')
     with open(report, 'w', encoding='utf-8') as f:

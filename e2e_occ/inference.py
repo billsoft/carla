@@ -29,9 +29,12 @@ class OccInference:
         print(f'[Inference] Model loaded from {checkpoint_path} ({self.config.head_type} head)')
 
     @torch.no_grad()
-    def predict(self, images, intrinsics, extrinsics, memory=None, ego_motion=None, frame_dt=None):
+    def predict(self, images, intrinsics, extrinsics, memory=None, ego_motion=None, frame_dt=None,
+                need_flow=False, to_cpu=True):
         """images [B,N,1,H,W]、intrinsics [B,N,3,3]、extrinsics [B,N,4,4]（Camera(cv)→Vehicle）
-        返回 (pred [B,X,Y,Z] uint8 numpy, flow [B,3,X,Y,Z] 或 None, new_memory)"""
+        返回 (pred [B,X,Y,Z] uint8, flow [B,3,X,Y,Z] 或 None, new_memory)。
+        need_flow=False 时不算流场分支；to_cpu=False 时 pred/flow 留在设备上 (接下游网络时避免每帧
+        几十 MB 的回传)，to_cpu=True 时转 numpy。深度辅助头推理时不计算。"""
         cfg = self.config
         B = images.shape[0]
         dt = cfg.frame_dt if frame_dt is None else frame_dt
@@ -39,9 +42,12 @@ class OccInference:
         with torch.autocast('cuda', dtype=torch.bfloat16, enabled=(self.device.type == 'cuda')):
             out = self.model(images.to(self.device), intrinsics.to(self.device), extrinsics.to(self.device),
                              memory=memory, ego_motion=None if ego_motion is None else ego_motion.to(self.device),
-                             time_delta=td)
-        pred = out['semantic'].argmax(dim=1).cpu().numpy().astype(np.uint8)
-        flow = out['flow'].float().cpu().numpy() if out.get('flow') is not None else None
+                             time_delta=td, need_aux=False, need_flow=need_flow)
+        pred = out['semantic'].argmax(dim=1).to(torch.uint8)
+        flow = out.get('flow') if need_flow else None
+        if to_cpu:
+            pred = pred.cpu().numpy()
+            flow = flow.half().cpu().numpy() if flow is not None else None
         return pred, flow, out['memory']
 
     def benchmark(self, num_runs=50, warmup=5):
@@ -51,16 +57,17 @@ class OccInference:
         img = torch.rand(1, cfg.num_cameras, 1, *cfg.image_size, device=self.device)
         mem = None
         for _ in range(warmup):
-            _, _, mem = self.predict(img, K, T, mem, torch.eye(4).unsqueeze(0) if mem is not None else None)
+            _, _, mem = self.predict(img, K, T, mem, torch.eye(4).unsqueeze(0) if mem is not None else None,
+                                     to_cpu=False)
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         start = time.time()
         for _ in range(num_runs):
-            _, _, mem = self.predict(img, K, T, mem, torch.eye(4).unsqueeze(0))
+            _, _, mem = self.predict(img, K, T, mem, torch.eye(4).unsqueeze(0), to_cpu=False)
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         fps = num_runs / (time.time() - start)
-        print(f'FPS: {fps:.2f}, Latency: {1000 / fps:.2f}ms（含 argmax 与回传 CPU）')
+        print(f'FPS: {fps:.2f}, Latency: {1000 / fps:.2f}ms（含 argmax，不含回传 CPU；不算流场和深度辅助头）')
         return fps
 
 
@@ -97,7 +104,7 @@ def run_inference_on_dataset(checkpoint_path, data_root, output_dir, split='val'
         else:
             memory = None
         pred, flow, memory = engine.predict(frame['images'].unsqueeze(0), K, E, memory, ego_motion,
-                                            frame_dt=ds.frame_dt(sid))
+                                            frame_dt=ds.frame_dt(sid), need_flow=save_flow)
         np.save(out_dir / 'occupancy' / f'{sid}.npy', pred[0])
         if save_flow and flow is not None:
             np.save(out_dir / 'flow' / f'{sid}.npy', flow[0].astype(np.float16))
@@ -113,7 +120,7 @@ def run_inference_on_dataset(checkpoint_path, data_root, output_dir, split='val'
 def main():
     p = argparse.ArgumentParser(description='E2E Occupancy Inference')
     p.add_argument('--checkpoint', required=True)
-    p.add_argument('--data_root', default='d:/code/carla/dataset_10k_bak')
+    p.add_argument('--data_root', default='D:/carla_datasets/occ_v2')
     p.add_argument('--output', default='d:/code/carla/inference_results')
     p.add_argument('--split', default='val')
     p.add_argument('--num_samples', type=int, default=100)

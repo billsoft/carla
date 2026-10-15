@@ -10,7 +10,7 @@ from pathlib import Path
 
 # 配置
 BASE_URL = "http://localhost:8085"
-DATASET_PATH = r"d:\code\carla\dataset_10k_bak"
+DATASET_PATH = r"D:\carla_datasets\occ_v2"
 
 def test_cache_performance():
     """测试缓存性能"""

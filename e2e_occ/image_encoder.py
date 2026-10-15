@@ -151,7 +151,7 @@ class ImageEncoder(nn.Module):
         B, N, C, H, W = feat.shape
         return feat + self.ray_embed(intrinsics, extrinsics, H, W, stride)
 
-    def forward(self, feats, intrinsics=None, extrinsics=None):
+    def forward(self, feats, intrinsics=None, extrinsics=None, need_depth=True):
         f16 = self._add_rays(feats[16], 16, intrinsics, extrinsics)
         B, N, C, H, W = f16.shape
 
@@ -174,7 +174,7 @@ class ImageEncoder(nn.Module):
             f32 = self._add_rays(f32, 32, intrinsics, extrinsics)
             out[8] = f8
             out[32] = f32
-        if self.config.use_depth_aux:
+        if self.config.use_depth_aux and need_depth:      # 深度头只是训练辅助监督，推理不算 (~14% 运算量)
             ds = self.config.depth_stride
             fd = out[ds]
             d = self.depth_head(fd.flatten(0, 1))

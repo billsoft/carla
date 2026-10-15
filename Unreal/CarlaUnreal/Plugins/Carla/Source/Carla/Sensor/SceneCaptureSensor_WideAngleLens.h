@@ -60,6 +60,15 @@ public:
     return FaceSize;
   }
 
+  /// 运动模糊 (motion_blur_intensity / _max_distortion / _min_object_screen_size)，BeginPlay 时应用到 6 个面。
+  /// Intensity <= 0 时直接关掉运动模糊显示开关。
+  void SetMotionBlur(float Intensity, float MaxDistortion, float MinObjectScreenSize)
+  {
+    MotionBlurIntensity = Intensity;
+    MotionBlurMaxDistortion = MaxDistortion;
+    MotionBlurMinObjectScreenSize = MinObjectScreenSize;
+  }
+
   uint32 GetImageWidth() const
   {
     return ImageWidth;
@@ -223,6 +232,13 @@ public:
     CubemapSampler = NewCubemapSampler;
   }
 
+  /// RGB 相机专用 (构造函数里设)：cube 面关掉时序抗锯齿、按 Carla.WideAngleLens.FaceOversample 倍角密度渲染，
+  /// 畸变 shader 对每个输出像素做面积积分。标签/深度相机保持 false
+  void SetSupersampleDistortion(bool bEnable)
+  {
+    bSupersampleDistortion = bEnable;
+  }
+
   const FRHISamplerState* GetCubemapSampler() const
   {
     return CubemapSampler;
@@ -334,6 +350,24 @@ protected:
   /// recomputed (FOV, image size, camera model, FOV mask toggle...).
   void UpdateFrontFaceProjection();
 
+  /// 镜头覆盖分析（2026-10-15）：用与 WideAngleLens.usf MainCS 完全相同的 像素→射线 公式
+  /// （显式内参 / 焦距+主点 / 各镜头模型），扫描输出图像的全部边界像素和内部网格，得到
+  /// 实际需要渲染的 cube 面掩码 OutMask，以及落在前向面上的射线最大切线 OutMaxFrontTan
+  /// （UpdateFrontFaceProjection 按它收窄前向面）。LUT1D 与 FOV 圆形掩码模式不走这里。
+  void ComputeLensCoverage(uint8& OutMask, float& OutMaxFrontTan) const;
+
+  /// 单个输出像素（与 shader 一样用整数像素坐标）→ 相机系射线方向（x 前、y 右、z 上）。
+  FVector PixelToRay(float Px, float Py) const;
+
+  /// 每个 cube 面渲染目标的边长：FaceSize>0 时为它；否则为 BeginPlay 按镜头有效像素密度推算的 AutoFaceSide
+  /// （见 ComputeRequiredFaceSide）；都没有时为 max(宽, 高)。
+  uint32 GetFaceSide() const;
+
+  /// 按"有效像素"推算 cube 面边长：逐点用 PixelToRay 把相邻输出像素投到它所在的 cube 面上，要求面纹素间距
+  /// 不大于输出像素间距 / Oversample (Carla.WideAngleLens.FaceOversample)。同样分辨率下视场越窄，焦距越长，
+  /// 需要的面纹素越密——与物理相机一致，而不是固定边长的面被裁剪放大。6 个面统一用这一个边长。
+  uint32 ComputeRequiredFaceSide() const;
+
   void CaptureSceneExtended();
 
   virtual void BeginPlay() override;
@@ -395,9 +429,17 @@ protected:
   UPROPERTY(EditAnywhere)
   float XFOVAngle;
 
-  // Cube-face render target side, 0 = max(ImageWidth, ImageHeight).
+  // Cube-face render target side, 0 = derived from the lens (AutoFaceSide).
   UPROPERTY(EditAnywhere)
   int32 FaceSize = 0;
+
+  // Face side derived from the lens' angular pixel density in BeginPlay (0 = not computed yet).
+  uint32 AutoFaceSide = 0;
+
+  // Motion blur applied to every face in BeginPlay (blueprint defaults: 0.45 / 0.35 / 0.1).
+  float MotionBlurIntensity = 0.45F;
+  float MotionBlurMaxDistortion = 0.35F;
+  float MotionBlurMinObjectScreenSize = 0.1F;
 
   UPROPERTY(EditAnywhere)
   float YFocalLength;
@@ -443,4 +485,5 @@ protected:
   bool bRenderEquirectangular : 1;
   bool bFOVMaskEnable : 1;
   bool bExplicitIntrinsics : 1;
+  bool bSupersampleDistortion = false;
 };

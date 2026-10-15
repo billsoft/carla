@@ -96,3 +96,42 @@ Bayer RAW 输出（C++），16 路相机要整体换成 rt_lens/rt_lens_distance
 **修复**：相机可见性掩码 `mask_camera`（训练忽略未观测体素，Occ3D 约定）、语义映射修正、深度相机 `depth_fov`
 覆盖整幅鱼眼、DNG 标签补全、按帧号对齐传感器数据、`--frame-skip`、批量采集按场景划分。详见
 `occnetv3_data_generator/README.md` 的"相机可见性掩码"与"label_version 2"两节。旧数据需重采才能得到新标签。
+
+---
+
+## 7. 🟡 服务端在 RPC 线程崩溃退出（2026-10-15，有自动恢复规避）
+
+**现象**：81 上的服务端无人操作时自行退出。日志 `D:\carla-server\Windows\CarlaUnreal\Saved\Logs\CarlaUnreal.log`：
+`std::deque<clmdep_msgpack::v1::sbuffer>::_Xlen()`（rpclib 发送队列长度溢出异常）→ AbortHandler。
+发生在一次 Town15 采集结束、客户端销毁全部 actor 约 1 分钟后，当时只剩 81 桌面上的 `CARLA-Viewer` 预览连着。
+此前（2026-10-14）也出现过一次"预览窗口首次连接时数组越界崩溃"，疑似同一类与预览客户端相关的 RPC 并发问题。
+
+**规避**：`batch_collection.py --auto-restart` 每个场景前检查服务端，连不上自动 `carla_remote.ps1 -Action restart`。
+
+**待查**：用 Development 包的 PDB 符号还原完整调用栈；复现条件（切大地图 + 预览客户端在线 + 清空 actor）；
+必要时批量采集期间先停掉 81 上的 `CARLA-Viewer` 任务对比。
+
+---
+
+## 8. 🟢 长焦相机源捕获面的余量 / 显式内参 / 纹理流送（2026-10-15）
+
+背景：单面长焦（`front_main` 50°、`front_narrow` 35°）2026-08 起已按自身视场拍前向 cube face
+（`CustomProjectionMatrix`），是真正的角分辨率提升，不是裁切放大。2026-10-15 评审指出三处可改进，已在
+`SceneCaptureSensor_WideAngleLens.cpp` 修复：
+
+- **捕获范围按射线边界推导**：新增 `PixelToRay()`/`ComputeLensCoverage()`，用与 `WideAngleLens.usf` 完全相同的
+  像素→射线公式（显式内参 / 焦距+主点 / 各镜头模型）扫描输出图像全部边界像素和内部网格，前向面半视角 =
+  atan(最大切线 × (1 + 3/面边长))（1.5 个源纹素的双线性余量）。之前是 `max(FOV)·0.5·√2` 的经验余量：
+  35° 长焦源捕获面 49.5°、50° 主相机 70.7°；现在约 35.7° / 51.9°，同样 1280 的源纹理覆盖更窄的角度，
+  中心源采样密度再提高约 1.4 倍。
+- **显式内参不再关闭长焦增益**：之前 `!bExplicitIntrinsics` 才允许收窄；选面也只看 FOV 字段，显式内参视野
+  比 FOV 字段宽时 shader 会采样没渲染的面。现在选面与收窄都来自同一份射线覆盖（LUT1D、FOV 圆形掩码
+  仍走旧逻辑）。`SetPrincipalPoint()` 也会重新计算。
+- **纹理流送按实际投影报告**：`PrePhysTick` 用面边长与实际捕获半角调用 `AddViewInformation`，前向面组件
+  `FOVAngle` 也同步为实际捕获角（之前固定 90°，长焦放大了远处物体，流送仍按宽视野估算）。
+
+Python 侧：`camera_manager.py` 8 台相机共用一个蓝图对象，逐相机的可选镜头参数（fx/fy/cx/cy、fov_horizontal、
+k0~k3）每台先恢复默认再覆盖，避免串到下一台。
+
+**仍未做**：曝光共享的测光区域是前向源面，不等于最终鱼眼画面（广角相机侧面明暗代表性不足）；
+Bayer RAW 仍来自色调映射后的 LDR（问题 3）。

@@ -47,6 +47,9 @@ class E2EOccConfig:
     frame_dt: float = 0.05                  # 相邻帧时间间隔（秒）的默认值；数据集 scenes/<scene>.json 有 frame_dt
                                             # (抽帧采集) 时以数据集为准，按样本作为 time_delta 传入
 
+    # --- 数据 ---
+    data_strict: bool = True                # 数据缺件直接报错 (见 dataset.py 文件头)；调试旧数据时设 False 降级并告警
+
     # --- 真值监督范围（相机可见性掩码，见 dataset.py 文件头）---
     use_camera_mask: bool = True            # 相机没观测到的体素不监督（Occ3D 约定），需要 mask_camera/
     camera_mask_keep_ground_surface: bool = True   # 被车/人挡住的最上层地面体素仍监督（路面连续可推断）
@@ -69,6 +72,11 @@ class E2EOccConfig:
     # ===================== P2 =====================
     use_sparse_fine: bool = True            # 稀疏细化：只对粗阶段预测占用概率最高的 top-k 细体素做交叉注意力
     fine_keep_ratio: float = 0.25           # 稀疏细化保留比例
+    # 稀疏细化的选点方式：'topk' = 只按粗占用概率取前 K (基线)；'mixed' = 名额按 fine_select_quota 拆成
+    # (占用概率最高, 占用最不确定, 离自车最近) 三份。路面/建筑占满 top-k 名额、粗阶段拿不准的小物体
+    # 反而没被细化是 'topk' 的已知风险，'mixed' 用于对照实验，先用验证集的小目标召回/近场漏报决定是否换默认
+    fine_select_mode: str = 'topk'
+    fine_select_quota: Tuple[float, ...] = (0.5, 0.25, 0.25)
     coarse_occ_loss_weight: float = 1.0     # 粗阶段占用概率（稀疏选择依据）的 BCE 损失权重
     temporal_attn_type: str = 'deformable'  # 'deformable'（对齐后局部采样）| 'global'（原 5000×5000 全局注意力）
     temporal_points: int = 8                # 局部时序注意力每头采样点数

@@ -19,6 +19,12 @@ OccNetV3 数据集加载（occnetv3_data_generator 格式）。
   被建筑挡住、或只是在视线外的地面不保留；地面往下填充的整列始终忽略。
 - 帧间隔：scenes/<scene>.json 的 frame_dt（采集抽帧后不再是 0.05s），作为 time_delta [T] 返回。
 
+2026-10-15 严格校验（config.data_strict，默认开）：缺 train/val/test.txt、缺标定、任何样本缺 occupancy /
+图像 / ego_pose / mask_camera (label_version≥2) / 深度 (开深度监督时) / 流场 (开流场头时)，构造数据集时
+直接报错并列出缺件。以前这些情况都静默降级 (两个划分都扫描全部 occupancy → 训练/验证泄漏；缺真值当成全
+free；缺图补零；缺位姿用单位阵；缺掩码改成全体素监督)，训练照跑、指标看起来正常。批量采集中断留下的残缺
+样本最容易触发。调试旧数据时 `--set data_strict=False` 恢复降级行为 (每类降级只告警一次)。
+
 已弃用的 dense_occupancy_collection 格式（camera_params/*.npz）不再支持。
 """
 
@@ -53,14 +59,18 @@ GROUND_LABELS = (11, 12, 13, 14)        # driveable_surface / other_flat / sidew
 DYNAMIC_LABELS = (2, 3, 4, 5, 6, 7, 9, 10)   # bicycle/bus/car/工程车/motorcycle/pedestrian/trailer/truck
 
 
-def ground_surface_keep(occ):
+def ground_surface_keep(occ, observed=None):
     """(X,Y,Z) uint8 → bool：车/人正下方那一列最上面的地面类体素 (被它们挡住的路面，连续可推断)。
-    只看"上方有动态物体"的列——上方是空的列不在这里放行，否则被建筑挡住的远处地面也会被重新监督。"""
+    只看"上方有动态物体"的列——上方是空的列不在这里放行，否则被建筑挡住的远处地面也会被重新监督。
+    给了 observed 时还要求上方那辆车/那个人本身在这一列被相机观测到：整辆车都被楼挡住时，车下的路面
+    不属于"看得见的车下面可推断的路"，不放行 (2026-10-15 评审)。这是补全先验，不是直接观测。"""
     gnd = np.isin(occ, GROUND_LABELS)
     zs = np.arange(occ.shape[2])
     top = np.where(gnd.any(2), (gnd * zs).max(2), -1)                    # (X, Y)
-    dyn_above = (np.isin(occ, DYNAMIC_LABELS) & (zs[None, None, :] > top[..., None])).any(2)
-    return gnd & (zs[None, None, :] == top[..., None]) & ((top >= 0) & dyn_above)[..., None]
+    dyn = np.isin(occ, DYNAMIC_LABELS) & (zs[None, None, :] > top[..., None])
+    if observed is not None:
+        dyn &= observed
+    return gnd & (zs[None, None, :] == top[..., None]) & ((top >= 0) & dyn.any(2))[..., None]
 
 
 def load_camera_mask(path, z_size):
@@ -116,25 +126,82 @@ class OccupancyDataset(Dataset):
         self.use_camera_mask = bool(getattr(config, 'use_camera_mask', True)) if config else True
         self.keep_ground_surface = bool(getattr(config, 'camera_mask_keep_ground_surface', True)) if config else True
         self.default_frame_dt = float(getattr(config, 'frame_dt', 0.05)) if config else 0.05
+        self.strict = bool(getattr(config, 'data_strict', True)) if config else True
+        self._warned = set()
 
         self.samples = self._load_samples()
         self.index = self._build_sequence_index()
         self.intrinsics, self.extrinsics, self.depth_hfov = self._load_calibration()
         self.raw_bit_depth = self._load_raw_bit_depth()
         self._depth_maps = {}
-        self._warned = set()
         self.scene_frame_dt = self._load_scene_frame_dt()
-        self._check_label_version()
+        self.label_version = self._check_label_version()
+        self._validate_files()
 
     # ------------------------------------------------------------------
     # 样本与序列索引
     # ------------------------------------------------------------------
+
+    def _missing(self, key, msg):
+        """数据缺件：严格模式直接报错，否则每类只告警一次并按调用方的降级方式继续。"""
+        if self.strict:
+            raise FileNotFoundError(f'{msg}\n(调试旧数据可 --set data_strict=False 改为告警并降级)')
+        self._warn_once(key, msg)
+
+    def _validate_files(self):
+        """构造时检查每个样本训练要用到的文件是否齐全 (只查存在性，几千帧也很快)。"""
+        need_mask = self.use_camera_mask and self.label_version >= 2
+        missing = []
+        # 采集侧写入协议 (occnetv3_data_generator/data_utils/data_saver.py)：有 write_protocol.json 的数据集，
+        # 除协议创建前就在盘上的旧帧外，每帧必须有完成标记 meta/<sid>.json 且其中记录的文件大小与磁盘一致——
+        # 覆盖写到一半失败的帧 (新体素 + 旧图像) 单看文件存在/非空查不出来
+        legacy = None
+        proto = os.path.join(self.data_root, 'write_protocol.json')
+        if os.path.exists(proto):
+            with open(proto, encoding='utf-8') as f:
+                legacy = set(json.load(f).get('legacy_samples', []))
+        for sid in self.samples:
+            if legacy is not None and sid not in legacy and not self._marker_ok(sid):
+                missing.append(os.path.join('meta', f'{sid}.json') + ' (完成标记缺失或与文件不符)')
+            paths = [os.path.join(self.data_root, 'occupancy', f'{sid}.npy'),
+                     os.path.join(self.data_root, 'ego_pose', f'{sid}.npy')]
+            paths += [os.path.join(self.data_root, 'images', sid, f'cam_{i}.dng') for i in range(self.num_cameras)]
+            if need_mask:
+                paths.append(os.path.join(self.data_root, 'mask_camera', f'{sid}.npy'))
+            if self.load_depth:
+                paths += [os.path.join(self.data_root, 'depth', sid, f'cam_{i}.npy') for i in range(self.num_cameras)]
+            if self.load_flow:
+                paths.append(os.path.join(self.data_root, 'flow_mask', f'{sid}.npy'))
+                if not (os.path.exists(os.path.join(self.data_root, 'flow', f'{sid}.npz'))
+                        or os.path.exists(os.path.join(self.data_root, 'flow', f'{sid}.npy'))):
+                    missing.append(os.path.join('flow', f'{sid}.npz'))
+            # 不存在或零字节 (中断写入) 都算缺件；新采集的数据另有完成标记，划分文件只收齐全的帧
+            missing += [os.path.relpath(p, self.data_root) for p in paths
+                        if not os.path.exists(p) or os.path.getsize(p) == 0]
+        if missing:
+            self._missing('files', f'{self.data_root} [{self.split}] 缺 {len(missing)} 个文件，例如: '
+                                   + ', '.join(missing[:5]))
+
+    def _marker_ok(self, sid):
+        try:
+            with open(os.path.join(self.data_root, 'meta', f'{sid}.json'), encoding='utf-8') as f:
+                files = json.load(f).get('files')
+        except (OSError, ValueError):
+            return False
+        if not files or f'occupancy/{sid}.npy' not in files:
+            return False
+        for name, size in files.items():
+            p = os.path.join(self.data_root, name)
+            if size == 0 or not os.path.exists(p) or os.path.getsize(p) != size:
+                return False
+        return True
 
     def _load_samples(self):
         split_file = os.path.join(self.data_root, f'{self.split}.txt')
         if os.path.exists(split_file):
             with open(split_file, 'r') as f:
                 return [line.strip() for line in f if line.strip()]
+        self._missing('split', f'缺少划分文件 {split_file}；不按场景划分时训练集和验证集会是同一批样本 (数据泄漏)')
         occ_dir = os.path.join(self.data_root, 'occupancy')
         if os.path.isdir(occ_dir):
             return sorted(os.path.splitext(n)[0] for n in os.listdir(occ_dir) if n.endswith('.npy'))
@@ -188,6 +255,8 @@ class OccupancyDataset(Dataset):
         return self.scene_frame_dt.get(m['scene'] if m else None, self.default_frame_dt)
 
     def _check_label_version(self):
+        """返回数据集的真值语义版本 (calibration/intrinsics.json 顶层 label_version，缺省 1)。"""
+        ver = 1
         p = os.path.join(self.data_root, 'calibration', 'intrinsics.json')
         if os.path.exists(p):
             with open(p, 'r') as f:
@@ -195,6 +264,7 @@ class OccupancyDataset(Dataset):
             if ver < 2:
                 warnings.warn(f'{self.data_root} 是 label_version {ver} 的旧数据：交通灯/标志被标成 traffic_cone、'
                               f'车道线→traffic_cone、路缘→barrier；与新数据类别含义不同，不要混训（mask_camera 可用 compute_camera_mask.py 补算）')
+        return ver
 
     def _load_raw_bit_depth(self):
         int_path = os.path.join(self.data_root, 'calibration', 'intrinsics.json')
@@ -210,7 +280,7 @@ class OccupancyDataset(Dataset):
         int_path = os.path.join(calib_dir, 'intrinsics.json')
         ext_path = os.path.join(calib_dir, 'extrinsics.json')
         if not (os.path.exists(int_path) and os.path.exists(ext_path)):
-            warnings.warn(f'{calib_dir} 缺少标定文件，改用 occnetv3_data_generator/config/camera_config.py 构建')
+            self._missing('calib', f'{calib_dir} 缺少标定文件 (降级时改用 occnetv3_data_generator/config/camera_config.py)')
             return default_calibration(self.num_cameras, self.image_size)
 
         with open(int_path, 'r') as f:
@@ -224,6 +294,10 @@ class OccupancyDataset(Dataset):
         K_list, T_list, hfov = [], [], []
         for i in range(self.num_cameras):
             ci = int_data[f'cam_{i}']
+            model = (ci.get('distortion') or {}).get('model', 'equidistant')
+            if model != 'equidistant':
+                # 网络的投影/射线编码 (geometry.py) 只实现了等距模型，其他镜头模型的标定会被静默错用
+                raise NotImplementedError(f'cam_{i} 镜头模型 {model}：e2e_occ/geometry.py 只支持 equidistant')
             K = torch.eye(3)
             K[0, 0], K[1, 1], K[0, 2], K[1, 2] = ci['fx'], ci['fy'], ci['cx'], ci['cy']
             K_list.append(K)
@@ -300,7 +374,7 @@ class OccupancyDataset(Dataset):
 
     def _load_dng_image(self, dng_path):
         if rawpy is None:
-            self._warn_once('rawpy', '未安装 rawpy，图像以全零代替')
+            self._missing('rawpy', '未安装 rawpy，无法读取 DNG (降级时图像以全零代替)')
             return torch.zeros(1, *self.image_size)
         try:
             with rawpy.imread(dng_path) as raw:
@@ -308,6 +382,8 @@ class OccupancyDataset(Dataset):
             img = img / float((1 << self.raw_bit_depth) - 1)
             return torch.from_numpy(img[np.newaxis])
         except Exception as e:
+            if self.strict:
+                raise RuntimeError(f'DNG 读取失败 {dng_path}: {e}') from e
             print(f'Error loading DNG {dng_path}: {e}')
             return torch.zeros(1, *self.image_size)
 
@@ -318,30 +394,37 @@ class OccupancyDataset(Dataset):
             if os.path.exists(p):
                 images.append(self._load_dng_image(p))
             else:
-                self._warn_once('img', f'缺少图像（如 {p}），以全零代替')
+                self._missing('img', f'缺少图像 {p} (降级时以全零代替)')
                 images.append(torch.zeros(1, *self.image_size))
 
         occ_path = os.path.join(self.data_root, 'occupancy', f'{sample_id}.npy')
-        occ = np.load(occ_path).astype(np.uint8) if os.path.exists(occ_path) \
-            else np.zeros(self.voxel_size, dtype=np.uint8)
+        if os.path.exists(occ_path):
+            occ = np.load(occ_path).astype(np.uint8)
+        else:
+            # 降级时整帧标 ignore，而不是以前的全 free (那等于告诉网络"这里没有任何障碍物")
+            self._missing('occ', f'缺少体素真值 {occ_path} (降级时整帧忽略)')
+            occ = np.full(self.voxel_size, IGNORE_INDEX, dtype=np.uint8)
         observed = None
         if self.use_camera_mask:
             mp = os.path.join(self.data_root, 'mask_camera', f'{sample_id}.npy')
             if os.path.exists(mp):
                 observed = load_camera_mask(mp, occ.shape[2])
                 if self.keep_ground_surface:
-                    observed |= ground_surface_keep(occ)
+                    observed |= ground_surface_keep(occ, observed)
                 occ = np.where(observed, occ, np.uint8(IGNORE_INDEX))
+            elif self.label_version >= 2:
+                self._missing('mask_camera', f'缺少相机可见性掩码 {mp} (降级时在全部体素上监督；'
+                                             f'可用 occnetv3_data_generator/compute_camera_mask.py 补算)')
             else:
-                self._warn_once('mask_camera', f'缺少相机可见性掩码（如 {mp}），这些帧在全部体素上监督；'
-                                               f'可用 occnetv3_data_generator/compute_camera_mask.py 补算')
+                self._warn_once('mask_camera', '旧数据 (label_version 1) 没有相机可见性掩码，在全部体素上监督；'
+                                               '可用 occnetv3_data_generator/compute_camera_mask.py 补算')
         voxels = torch.from_numpy(occ)
 
         pose_path = os.path.join(self.data_root, 'ego_pose', f'{sample_id}.npy')
         if os.path.exists(pose_path):
             pose = torch.from_numpy(np.load(pose_path).astype(np.float64))
         else:
-            self._warn_once('pose', '缺少 ego_pose，时序对齐退化为单位阵')
+            self._missing('pose', f'缺少 ego_pose {pose_path} (降级时时序对齐退化为单位阵)')
             pose = torch.eye(4, dtype=torch.float64)
 
         frame = {'images': torch.stack(images).float(), 'voxels': voxels, 'pose': pose}
@@ -385,6 +468,7 @@ class OccupancyDataset(Dataset):
           time_delta [T] 与上一帧的间隔秒数（场景元数据 frame_dt）
           ego_motion [T,4,4]（t=0 为单位阵）；intrinsics [N,3,3]；extrinsics [N,4,4] Camera(cv)→Vehicle
           depth [T,N,h,w]、has_depth [T]；flow [T,3,X,Y,Z] float16、flow_mask [T,X,Y,Z]、has_flow [T]
+          pose [T,4,4] float64 Vehicle→World (流式验证/推理跨样本算 ego_motion 用)
         """
         start = self.index[idx]
         T = self.sequence_length
@@ -397,6 +481,7 @@ class OccupancyDataset(Dataset):
             'images': torch.stack([f['images'] for f in frames]),
             'voxels': torch.stack([f['voxels'] for f in frames]),
             'ego_motion': torch.stack(ego_motion),
+            'pose': torch.stack([f['pose'] for f in frames]),
             'time_delta': torch.tensor([self.frame_dt(self.samples[start + t]) for t in range(T)],
                                        dtype=torch.float32),
             'intrinsics': self.intrinsics.clone(),
@@ -411,5 +496,9 @@ class OccupancyDataset(Dataset):
 def get_dataloader(data_root, split='train', batch_size=1, num_workers=0, config=None):
     dataset = OccupancyDataset(data_root, split, config)
     shuffle = split == 'train'
+    if len(dataset) == 0:
+        T = getattr(config, 'temporal_frames', 1) if config is not None else 1
+        raise SystemExit(f"{split} 划分没有可用样本 ({data_root})：检查 {split}.txt 是否为空；时序训练每个序列需要同一场景"
+                         f"连续 {T} 帧 (temporal_frames)，场景帧数不足时可减小 --set temporal_frames=…")
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                       num_workers=num_workers, pin_memory=True, drop_last=shuffle)

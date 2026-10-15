@@ -131,8 +131,9 @@ if(Get-Process CarlaUnreal -ErrorAction SilentlyContinue){ Write-Output 'STILL R
     }
 
     "restart" {
-        & $PSCommandPath -Action stop -RemoteHost $RemoteHost
-        & $PSCommandPath -Action start -RemoteHost $RemoteHost
+        & $PSCommandPath -Action stop -RemoteHost $RemoteHost -RemoteRoot $RemoteRoot -TaskName $TaskName
+        # Forward -CarlaArgs: it used to be dropped, so restart silently used the default args
+        & $PSCommandPath -Action start -RemoteHost $RemoteHost -RemoteRoot $RemoteRoot -TaskName $TaskName -CarlaArgs $CarlaArgs
     }
 
     "logs" {

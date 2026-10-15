@@ -1,13 +1,12 @@
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 try:
-    from .geometry import equidistant_project, image_to_grid_sample
+    from .geometry import equidistant_project, image_to_grid_sample, no_autocast, grid_sample_fp32
     from .layers import make_norm, FeedForward, MultiHeadSelfAttention
 except ImportError:
-    from geometry import equidistant_project, image_to_grid_sample
+    from geometry import equidistant_project, image_to_grid_sample, no_autocast, grid_sample_fp32
     from layers import make_norm, FeedForward, MultiHeadSelfAttention
 
 
@@ -21,19 +20,21 @@ def get_reference_points(points, intrinsics, extrinsics, image_hw):
 
     等距投影正投影，和 position_encoding.pixel_rays_vehicle（反投影）共用 geometry.py。
     """
-    R = extrinsics[..., :3, :3]                                       # [B, N, 3, 3]
-    t = extrinsics[..., :3, 3]                                        # [B, N, 3]
-    # Vehicle → Camera: p_cam = Rᵀ (p - t)
-    diff = points.unsqueeze(1) - t.unsqueeze(2)                       # [B, N, Q, 3]
-    p_cam = torch.einsum('bnji,bnqj->bnqi', R, diff)
-    fx = intrinsics[..., 0, 0, None]
-    fy = intrinsics[..., 1, 1, None]
-    cx = intrinsics[..., 0, 2, None]
-    cy = intrinsics[..., 1, 2, None]
-    u, v, _ = equidistant_project(p_cam, fx, fy, cx, cy)
-    un, vn = image_to_grid_sample(u, v, image_hw)
-    valid = (un.abs() <= 1.0) & (vn.abs() <= 1.0)
-    return torch.stack([un, vn], dim=-1), valid
+    with no_autocast(points.device):                                  # 几何一律 FP32，见 geometry.py
+        points, intrinsics, extrinsics = points.float(), intrinsics.float(), extrinsics.float()
+        R = extrinsics[..., :3, :3]                                   # [B, N, 3, 3]
+        t = extrinsics[..., :3, 3]                                    # [B, N, 3]
+        # Vehicle → Camera: p_cam = Rᵀ (p - t)
+        diff = points.unsqueeze(1) - t.unsqueeze(2)                   # [B, N, Q, 3]
+        p_cam = torch.einsum('bnji,bnqj->bnqi', R, diff)
+        fx = intrinsics[..., 0, 0, None]
+        fy = intrinsics[..., 1, 1, None]
+        cx = intrinsics[..., 0, 2, None]
+        cy = intrinsics[..., 1, 2, None]
+        u, v, _ = equidistant_project(p_cam, fx, fy, cx, cy)
+        un, vn = image_to_grid_sample(u, v, image_hw)
+        valid = (un.abs() <= 1.0) & (vn.abs() <= 1.0)
+        return torch.stack([un, vn], dim=-1), valid
 
 
 class DeformableCrossAttention(nn.Module):
@@ -96,11 +97,12 @@ class DeformableCrossAttention(nn.Module):
 
         ref, valid = get_reference_points(points, intrinsics, extrinsics, self.image_hw)
 
-        off = self.sampling_offsets(query).view(B, Q, N, Hh, L, P, 2).tanh() * self.offset_px
+        # 偏移在 FP32 里加到 FP32 参考点上 (见 geometry.py "数值精度")
+        off = self.sampling_offsets(query).view(B, Q, N, Hh, L, P, 2).float().tanh() * self.offset_px
         scale = torch.tensor([[2.0 / image_feats[s].shape[-1], 2.0 / image_feats[s].shape[-2]]
-                              for s in self.strides], device=query.device, dtype=off.dtype)
+                              for s in self.strides], device=query.device, dtype=torch.float32)
         off = off * scale.view(1, 1, 1, 1, L, 1, 2)                     # 层级像素 → 归一化坐标
-        w = self.attention_weights(query).view(B, Q, N, Hh, L * P).softmax(-1).view(B, Q, N, Hh, L, P)
+        w = self.attention_weights(query).view(B, Q, N, Hh, L * P).float().softmax(-1).view(B, Q, N, Hh, L, P)
 
         values = []
         for s in self.strides:
@@ -110,20 +112,22 @@ class DeformableCrossAttention(nn.Module):
             v = v.view(B, N, Hs, Ws, Hh, hd).permute(0, 1, 4, 5, 2, 3)  # [B, N, h, hd, H, W]
             values.append(v)
 
-        output = query.new_zeros(B, Hh, hd, Q)
+        output = query.new_zeros(B, Hh, hd, Q, dtype=torch.float32)
         for cam in range(N):
-            out_cam = query.new_zeros(B, Hh, hd, Q)
+            out_cam = query.new_zeros(B, Hh, hd, Q, dtype=torch.float32)
+            # 每个相机每个层级的 value 只转一次 FP32 (grid_sample 要求特征与坐标同 dtype)
+            v_cam = [values[li][:, cam].reshape(B * Hh, hd, *values[li].shape[-2:]).float() for li in range(L)]
             for q0 in range(0, Q, self.query_chunk):
                 q1 = min(Q, q0 + self.query_chunk)
                 Qc = q1 - q0
-                ref_c = ref[:, cam, q0:q1]                                # [B, Qc, 2]
+                ref_c = ref[:, cam, q0:q1]                                # [B, Qc, 2] FP32
                 for li in range(L):
-                    v = values[li][:, cam].reshape(B * Hh, hd, *values[li].shape[-2:])
-                    loc = ref_c.view(B, Qc, 1, 1, 2) + off[:, q0:q1, cam, :, li]   # [B, Qc, h, P, 2]
-                    loc = loc.permute(0, 2, 1, 3, 4).reshape(B * Hh, Qc, P, 2).to(v.dtype)
-                    s_ = F.grid_sample(v, loc, mode='bilinear', padding_mode='zeros', align_corners=False)
+                    loc = ref_c.view(B, Qc, 1, 1, 2) + off[:, q0:q1, cam, :, li]   # [B, Qc, h, P, 2] FP32
+                    loc = loc.permute(0, 2, 1, 3, 4).reshape(B * Hh, Qc, P, 2)
+                    s_ = grid_sample_fp32(v_cam[li], loc, mode='bilinear', padding_mode='zeros',
+                                          align_corners=False)
                     wl = w[:, q0:q1, cam, :, li].permute(0, 2, 1, 3).reshape(B * Hh, 1, Qc, P)
-                    out_cam[..., q0:q1] += (s_ * wl.to(s_.dtype)).sum(-1).view(B, Hh, hd, Qc).to(out_cam.dtype)
+                    out_cam[..., q0:q1] += (s_ * wl).sum(-1).view(B, Hh, hd, Qc)
             if self.visibility_norm:
                 out_cam = out_cam * valid[:, cam].view(B, 1, 1, Q).to(out_cam.dtype)
             output = output + out_cam
@@ -131,7 +135,7 @@ class DeformableCrossAttention(nn.Module):
         if self.visibility_norm:
             count = valid.sum(dim=1).clamp(min=1).to(output.dtype)        # [B, Q]
             output = output / count.view(B, 1, 1, Q)
-        output = output.permute(0, 3, 1, 2).reshape(B, Q, C)
+        output = output.permute(0, 3, 1, 2).reshape(B, Q, C).to(query.dtype)
         return self.dropout(self.output_proj(output))
 
 

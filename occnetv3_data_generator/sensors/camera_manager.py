@@ -11,6 +11,18 @@ from typing import Dict, Optional
 from config.camera_config import TESLA_CAMERAS, CAMERA_SENSOR_CONFIG, DEPTH_SENSOR_CONFIG
 
 
+def _attr_str(attr):
+    """carla.ActorAttribute 当前值 → set_attribute 可用的字符串 (as_str() 对非字符串类型会抛异常)。"""
+    t = attr.type
+    if t == carla.ActorAttributeType.Float:
+        return repr(attr.as_float())
+    if t == carla.ActorAttributeType.Int:
+        return str(attr.as_int())
+    if t == carla.ActorAttributeType.Bool:
+        return str(attr.as_bool())
+    return attr.as_str()
+
+
 class CameraManager:
     """
     管理8个RGB相机 + 8个深度相机 (+ 可选 8 个语义分割相机), 支持 Bayer RGGB 转换
@@ -48,6 +60,11 @@ class CameraManager:
         """创建并附加8个相机 (等距投影/鱼眼相机, sensor.camera.rgb_fisheye)"""
         bp_library = self.world.get_blueprint_library()
         camera_bp = bp_library.find('sensor.camera.rgb_fisheye')
+        # 8 台相机共用这一个蓝图对象：逐相机的可选镜头参数 (显式内参/独立水平 FOV/畸变系数) 每台都要先恢复
+        # 默认值再按自己的配置覆盖，否则前一台设过的值会串到下一台 (标定却按下一台自己的配置生成)
+        optional_lens_attrs = {a: _attr_str(camera_bp.get_attribute(a))
+                               for a in ('fx', 'fy', 'cx', 'cy', 'fov_horizontal', 'k0', 'k1', 'k2', 'k3')
+                               if camera_bp.has_attribute(a)}
 
         # 设置基础属性
         camera_bp.set_attribute('image_size_x', str(CAMERA_SENSOR_CONFIG['image_size_x']))
@@ -90,6 +107,11 @@ class CameraManager:
 
         if camera_bp.has_attribute('gamma'):
             camera_bp.set_attribute('gamma', str(CAMERA_SENSOR_CONFIG['gamma']))
+
+        # cube 面边长：0 = 引擎按镜头有效像素密度推算 (见 camera_config.py 'face_size')
+        if camera_bp.has_attribute('face_size'):
+            face_size = CAMERA_SENSOR_CONFIG.get('face_size')
+            camera_bp.set_attribute('face_size', str(int(face_size) if face_size else 0))
             
         if camera_bp.has_attribute('motion_blur_intensity'):
             camera_bp.set_attribute('motion_blur_intensity',
@@ -132,6 +154,8 @@ class CameraManager:
             #    保持"水平 FOV 按宽高比从垂直 FOV 线性推导"的行为，即当前实际生效的
             #    fov_horizontal = fov_vertical * (width/height)，和 camera_config.py
             #    里 'fov' 字段（历史上的水平 FOV 参考值）在各向同性等距投影下精确相等。
+            for attr, default in optional_lens_attrs.items():
+                camera_bp.set_attribute(attr, default)
             lens_model = cam_config.get('lens_model', 'equidistant')
             camera_bp.set_attribute('camera_model', lens_model)
 

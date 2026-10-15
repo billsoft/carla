@@ -24,6 +24,8 @@ class E2EOccNet(nn.Module):
       ego_motion  [B, 4, 4]        上一帧车辆系 → 当前帧车辆系（可选）
       time_delta  [B]              帧间隔秒数（可选）
       query_points [B, P, 3]       仅隐式头训练时使用：需要输出 logits 的点（grid_sample 归一化坐标）
+      need_aux     bool            是否计算辅助输出 (深度 logits)；默认 = self.training。验证时要算深度损失就传 True
+      need_flow    bool            是否计算流场 (默认 True；只要占用时传 False 省掉流场分支)
     输出 dict:
       semantic [B, 18, 400, 400, 32]（隐式头训练时为 semantic_points [B, P, 18]）
       flow     [B, 3, 400, 400, 32] 或 None（隐式头训练时为 flow_points）
@@ -88,11 +90,13 @@ class E2EOccNet(nn.Module):
             nn.init.zeros_(tf.mem_out.bias)
 
     def forward(self, images, intrinsics, extrinsics, memory=None, ego_motion=None, time_delta=None,
-                query_points=None):
+                query_points=None, need_aux=None, need_flow=True):
+        if need_aux is None:
+            need_aux = self.training
         feats = self.patch_embed(images)
-        enc = self.encoder(feats, intrinsics, extrinsics)
+        enc = self.encoder(feats, intrinsics, extrinsics, need_depth=need_aux)
         dec = self.decoder(enc['feats'], intrinsics, extrinsics, memory, ego_motion, time_delta)
-        out = self.head(dec['fine_feats'], query_points=query_points)
+        out = self.head(dec['fine_feats'], query_points=query_points, need_flow=need_flow)
         out.update({
             'memory': dec['memory'],
             'depth_logits': enc['depth_logits'],

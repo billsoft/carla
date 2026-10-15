@@ -111,6 +111,9 @@ namespace CameraModelUtil
         bool bFOVMaskEnable : 1;
         bool bRenderPerspective : 1;
         bool bExplicitIntrinsics : 1;
+        // RGB 相机：畸变时对每个输出像素做 4 个子样本的面积积分 (WAL_SHADER_FLAGS_SUPERSAMPLE)。
+        // 标签/深度相机必须为 false
+        bool bSupersample : 1;
     };
 
 

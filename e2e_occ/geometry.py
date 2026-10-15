@@ -17,6 +17,27 @@
 import math
 import numpy as np
 import torch
+import torch.nn.functional as F
+
+
+# ----------------------------------------------------------------------------
+# 数值精度：几何计算一律 FP32
+# ----------------------------------------------------------------------------
+# 训练/推理都在 torch.autocast(bf16) 里跑，autocast 会把 einsum/matmul 降成 BF16（8 位尾数）。
+# 2026-10-15 实测：细网格投影到原图的坐标误差 中位数 0.97px、P95 3.45px、最大 7.6px，18.7 万个可见点
+# 里 247 个可见性判断翻转 (FP16 也有 0.12px)；grid_sample 的归一化坐标若跟着特征转成 BF16，量化步长
+# 2^-8 在 stride-8 层级上约 2.5 个原图像素。所以：坐标变换、投影、射线、Fourier 位置编码、采样网格
+# 全部在 no_autocast() 里用 FP32 算，采样用 grid_sample_fp32()；卷积/注意力/FFN 照常混合精度。
+
+def no_autocast(device):
+    """关闭 autocast 的上下文 (该区域内运算按输入 dtype 执行，调用方负责把输入转成 FP32)。"""
+    return torch.autocast(device_type=device.type, enabled=False)
+
+
+def grid_sample_fp32(inp, grid, **kwargs):
+    """F.grid_sample 的 FP32 版本：特征和采样坐标都转 FP32 再采样，返回 FP32。"""
+    with no_autocast(inp.device):
+        return F.grid_sample(inp.float(), grid.float(), **kwargs)
 
 
 # UE 相机轴（x 前、y 右、z 上）下表示的 OpenCV 相机轴：

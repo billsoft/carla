@@ -13,6 +13,9 @@
 
 #define WAL_SHADER_FLAGS_EQUIRECTANGULAR (1U << 0)
 #define WAL_SHADER_FLAGS_FOV_MASK (1U << 1)
+// RGB 相机专用：每个输出像素在它覆盖的区域内取 4 个旋转网格子样本求平均 (像素面积积分 / 超采样抗锯齿)。
+// 标签/深度类相机不能开 (会把类别 ID、距离平均掉)
+#define WAL_SHADER_FLAGS_SUPERSAMPLE (1U << 2)
 
 
 
@@ -112,6 +115,22 @@ float4 SampleCubemap(float3 Direction)
 
 
 
+// 镜头模型：输出像素坐标 (与 MainCS 相同的整数像素中心约定) -> 相机系射线 (x 前, y 右, z 上)
+float3 LensDirection(float2 P, float2 FocalDistance, float2 Center)
+{
+	const float2 UV = (P - Center) / FocalDistance;
+	const float A = ComputeAngle(length(UV));
+	float PhiSin = 0.0F;
+	float PhiCos = 0.0F;
+	float ThetaSin = 0.0F;
+	float ThetaCos = 0.0F;
+	sincos(1.5707963267948966F - A, PhiSin, PhiCos);
+	sincos(atan2(UV.y, UV.x), ThetaSin, ThetaCos);
+	return normalize(float3(PhiSin, PhiCos * ThetaCos, -PhiCos * ThetaSin));
+}
+
+
+
 [numthreads(
 	THREAD_GROUP_SIZE_X,
 	THREAD_GROUP_SIZE_Y,
@@ -206,6 +225,26 @@ void MainCS(
 	}
 	
 	float4 OutColor = SampleCubemap(Direction);
+
+#if CAMERA_TYPE != CAMERA_TYPE_LUT1D
+	// 超采样 (2026-10-15)：cube 面不再跑 TSR (各面历史累积失败，越累积越糊)，改为面按 ~2 倍角密度渲染、
+	// 这里对像素覆盖区域积分——与物理传感器像素对落在其面积上的光积分一致，且没有时序拖影
+	if ((Flags & WAL_SHADER_FLAGS_SUPERSAMPLE) != 0U && (Flags & WAL_SHADER_FLAGS_EQUIRECTANGULAR) == 0U)
+	{
+		const float2 Offsets[4] =
+		{
+			float2(-0.125F, -0.375F),
+			float2(0.375F, -0.125F),
+			float2(0.125F, 0.375F),
+			float2(-0.375F, 0.125F)
+		};
+		const float2 P = float2(PixelPosition);
+		float4 Sum = float4(0.0F, 0.0F, 0.0F, 0.0F);
+		for (uint i = 0; i != 4; ++i)
+			Sum += SampleCubemap(LensDirection(P + Offsets[i], FocalDistance, Center));
+		OutColor = Sum * 0.25F;
+	}
+#endif
 
 	if (UseFadeMask)
 		OutColor.xyz *= max((1.0F - smoothstep(YFOVAngle - FOVFadeSize, YFOVAngle, Alpha)), 0.0F);

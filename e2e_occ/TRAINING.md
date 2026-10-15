@@ -83,12 +83,25 @@ tbptt=1 时 `loss·w/w` 会把加权完全抵消）。
   步线性 warmup（不超过总优化步数的 1/5，小数据集上自动缩短），之后按优化步余弦退火。
 - 梯度裁剪 1.0；`--grad_accum` 梯度累积，epoch 末尾凑不满一组的 batch 按实际个数缩放后也会 step（不再丢弃）。
 - `--seed` 固定样本顺序/隐式采样/初始化。
-- **验证**：各损失项 + **mIoU**（不含 0:free，与 Occ3D 等基准一致）+ **几何 IoU**（占用/空二分类）+ 每类 IoU，
-  都只在相机观测体素上统计。按 mIoU 保存 `best_model.pth`，每个 epoch 另存 `last_model.pth`。
+- **验证模式** `--val_mode`：`stream`（默认）按场景、帧号顺序逐帧推理，场景内一直携带时序记忆（与车端部署一致，
+  能暴露长时间运行的记忆漂移）；`seq` 与训练相同的 T 帧短序列。
+- **验证指标**（`loss.OccMetrics`，只在相机观测体素上统计）：**mIoU**（不含 0:free；参与平均的类别 = 真值出现过
+  **或被预测过**的类别——之前只看真值，凭空预测出的类别不扣分，小验证集上会虚高）、**几何 IoU**、按水平距离
+  分段（0-10/10-20/20-30/30-40/40+ m）的几何 IoU / 召回 / 误报率（free 判成占用）/ 漏报率（占用判成 free）、
+  **小目标召回**（barrier/bicycle/motorcycle/pedestrian/traffic_cone）、每类 IoU/召回/精度和真值→预测体素数。
+  按 mIoU 保存 `best_model.pth`，每个 epoch 另存 `last_model.pth`。
 - **断点恢复** `--resume last_model.pth`：恢复模型、优化器、学习率调度器、GradScaler 状态和历史最好 mIoU
   （2026-10-14 前只存了当前 epoch 的 mIoU，从 last 恢复后更差的模型可能覆盖 best）。
+- **数据严格校验**（`data_strict`，默认开）：缺划分文件/标定/任一样本的体素、图像、位姿、掩码、深度、流场，
+  构造数据集时直接报错。调试旧数据用 `--set data_strict=False`（降级并告警）。零字节文件同样算缺件；
+  有 `write_protocol.json` 的数据集还要求每帧的完成标记 `meta/<sid>.json` 存在且记录的文件大小与磁盘一致。
+- **训练/验证泄漏检查**：训练集与验证集有相同场景、或 `splits.json` 标记了 `debug_val_reuses_train`（单场景数据集
+  验证复用训练场景）时直接退出——验证指标会虚高并误选 best_model。单场景调试显式加 `--allow_val_overlap`。
+- 某个划分为空（如场景帧数不足 `temporal_frames`）时给出明确提示，可用 `--set temporal_frames=2` 调试短数据。
+- batch>1 时序训练可用（`raw_embed` 对不连续的 `images[:, t]` 用 reshape）。
 - 隐式头（`head_type=implicit`）训练时每帧采样 `implicit_train_points`(262,144) 个点：
-  一半来自非空体素，一半均匀随机；验证时对整个网格分块查询。
+  一半来自非空体素，一半均匀随机；验证时对整个网格分块查询。与稠密头一样遵守 `need_flow`
+  （验证/推理不需要流场时不算流场分支）。
 
 ## 4. 损失（`loss.py::E2ELoss`）
 
@@ -115,7 +128,8 @@ total = CE + 0.5·Lovász                       （语义）
 | 流式训练（tbptt=1） | `train.py` |
 | bf16 autocast | `train.py --amp` |
 
-实测训练峰值（默认配置，单帧）约 8.1 GB。作为对照：重构过程中加稠密头梯度检查点和 Lovász
+实测训练峰值（默认配置，单帧）约 8.1 GB；2026-10-15 几何采样改 FP32 后，`verify_network.py` 两帧冒烟峰值
+8.7 → 10.6 GB。作为对照：重构过程中加稠密头梯度检查点和 Lovász
 子采样之前，同一网络单帧约 10.6 GB，两帧共同反向（tbptt=2）超出了当时可用的约 15 GB 显存。
 
 ## 6. 指标

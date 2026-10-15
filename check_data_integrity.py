@@ -71,4 +71,4 @@ def verify_dataset(dataset_root):
         print("\n⚠️ Issues found. Please review the table above.")
 
 if __name__ == "__main__":
-    verify_dataset(r"d:\code\carla\dataset_10k_bak")
+    verify_dataset(r"D:\carla_datasets\occ_v2")

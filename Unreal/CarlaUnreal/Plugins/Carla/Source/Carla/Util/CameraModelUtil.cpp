@@ -24,7 +24,8 @@
 enum WideAngleLensShaderFlags : uint32
 {
     WAL_SHADER_FLAGS_EQUIRECTANGULAR = 1U << 0,
-    WAL_SHADER_FLAGS_FOV_MASK = 1U << 1
+    WAL_SHADER_FLAGS_FOV_MASK = 1U << 1,
+    WAL_SHADER_FLAGS_SUPERSAMPLE = 1U << 2
 };
 
 
@@ -252,6 +253,8 @@ static auto CreateDistortionParameters(
         Parameters->Flags |= WAL_SHADER_FLAGS_EQUIRECTANGULAR;
     if (Options.bFOVMaskEnable)
         Parameters->Flags |= WAL_SHADER_FLAGS_FOV_MASK;
+    if (Options.bSupersample)
+        Parameters->Flags |= WAL_SHADER_FLAGS_SUPERSAMPLE;
     return Parameters;
 }
 

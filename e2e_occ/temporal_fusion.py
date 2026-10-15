@@ -15,10 +15,10 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 try:
-    from .geometry import voxel_centers, metric_to_grid_sample
+    from .geometry import voxel_centers, metric_to_grid_sample, no_autocast, grid_sample_fp32
     from .layers import make_norm, FeedForward
 except ImportError:
-    from geometry import voxel_centers, metric_to_grid_sample
+    from geometry import voxel_centers, metric_to_grid_sample, no_autocast, grid_sample_fp32
     from layers import make_norm, FeedForward
 
 
@@ -77,15 +77,15 @@ class DeformableTemporalAttention(nn.Module):
         h, hd, P = self.num_heads, self.head_dim, self.num_points
         v = self.value_proj(value).view(B, X, Y, Z, h, hd)
         v = v.permute(0, 4, 5, 3, 2, 1).reshape(B * h, hd, Z, Y, X)       # [B*h, hd, D=Z, H=Y, W=X]
-        cell = torch.tensor([2.0 / X, 2.0 / Y, 2.0 / Z], device=query.device, dtype=query.dtype)
-        off = self.sampling_offsets(query).view(B, Q, h, P, 3).tanh() * self.offset_cells * cell
-        loc = ref_norm.view(1, Q, 1, 1, 3).to(off.dtype) + off               # [B, Q, h, P, 3]
-        loc = loc.permute(0, 2, 1, 3, 4).reshape(B * h, Q, P, 1, 3).to(v.dtype)
-        s = F.grid_sample(v, loc, mode='bilinear', padding_mode='zeros', align_corners=False)  # [B*h, hd, Q, P, 1]
-        w = self.attention_weights(query).view(B, Q, h, P).softmax(-1)
-        w = w.permute(0, 2, 1, 3).reshape(B * h, 1, Q, P, 1).to(s.dtype)
+        cell = torch.tensor([2.0 / X, 2.0 / Y, 2.0 / Z], device=query.device, dtype=torch.float32)
+        off = self.sampling_offsets(query).view(B, Q, h, P, 3).float().tanh() * self.offset_cells * cell
+        loc = ref_norm.view(1, Q, 1, 1, 3).float() + off                    # [B, Q, h, P, 3] FP32
+        loc = loc.permute(0, 2, 1, 3, 4).reshape(B * h, Q, P, 1, 3)
+        s = grid_sample_fp32(v, loc, mode='bilinear', padding_mode='zeros', align_corners=False)  # [B*h, hd, Q, P, 1]
+        w = self.attention_weights(query).view(B, Q, h, P).float().softmax(-1)
+        w = w.permute(0, 2, 1, 3).reshape(B * h, 1, Q, P, 1)
         out = (s * w).sum(dim=(3, 4)).view(B, h, hd, Q).permute(0, 3, 1, 2).reshape(B, Q, C)
-        return self.output_proj(out)
+        return self.output_proj(out.to(query.dtype))
 
 
 class GRUGate(nn.Module):
@@ -157,14 +157,15 @@ class TemporalFusionModule(nn.Module):
         ones = torch.ones(B, 1, Z, Y, X, device=memory.device, dtype=memory.dtype)
         vol = torch.cat([vol, ones], dim=1)
 
-        T_inv = torch.linalg.inv(ego_motion.float())                             # 当前 → 上一帧
-        p_t = self.centers.unsqueeze(0).expand(B, -1, -1)                        # [B, Q, 3]
-        p_prev = torch.einsum('bij,bqj->bqi', T_inv[:, :3, :3], p_t) + T_inv[:, None, :3, 3]
-        grid = metric_to_grid_sample(p_prev, self.config.voxel_range)            # [B, Q, 3] (x,y,z)
-        # 输出体积按 [Z, Y, X] 排列，grid 也要按 [B, Z, Y, X, 3] 组织
-        grid = grid.view(B, X, Y, Z, 3).permute(0, 3, 2, 1, 4).to(vol.dtype)
-        out = F.grid_sample(vol, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
-        out = out.permute(0, 4, 3, 2, 1).reshape(B, Q, C + 1)                    # 回到 [X, Y, Z] 展开
+        with no_autocast(memory.device):                                         # 位姿变换 FP32，见 geometry.py
+            T_inv = torch.linalg.inv(ego_motion.float())                         # 当前 → 上一帧
+            p_t = self.centers.unsqueeze(0).expand(B, -1, -1).float()            # [B, Q, 3]
+            p_prev = torch.einsum('bij,bqj->bqi', T_inv[:, :3, :3], p_t) + T_inv[:, None, :3, 3]
+            grid = metric_to_grid_sample(p_prev, self.config.voxel_range)        # [B, Q, 3] (x,y,z)
+            # 输出体积按 [Z, Y, X] 排列，grid 也要按 [B, Z, Y, X, 3] 组织
+            grid = grid.view(B, X, Y, Z, 3).permute(0, 3, 2, 1, 4)
+        out = grid_sample_fp32(vol, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        out = out.permute(0, 4, 3, 2, 1).reshape(B, Q, C + 1).to(memory.dtype)  # 回到 [X, Y, Z] 展开
         return out[..., :C], out[..., C:]
 
     def _forward_impl(self, current, memory, ego_motion, time_delta):

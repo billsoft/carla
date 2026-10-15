@@ -30,6 +30,8 @@ ASceneCaptureCamera_WideAngleLens::ASceneCaptureCamera_WideAngleLens(const FObje
     : Super(ObjectInitializer)
 {
   Super::SetCubemapSampler(CameraModelUtil::GetSampler(ESamplerFilter::SF_AnisotropicLinear));
+  // 面积积分超采样代替 cube 面上失效的 TSR (见 ASceneCaptureSensor_WideAngleLens::BeginPlay)
+  SetSupersampleDistortion(true);
 
   EnablePostProcessingEffects(true);
 }

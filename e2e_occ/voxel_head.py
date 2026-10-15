@@ -1,7 +1,33 @@
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
+try:
+    from .geometry import grid_sample_fp32, no_autocast
+except ImportError:
+    from geometry import grid_sample_fp32, no_autocast
+
+
+@contextlib.contextmanager
+def frozen_bn_stats(module):
+    """梯度检查点反向重算时用：BN 仍按当前 batch 统计归一化 (与前向一致)，但不再更新 running_mean/var。
+    否则同一个 batch 会被计入两次 (实测 num_batches_tracked +2、一次迭代 running_var 偏差约 0.08)，
+    训练态与推理态的归一化统计不一致。momentum=0 时 running = 1·running + 0·batch，统计不变。"""
+    bns = [m for m in module.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)]
+    saved = [(m, m.momentum, m.num_batches_tracked.clone() if m.num_batches_tracked is not None else None)
+             for m in bns]
+    for m in bns:
+        m.momentum = 0.0
+    try:
+        yield
+    finally:
+        for m, mom, nbt in saved:
+            m.momentum = mom
+            if nbt is not None:
+                m.num_batches_tracked.copy_(nbt)
 
 
 class VoxelHead(nn.Module):
@@ -42,15 +68,16 @@ class VoxelHead(nn.Module):
     def _stage_flow(self, x):
         return F.interpolate(self.flow(x), size=tuple(self.config.voxel_size), mode='trilinear', align_corners=False)
 
-    def forward(self, x, query_points=None):
+    def forward(self, x, query_points=None, need_flow=True):
         # x: [B, fx, fy, fz, C]
         x = x.permute(0, 4, 1, 2, 3).contiguous()
         # 训练时对各阶段做梯度检查点：400×400×32 全分辨率上的中间激活（插值结果、BN 输出等）
         # 单帧就有数 GB，不保存、反向时重算，用约 1 次额外前向的计算换显存
         ckpt = self.training and self.config.checkpoint_head
-        run = (lambda f, t: checkpoint(f, t, use_reentrant=False)) if ckpt else (lambda f, t: f(t))
+        ctx = lambda: (contextlib.nullcontext(), frozen_bn_stats(self))          # 重算时冻结 BN 统计  # noqa: E731
+        run = (lambda f, t: checkpoint(f, t, use_reentrant=False, context_fn=ctx)) if ckpt else (lambda f, t: f(t))
         x = run(self._stage_mid, x)
-        flow = run(self._stage_flow, x) if self.config.use_flow_head else None
+        flow = run(self._stage_flow, x) if (self.config.use_flow_head and need_flow) else None
         x = run(self._stage_full, x)
         return {'semantic': x, 'flow': flow}
 
@@ -92,10 +119,12 @@ class ImplicitVoxelHead(nn.Module):
     def query(self, vol, points):
         """vol: [B, 64, Z, Y, X]；points: [B, P, 3] grid_sample 归一化坐标 (x, y, z) → [B, P, out_dim]"""
         B, P, _ = points.shape
-        grid = points.view(B, P, 1, 1, 3).to(vol.dtype)
-        f = F.grid_sample(vol, grid, mode='bilinear', padding_mode='border', align_corners=False)
+        grid = points.view(B, P, 1, 1, 3)
+        f = grid_sample_fp32(vol, grid, mode='bilinear', padding_mode='border', align_corners=False)
         f = f.view(B, 64, P).transpose(1, 2)
-        return self.mlp(torch.cat([f, self._fourier(points.to(f.dtype))], dim=-1))
+        with no_autocast(points.device):                 # Fourier 最高频 2^9·π，FP32 计算 (见 geometry.py)
+            fe = self._fourier(points.float())
+        return self.mlp(torch.cat([f, fe], dim=-1))
 
     @staticmethod
     def full_grid_points(voxel_size, device):
@@ -104,21 +133,22 @@ class ImplicitVoxelHead(nn.Module):
         gx, gy, gz = torch.meshgrid(*axes, indexing='ij')
         return torch.stack([gx, gy, gz], dim=-1).view(-1, 3)                   # [X*Y*Z, 3]，[X,Y,Z] 行优先
 
-    def forward(self, x, query_points=None):
+    def forward(self, x, query_points=None, need_flow=True):
         vol = self.reduce(x.permute(0, 4, 1, 2, 3).contiguous())               # [B, 64, X, Y, Z]
         vol = vol.permute(0, 1, 4, 3, 2).contiguous()                         # → [B, 64, Z, Y, X]
         nc = self.config.num_classes
         if query_points is not None:
             out = self.query(vol, query_points)                                # [B, P, out_dim]
             return {'semantic_points': out[..., :nc],
-                    'flow_points': out[..., nc:] if self.config.use_flow_head else None}
+                    'flow_points': out[..., nc:] if (self.config.use_flow_head and need_flow) else None}
         B = x.shape[0]
         X, Y, Z = self.config.voxel_size
         pts = self.full_grid_points(self.config.voxel_size, x.device)
         outs = [self.query(vol, pts[i:i + self.chunk].unsqueeze(0).expand(B, -1, -1))
                 for i in range(0, pts.shape[0], self.chunk)]
         out = torch.cat(outs, dim=1).view(B, X, Y, Z, self.out_dim).permute(0, 4, 1, 2, 3)
-        return {'semantic': out[:, :nc], 'flow': out[:, nc:] if self.config.use_flow_head else None}
+        # 流场与语义共用 MLP 一次算出，need_flow=False 时只是不返回 (省掉下游的显存/回传)
+        return {'semantic': out[:, :nc], 'flow': out[:, nc:] if (self.config.use_flow_head and need_flow) else None}
 
 
 def build_head(config):

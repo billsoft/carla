@@ -48,6 +48,8 @@ from processing.camera_visibility import CameraVisibility, finalize_ground_truth
 from data_utils.data_saver import OccNetDataSaver
 
 FIXED_DELTA_SECONDS = 0.05   # 同步模式仿真步长 (20Hz)
+# 真值生成算法版本，写进每帧 meta/<sid>.json (算法改了但 label_version 语义没变时用它区分批次)
+GENERATOR_VERSION = '2026-10-15 obb+slope+instance-flow+rgb-fov-mask'
 
 
 def choose_weather(name, rng):
@@ -211,7 +213,7 @@ def spawn_vehicle(world, tm_port, spawn_point=None):
     return vehicle
 
 
-def spawn_npcs(client, world, num_vehicles=30, num_walkers=10, tm_port=8001):
+def spawn_npcs(client, world, num_vehicles=30, num_walkers=10, tm_port=8000):
     """生成 NPC 车辆和行人 (参考 scenario_manager.py)"""
     import time
     total_start = time.time()
@@ -401,7 +403,7 @@ def main():
     parser.add_argument('--host', default='localhost', help='CARLA服务器地址')
     parser.add_argument('--port', type=int, default=2000, help='CARLA端口')
     parser.add_argument('--town', default='Town10HD', help='地图名称')
-    parser.add_argument('--output', default='d:/code/carla/dataset_10k_bak', help='输出目录 (默认: dataset_10k_bak)')
+    parser.add_argument('--output', default='D:/carla_datasets/occ_v2', help='输出目录 (默认: D:/carla_datasets/occ_v2)')
     parser.add_argument('--frames', type=int, default=10, help='采集帧数 (默认: 10)')
     parser.add_argument('--scene', default='scene', help='场景名称前缀')
     parser.add_argument('--num-vehicles', type=int, default=30, help='NPC车辆数量')
@@ -420,7 +422,8 @@ def main():
     parser.add_argument('--scene-index', type=int, default=None,
                         help='场景编号 (sample_id 里的 scene_XXXX)；默认新建时 0、--append 时取下一个空闲编号')
     parser.add_argument('--no-camera-mask', action='store_true',
-                        help='不计算 mask_camera (相机可见性掩码，见 processing/camera_visibility.py)')
+                        help='关闭整个相机侧后处理：不计算 mask_camera，也不做地面语义重绘和静态物体自由空间雕刻 '
+                             '(真值会明显变差，只用于调试/对照，见 processing/camera_visibility.py)')
     parser.add_argument('--verbose', action='store_true', help='打印体素生成器的逐帧调试信息')
     parser.add_argument('--lidar-filter', action='store_true',
                         help='启用旧的 LiDAR 实例可见性过滤 (默认关闭)。LiDAR 装在 1.0m，看不到的东西比相机多，'
@@ -475,6 +478,10 @@ def main():
             np.random.seed(args.seed)       # NPC 车型/颜色/行人位置
         weather, weather_params = choose_weather(args.weather, np.random.default_rng(args.seed))
         client, world, tm_port = setup_carla(args.host, args.port, args.town, weather)
+        if args.seed is not None:
+            # 交通流和行人导航的随机性也固定下来 (之前只设了 Python/NumPy 种子，同一个 --seed 交通仍不同)
+            client.get_trafficmanager(tm_port).set_random_device_seed(args.seed)
+            world.set_pedestrians_seed(args.seed)
         print(f"  ✓ 天气 {args.weather}: " + ', '.join(f'{k}={v:.1f}' for k, v in weather_params.items()))
         print(f"  耗时: {(time.time()-step_start):.2f}s")
 
@@ -487,7 +494,9 @@ def main():
         # 3. 生成 NPC
         print("\n[2/5] 生成 NPC...")
         step_start = time.time()
-        npc_actors = spawn_npcs(client, world, args.num_vehicles, args.num_walkers, tm_port=8001)
+        # 与自车同一个 Traffic Manager：setup_carla 只把这个端口设成了同步模式。2026-10-15 前 NPC 写死 8001，
+        # 那个 TM 从没设同步，NPC 在同步仿真里由异步 TM 控制，行为不可复现
+        npc_actors = spawn_npcs(client, world, args.num_vehicles, args.num_walkers, tm_port=tm_port)
         print(f"  ✅ NPC 生成完成，耗时: {(time.time()-step_start):.2f}s")
 
         # 4. 附加传感器
@@ -531,7 +540,7 @@ def main():
         # 6. 保存相机标定
         intrinsics = {cam['id']: camera_manager.get_intrinsics(cam['id']) for cam in TESLA_CAMERAS}
         extrinsics = {cam['id']: camera_manager.get_extrinsics(cam['id']) for cam in TESLA_CAMERAS}
-        data_saver.save_calibration(intrinsics, extrinsics, TESLA_CAMERAS)
+        data_saver.save_calibration(intrinsics, extrinsics, TESLA_CAMERAS, must_match_existing=args.append)
         print(f"  ✓ 相机标定已保存")
         # 相机可见性掩码：从刚写出的标定文件构造，与离线补算 compute_camera_mask.py 走同一条路径
         camera_vis = None
@@ -624,13 +633,7 @@ def main():
             step_start = time.time()
             # 5.1 生成原始全透视体素
             occupancy, actor_ids = voxel_generator.generate(world, vehicle)
-            # 5.2 生成 Flow (基于真实速度)：位移时长 = 相邻两个保存帧的间隔，与 ego_motion 对应同一段时间
-            flow, flow_mask = voxel_generator.generate_flow(
-                world,
-                vehicle,
-                dt=FIXED_DELTA_SECONDS * args.frame_skip
-            )
-            # 5.3 (可选) LiDAR 实例过滤：LiDAR 一个点都没打到的物体实例整体置 free。默认关闭，见 --lidar-filter
+            # 5.2 (可选) LiDAR 实例过滤：LiDAR 一个点都没打到的物体实例整体置 free。默认关闭，见 --lidar-filter
             if visibility_filter is not None:
                 occupancy, actor_ids = visibility_filter.run(
                     occupancy,
@@ -641,7 +644,7 @@ def main():
                 )
 
             voxel_time = (time.time() - step_start) * 1000
-            print(f"  [5/6] 体素生成 + Flow + 过滤: {voxel_time:.1f}ms ⭐")
+            print(f"  [5/6] 体素生成: {voxel_time:.1f}ms ⭐")
 
             if ego_pose_prev is not None:
                 ego_motion = np.linalg.inv(ego_pose) @ ego_pose_prev
@@ -665,7 +668,8 @@ def main():
                     mask_camera, st = finalize_ground_truth(
                         camera_vis, occupancy, actor_ids,
                         [depth_dict[c['id']] for c in by_index],
-                        [sem_data[c['id']]['data'] for c in by_index])
+                        [sem_data[c['id']]['data'] for c in by_index],
+                        object_volume=voxel_generator.static_object_volume)
                     print(f"  [5.5/6] 相机侧后处理: {(time.time()-t_mask)*1000:.0f}ms, 观测体素 {st['observed']*100:.1f}%, "
                           f"地面重绘 {st['ground_cols_repainted']:,} 列, 雕掉 {st['carved']:,} 个静态体素")
             if camera_vis is not None and mask_camera is None:
@@ -674,6 +678,11 @@ def main():
                 ego_pose_prev = None
                 data_saver.generate_sample_id()
                 continue
+
+            # 5.6 Flow：写在最终体素里属于各车辆/行人的体素上 (与 occupancy 同一份实例归属)，
+            # 位移时长 = 相邻两个保存帧的间隔，与 ego_motion 对应同一段时间。仍是本 sim 帧的状态 (之间没有 tick)
+            flow, flow_mask = voxel_generator.generate_flow(
+                world, vehicle, actor_ids, dt=FIXED_DELTA_SECONDS * args.frame_skip)
 
             sample_id = data_saver.generate_sample_id()
 
@@ -690,6 +699,20 @@ def main():
                 depth=depth_dict,  # ⭐ 保存深度图
                 actor_ids=actor_ids if args.debug_actor_ids else None,
                 mask_camera=mask_camera,
+                meta={
+                    'sim_frame': int(sim_frame),
+                    'timestamp': float(world.get_snapshot().timestamp.elapsed_seconds),
+                    'frame_dt': FIXED_DELTA_SECONDS * args.frame_skip,
+                    'sensor_frames': {
+                        'rgb': sorted({int(v['frame']) for v in camera_data.values()}),
+                        'depth': sorted({int(v['frame']) for v in depth_data.values()}) if depth_data else [],
+                        'semantic': sorted({int(v['frame']) for v in sem_data.values()}) if sem_data else [],
+                    },
+                    'label_version': LABEL_VERSION,
+                    'generator': GENERATOR_VERSION,
+                    'flow_definition': 'v_actor + w x r, world velocity extrapolated over frame_dt, ego frame',
+                    'postprocess': None if camera_vis is None else st,
+                },
             )
             save_time = (time.time() - step_start) * 1000
             depth_info = "+ 8 Depth" if depth_dict else ""

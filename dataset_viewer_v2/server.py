@@ -42,11 +42,10 @@ def after_request(response):
 def _get_raw_bit_depth(dataset_dir_str):
     """
     读取数据集 calibration/intrinsics.json 顶层的 raw_bit_depth (main_collection.py
-    --raw-bit-depth，默认12)。DNG 里没有正确写 WhiteLevel 标签 (TIFF/DNG 标准标签，
-    piexif 不支持写非标准 DNG tag，这里选择在读取侧修正而不是啃 DNG tag 格式)，
-    rawpy 默认按 65535(16-bit) 当白点解析，但实际数据是 2**raw_bit_depth-1 (12-bit
+    --raw-bit-depth，默认12)。2026-10 之前采集的 DNG 没有正确写 WhiteLevel 标签，
+    rawpy 按 65535(16-bit) 当白点解析，但实际数据是 2**raw_bit_depth-1 (12-bit
     时是4095)，不传 user_sat 手动修正的话，postprocess 的自动曝光/色调映射会按错误
-    的白点跑，图像发灰发暗。找不到 intrinsics.json 或字段缺失时退回 12 (与
+    的白点跑，图像发灰发暗。新数据的 DNG 已写对 WhiteLevel，传同一个值无副作用。找不到 intrinsics.json 或字段缺失时退回 12 (与
     OccNetDataSaver 的默认值保持一致)。用 lru_cache 是因为每个数据集这个值只有一份，
     没必要每次请求图片都重新读一次 JSON 文件。
     """
@@ -70,16 +69,25 @@ def process_dng_cached(dng_path_str, half_size, user_sat):
     """
     import rawpy
     with rawpy.imread(dng_path_str) as raw:
-        rgb = raw.postprocess(use_camera_wb=True, half_size=half_size, no_auto_bright=False,
-                               user_sat=user_sat)
+        rgb = develop_dng(raw, half_size, user_sat)
         return rgb
+
+def develop_dng(raw, half_size, user_sat):
+    """把我们的 DNG 解成显示用 RGB。数据不是线性传感器 RAW：鱼眼各面捕获的是 UE 色调映射 + sRGB 编码之后的
+    FinalColorLDR (UE58_RENDERING_ISSUES.md 第 3 节)，Bayer 只是从这张成品图里按 RGGB 相位挑通道。
+    rawpy 默认按线性 RAW 再套一次 BT.709 伽马 + 自动亮度 + 相机色彩矩阵，结果发白发灰、对比度低
+    (2026-10-15 同帧对照：均值 178/标准差 44，UE 原图 121/49)。这里只去马赛克，不再叠任何色调处理。"""
+    import rawpy
+    return raw.postprocess(use_camera_wb=True, half_size=half_size, no_auto_bright=True, gamma=(1, 1),
+                           output_color=rawpy.ColorSpace.raw, user_sat=user_sat)
+
 
 def create_placeholder_image(text="Error", size=(640, 480)):
     img = Image.new('RGB', size, color=(30, 30, 30))
     return img
 
 # 默认配置
-DEFAULT_DATASET_DIR = r"d:\code\carla\dataset_10k_bak"
+DEFAULT_DATASET_DIR = r"D:\carla_datasets\occ_v2"
 CURRENT_DATASET_DIR = DEFAULT_DATASET_DIR
 CURRENT_PREDICTION_DIR = None  # 推理结果目录 (e2e_occ/inference.py 输出)，可选
 
@@ -288,8 +296,7 @@ def get_image(frame_id, cam_idx):
                 import rawpy
                 user_sat = 2 ** _get_raw_bit_depth(str(dataset_path)) - 1
                 with rawpy.imread(str(dng_path)) as raw:
-                    rgb = raw.postprocess(use_camera_wb=True, half_size=False, no_auto_bright=False,
-                                           user_sat=user_sat)
+                    rgb = develop_dng(raw, False, user_sat)
                 img_pil = Image.fromarray(rgb)
                 img_io = io.BytesIO()
                 img_pil.save(img_io, 'JPEG', quality=92)
@@ -297,7 +304,7 @@ def get_image(frame_id, cam_idx):
                 return send_file(img_io, mimetype='image/jpeg')
 
             # 缩略图路径：DNG-to-PNG 持久化缓存
-            cache_dir = dataset_path / '.png_cache' / 'images' / frame_id
+            cache_dir = dataset_path / '.png_cache' / 'images_v2' / frame_id     # v2: develop_dng 不叠伽马
             cache_png = cache_dir / f"cam_{cam_idx}.png"
 
             use_cache = False
@@ -370,7 +377,7 @@ def get_image(frame_id, cam_idx):
 
 @app.route('/api/depth/<frame_id>/<int:cam_idx>')
 def get_depth(frame_id, cam_idx):
-    """深度图上色预览。depth/*.npy 是 (H,W) float32，单位米。?max_depth=80 可调裁剪范围。"""
+    """深度图上色预览。depth/*.npy 是 (H,W) float16 (旧数据 float32)，单位米。?max_depth=80 可调裁剪范围。"""
     dataset_path = Path(CURRENT_DATASET_DIR)
     depth_path = dataset_path / 'depth' / frame_id / f"cam_{cam_idx}.npy"
     if not depth_path.exists():

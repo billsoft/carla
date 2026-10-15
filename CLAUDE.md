@@ -43,7 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   （太阳 8~70°、晴/少云/阴、轻雾，不下雨），写 `scenes/<scene>.json`。
 - **数据集 label_version 2（2026-10-14）**：交通灯/标志→manmade、车道线→路面、路缘→人行道，新增相机可见性掩码
   `mask_camera/`（训练时未观测体素置 255）、静态物体 AABB 的相机自由空间雕刻、flow 改为物体自身速度、深度图 float16、`depth_fov` 覆盖整幅鱼眼、flow 存压缩 `.npz`、`--frame-skip`、
-  `batch_collection.py` 批量采集（按场景划分 train/val）。详见 `occnetv3_data_generator/README.md`。
+  `batch_collection.py` 批量采集（按场景划分 train/val）。2026-10-15 真值几何修复：包围盒按盒子局部坐标判定（环境物体 76% 带旋转）、坡道/侧倾地面按自车坐标求交、地面体素整层高一格的 off-by-one、流场用最终实例归属 + 角速度、类别兜底顺序、观测掩码裁到鱼眼视野、NPC 同步 TM；`audit_labels.py` 用留出相机做独立检查 (`--legacy` A/B)。详见 `occnetv3_data_generator/README.md`。
 - 改相机/传感器 C++ 后要重新打包部署 81：`build_package_development.bat` → `remote\carla_remote.ps1 -Action deploy`。
 
 ---

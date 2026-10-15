@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from .geometry import equidistant_unproject, level_pixel_to_image
+    from .geometry import equidistant_unproject, level_pixel_to_image, no_autocast
 except ImportError:
-    from geometry import equidistant_unproject, level_pixel_to_image
+    from geometry import equidistant_unproject, level_pixel_to_image, no_autocast
 
 
 class SineCosinePositionEncoding3D(nn.Module):
@@ -49,16 +49,18 @@ def pixel_rays_vehicle(intrinsics, extrinsics, H, W, stride):
     geometry.py 的同一套等距投影公式实现。
     """
     device = intrinsics.device
-    ys = level_pixel_to_image(torch.arange(H, device=device, dtype=torch.float32), stride)
-    xs = level_pixel_to_image(torch.arange(W, device=device, dtype=torch.float32), stride)
-    v, u = torch.meshgrid(ys, xs, indexing='ij')                    # [H, W]，原图像素坐标
-    fx = intrinsics[..., 0, 0, None, None]
-    fy = intrinsics[..., 1, 1, None, None]
-    cx = intrinsics[..., 0, 2, None, None]
-    cy = intrinsics[..., 1, 2, None, None]
-    dirs_cam = equidistant_unproject(u, v, fx, fy, cx, cy)          # [B, N, H, W, 3]
-    R = extrinsics[..., :3, :3]
-    return torch.einsum('bnij,bnhwj->bnhwi', R, dirs_cam)
+    with no_autocast(device):                                         # 几何一律 FP32，见 geometry.py
+        intrinsics, extrinsics = intrinsics.float(), extrinsics.float()
+        ys = level_pixel_to_image(torch.arange(H, device=device, dtype=torch.float32), stride)
+        xs = level_pixel_to_image(torch.arange(W, device=device, dtype=torch.float32), stride)
+        v, u = torch.meshgrid(ys, xs, indexing='ij')                # [H, W]，原图像素坐标
+        fx = intrinsics[..., 0, 0, None, None]
+        fy = intrinsics[..., 1, 1, None, None]
+        cx = intrinsics[..., 0, 2, None, None]
+        cy = intrinsics[..., 1, 2, None, None]
+        dirs_cam = equidistant_unproject(u, v, fx, fy, cx, cy)      # [B, N, H, W, 3]
+        R = extrinsics[..., :3, :3]
+        return torch.einsum('bnij,bnhwj->bnhwi', R, dirs_cam)
 
 
 class RayDirectionEncoding(nn.Module):
@@ -91,5 +93,7 @@ class RayDirectionEncoding(nn.Module):
     def forward(self, intrinsics, extrinsics, H, W, stride):
         """返回 [B, N, dim, H, W]"""
         rays = pixel_rays_vehicle(intrinsics, extrinsics, H, W, stride)
-        encoded = self.proj(self._sinusoidal_encoding(rays))
+        with no_autocast(rays.device):                                # 最高频 2^9·π：FP32 算完再进 MLP
+            enc = self._sinusoidal_encoding(rays.float())
+        encoded = self.proj(enc)
         return encoded.permute(0, 1, 4, 2, 3)

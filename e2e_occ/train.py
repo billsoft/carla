@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 import math
 import os
 import random
@@ -12,12 +13,8 @@ import torch.nn as nn
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import E2EOccConfig, upgrade_config
 from e2e_occ_net import build_model
-from loss import E2ELoss, sample_implicit_points, update_confusion, miou_from_confusion
-
-CLASS_NAMES = ['free', 'barrier', 'bicycle', 'bus', 'car', 'construction', 'motorcycle', 'pedestrian',
-               'traffic_cone', 'trailer', 'truck', 'driveable', 'other_flat', 'sidewalk', 'terrain',
-               'manmade', 'vegetation', 'general_obj']
-from dataset import get_dataloader
+from loss import E2ELoss, OccMetrics, sample_implicit_points
+from dataset import get_dataloader, OccupancyDataset, _SAMPLE_RE
 
 # conda activate deepsys
 # python e2e_occ/train.py --data_root <dataset_dir> --batch_size 1 --epochs 100 --amp --grad_accum 4
@@ -41,7 +38,7 @@ def frame_targets(batch, t, device, config, point_idx=None):
 
 
 def run_sequence(model, batch, criterion, config, device, amp_dtype, use_amp, train=True,
-                 tbptt=2, grad_scale=1.0, scaler=None, confusion=None):
+                 tbptt=2, grad_scale=1.0, scaler=None, metrics=None):
     """逐帧前向一个序列（T=1 时即单帧）；训练时按 tbptt 帧一段做截断反向传播。
 
     返回各损失项的序列平均值（python float 字典）。
@@ -76,7 +73,8 @@ def run_sequence(model, batch, criterion, config, device, amp_dtype, use_amp, tr
 
         with torch.autocast('cuda', dtype=amp_dtype, enabled=use_amp):
             out = model(images[:, t], intrinsics, extrinsics, memory=memory, ego_motion=ego_motion,
-                        time_delta=time_delta_all[:, t] if t > 0 else None, query_points=query_points)
+                        time_delta=time_delta_all[:, t] if t > 0 else None, query_points=query_points,
+                        need_aux=True)                    # 验证 (eval) 时也要深度 logits 算验证损失
             tg = frame_targets(batch, t, device, config, point_idx)
             losses = criterion(out, tg)
 
@@ -84,9 +82,8 @@ def run_sequence(model, batch, criterion, config, device, amp_dtype, use_amp, tr
         for k, v in losses.items():
             logs[k] = logs.get(k, 0.0) + float(v.detach()) / T
 
-        if confusion is not None and 'semantic' in out:
-            pred = out['semantic'].argmax(1)
-            update_confusion(confusion, pred, tg['voxels'], config.num_classes)
+        if metrics is not None and 'semantic' in out:
+            metrics.update(out['semantic'].argmax(1), tg['voxels'])
 
         if train:
             chunk_loss = chunk_loss + losses['total'] * weights[t]
@@ -137,29 +134,85 @@ def train_epoch(model, loader, criterion, optimizer, scaler, scheduler, device, 
 
 @torch.no_grad()
 def validate(model, loader, criterion, device, config, args, amp_dtype):
+    """序列模式验证：与训练相同的 T 帧短序列，每个序列从空记忆开始。"""
     model.eval()
     totals, n = {}, 0
-    confusion = torch.zeros(config.num_classes, config.num_classes, dtype=torch.long, device=device)
+    metrics = OccMetrics(config, device)
     for i, batch in enumerate(loader):
         logs = run_sequence(model, batch, criterion, config, device, amp_dtype, args.amp, train=False,
-                            confusion=confusion)
+                            metrics=metrics)
         for k, v in logs.items():
             totals[k] = totals.get(k, 0.0) + v
         n += 1
         if args.max_steps and i + 1 >= args.max_steps:
             break
     torch.cuda.empty_cache()
-    miou, iou = miou_from_confusion(confusion)
     out = {k: v / max(1, n) for k, v in totals.items()}
-    out['miou'] = miou
-    present = (confusion.sum(1) > 0).tolist()
-    # 几何 IoU (占用/空，不分类别；Occ3D 常用的第二个指标)，只在观测体素上 (confusion 已排除 255)
-    occ_tp = confusion[1:, 1:].sum().item()
-    occ_union = confusion.sum().item() - confusion[0, 0].item()
-    out['geo_iou'] = occ_tp / max(1, occ_union)
-    out['per_class'] = ' '.join(f'{CLASS_NAMES[c]}={iou[c].item():.3f}' for c in range(1, config.num_classes)
-                                if present[c])
+    out.update(metrics.summary())
     return out
+
+
+@torch.no_grad()
+def validate_stream(model, dataset, criterion, device, config, args, amp_dtype):
+    """流式验证 (默认)：按场景、帧号顺序逐帧推理，场景内一直携带时序记忆，与车端部署一致。
+    帧号不连续 (采集丢帧) 或换场景时清空记忆。短序列验证测不出长时间运行的记忆漂移，这个可以。"""
+    model.eval()
+    totals, n = {}, 0
+    metrics = OccMetrics(config, device)
+    keys = []
+    for pos, start in enumerate(dataset.index):
+        m = _SAMPLE_RE.match(dataset.samples[start])
+        keys.append(((m['scene'], int(m['frame'])) if m else (dataset.samples[start], 0), pos))
+    keys.sort()
+    memory, prev_key, prev_pose = None, None, None
+    for step, (key, pos) in enumerate(keys):
+        sample = dataset[pos]
+        batch = {k: v.unsqueeze(0) for k, v in sample.items() if torch.is_tensor(v)}
+        cont = (config.use_temporal and prev_key is not None and key[0] == prev_key[0]
+                and key[1] == prev_key[1] + 1)
+        if not cont:
+            memory = None
+        ego_motion = (torch.linalg.inv(batch['pose'][:, 0]) @ prev_pose).float().to(device) if cont else None
+        time_delta = batch['time_delta'][:, 0].to(device) if cont else None
+        with torch.autocast('cuda', dtype=amp_dtype, enabled=args.amp):
+            out = model(batch['images'][:, 0].to(device), batch['intrinsics'].to(device),
+                        batch['extrinsics'].to(device), memory=memory, ego_motion=ego_motion,
+                        time_delta=time_delta, need_aux=True)
+            tg = frame_targets(batch, 0, device, config)
+            losses = criterion(out, tg)
+        memory = out['memory']
+        metrics.update(out['semantic'].argmax(1), tg['voxels'])
+        for k, v in losses.items():
+            totals[k] = totals.get(k, 0.0) + float(v)
+        n += 1
+        prev_key, prev_pose = key, batch['pose'][:, 0]
+        if args.max_steps and step + 1 >= args.max_steps:
+            break
+    torch.cuda.empty_cache()
+    out = {k: v / max(1, n) for k, v in totals.items()}
+    out.update(metrics.summary())
+    return out
+
+
+def check_split_leak(data_root, train_samples, val_samples, allow):
+    """训练集和验证集按场景不能有交集：相邻帧几乎重复，同一场景跨 train/val 时验证指标虚高，还会被用来选
+    best_model。采集侧在没有独立验证场景时会让验证集复用训练场景 (splits.json 标记 debug_val_reuses_train)，
+    那只能用于调试；这里默认拒绝启动，--allow_val_overlap 显式放行。"""
+    scene = lambda s: (_SAMPLE_RE.match(s)['scene'] if _SAMPLE_RE.match(s) else s)  # noqa: E731
+    overlap = sorted({scene(s) for s in train_samples} & {scene(s) for s in val_samples})
+    flagged = False
+    split_path = os.path.join(data_root, 'splits.json')
+    if os.path.exists(split_path):
+        import json
+        with open(split_path, encoding='utf-8') as f:
+            flagged = bool(json.load(f).get('debug_val_reuses_train', False))
+    if not overlap and not flagged:
+        return
+    msg = (f'训练集与验证集共有 {len(overlap)} 个相同场景 (例如 {overlap[:3]})' if overlap else '') +           (' splits.json 标记了 debug_val_reuses_train' if flagged else '')
+    if not allow:
+        raise SystemExit(f'数据泄漏：{msg}。验证指标会虚高并误选 best_model；采更多场景，'
+                         f'或单场景调试时加 --allow_val_overlap')
+    print(f'⚠️ {msg}——--allow_val_overlap 已放行，验证指标仅供调试参考', flush=True)
 
 
 def main():
@@ -184,6 +237,11 @@ def main():
                              '显存与单帧相同）；2 及以上让梯度穿过记忆，显存按帧数线性增长')
     parser.add_argument('--compile', action='store_true', help='torch.compile（Windows 上 Triton 不稳定，仅供尝试）')
     parser.add_argument('--max_steps', type=int, default=0, help='每个 epoch 最多跑多少个 batch（冒烟测试用）')
+    parser.add_argument('--allow_val_overlap', action='store_true',
+                        help='允许验证集与训练集有相同场景 (只在单场景调试时用；正式训练会因数据泄漏拒绝启动)')
+    parser.add_argument('--val_mode', choices=['stream', 'seq'], default='stream',
+                        help='stream (默认)：按场景逐帧推理、一直携带时序记忆 (与车端部署一致)；'
+                             'seq：与训练相同的 T 帧短序列 (每个序列从空记忆开始)')
     parser.add_argument('--seed', type=int, default=0, help='随机种子 (样本顺序、隐式头采样点、参数初始化)')
     parser.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
                         help='覆盖配置字段，例如 --set use_sparse_fine=False head_type=implicit')
@@ -231,7 +289,15 @@ def main():
     scaler = torch.amp.GradScaler('cuda', enabled=(args.amp and amp_dtype == torch.float16))
 
     train_loader = get_dataloader(args.data_root, 'train', args.batch_size, args.num_workers, config)
-    val_loader = get_dataloader(args.data_root, 'val', args.batch_size, args.num_workers, config)
+    if args.val_mode == 'seq':
+        val_loader = get_dataloader(args.data_root, 'val', args.batch_size, args.num_workers, config)
+        val_size = len(val_loader.dataset)
+    else:
+        # 单帧取样 (T=1)，记忆由 validate_stream 自己跨帧携带
+        val_dataset = OccupancyDataset(args.data_root, 'val', dataclasses.replace(config, use_temporal=False))
+        val_size = len(val_dataset)
+    check_split_leak(args.data_root, train_loader.dataset.samples,
+                     (val_loader.dataset if args.val_mode == 'seq' else val_dataset).samples, args.allow_val_overlap)
 
     max_batches = min(len(train_loader), args.max_steps) if args.max_steps else len(train_loader)
     steps_per_epoch = max(1, math.ceil(max_batches / args.grad_accum))
@@ -269,18 +335,20 @@ def main():
 
     train_model = torch.compile(model) if args.compile else model
     print(f'模型参数量: {model.get_num_params() / 1e6:.2f}M | 样本: train {len(train_loader.dataset)} '
-          f'val {len(val_loader.dataset)} | AMP={args.amp}({args.amp_dtype}) T={config.temporal_frames} '
+          f'val {val_size} ({args.val_mode}) | AMP={args.amp}({args.amp_dtype}) T={config.temporal_frames} '
           f'TBPTT={args.tbptt} head={config.head_type} sparse={config.use_sparse_fine}', flush=True)
 
     for epoch in range(start_epoch, args.epochs):
         tr = train_epoch(train_model, train_loader, criterion, optimizer, scaler, scheduler, device, epoch,
                          config, args, amp_dtype)
 
-        va = validate(model, val_loader, criterion, device, config, args, amp_dtype)
+        if args.val_mode == 'seq':
+            va = validate(model, val_loader, criterion, device, config, args, amp_dtype)
+        else:
+            va = validate_stream(model, val_dataset, criterion, device, config, args, amp_dtype)
         print(f"Epoch {epoch}: train_total={tr.get('total', 0):.4f} val_total={va.get('total', 0):.4f} "
-              f"val_mIoU={va['miou']:.4f} val_geoIoU={va['geo_iou']:.4f} lr={optimizer.param_groups[0]['lr']:.2e}",
-              flush=True)
-        print(f"  per-class IoU: {va['per_class']}", flush=True)
+              f"lr={optimizer.param_groups[0]['lr']:.2e}", flush=True)
+        print('  val ' + OccMetrics.format(va), flush=True)
 
         is_best = va['miou'] > best_miou
         best_miou = max(best_miou, va['miou'])

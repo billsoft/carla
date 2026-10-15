@@ -58,7 +58,8 @@ class MultiCameraPatchEmbed(nn.Module):
 
     def forward(self, images):
         B, N, C, H, W = images.shape
-        f8, f16 = self.patch_embed(images.view(B * N, C, H, W))
+        # reshape 而不是 view：训练传入的 images[:, t] 在 B>1 时不连续，view 会直接报错
+        f8, f16 = self.patch_embed(images.reshape(B * N, C, H, W))
         out = {16: self._channel_norm(self.norm16, f16)}
         if self.use_multiscale:
             out[8] = self._channel_norm(self.norm8, self.proj8(f8))

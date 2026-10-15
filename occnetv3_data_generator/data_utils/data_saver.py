@@ -2,6 +2,7 @@
 数据保存器 - OccNetV3 数据集格式
 按照 DATASET_FORMAT.md 规范保存
 """
+import os
 import json
 import hashlib
 import numpy as np
@@ -30,6 +31,57 @@ try:
 except ImportError:
     DNG_AVAILABLE = False
     print("[警告] 未安装 Pillow，DNG格式不可用。安装: pip install Pillow")
+
+
+def _atomic_write(path, write_fn):
+    """write_fn(fileobj) 写到 <path>.tmp，成功后 os.replace 原子改名为 path；失败删除临时文件并抛出。
+    进程在写入中途被杀时只会留下 .tmp，不会留下截断的正式文件被当成有效样本。"""
+    path = Path(path)
+    tmp = path.with_name(path.name + '.tmp')
+    try:
+        with open(tmp, 'wb') as f:
+            write_fn(f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+# 数据集级写入协议文件：存在即表示这个目录由带完成标记的新代码写过。此后没有完成标记的帧一律不完整，
+# 只有它创建时已经在盘上、没有完成标记的旧帧 (legacy_samples) 才按"必需文件存在且非空"兜底
+PROTOCOL_FILE = 'write_protocol.json'
+
+
+def _marker_files(output_dir, sample_id):
+    """完成标记里的 {相对路径: 字节数}；没有标记/标记损坏/旧版标记没有 files 时返回 None。"""
+    marker = Path(output_dir) / 'meta' / f'{sample_id}.json'
+    try:
+        with open(marker, encoding='utf-8') as f:
+            return json.load(f).get('files') or None
+    except (OSError, ValueError):
+        return None
+
+
+def _json_diff(a, b, path='', tol=1e-6):
+    """两个 json 对象的差异列表 (数值按容差比较)。"""
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = []
+        for k in sorted(set(a) | set(b)):
+            if k not in a or k not in b:
+                out.append(f'{path}/{k} 只在一边')
+            else:
+                out += _json_diff(a[k], b[k], f'{path}/{k}', tol)
+        return out
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return [f'{path} 长度 {len(a)}≠{len(b)}']
+        return [d for i, (x, y) in enumerate(zip(a, b)) for d in _json_diff(x, y, f'{path}[{i}]', tol)]
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool):
+        return [] if abs(a - b) <= tol * max(1.0, abs(a)) else [f'{path}: {a}≠{b}']
+    return [] if a == b else [f'{path}: {a}≠{b}']
 
 
 class OccNetDataSaver:
@@ -72,7 +124,7 @@ class OccNetDataSaver:
                  save_actor_ids: bool = False, scene_index: int = 0):
         """
         Args:
-            output_dir: 输出根目录 (如 D:/code/carla/dataset_10k_bak)
+            output_dir: 输出根目录 (如 D:/carla_datasets/occ_v2)
             scene_name: 场景名称前缀
             raw_bit_depth: 保存 DNG 时模拟的传感器 ADC 位深 (8/10/12/14/16)，
                 默认 12-bit（常见 CMOS 传感器精度）。相机管线内部始终以 16-bit
@@ -90,6 +142,10 @@ class OccNetDataSaver:
         """
         if not (8 <= raw_bit_depth <= 16):
             raise ValueError(f"raw_bit_depth 必须在 8-16 之间，收到: {raw_bit_depth}")
+        if not DNG_AVAILABLE:
+            # 以前没有 Pillow 时用 OpenCV 写普通 TIFF 再改名 .dng：没有 CFAPattern/WhiteLevel，读回白点 65535，
+            # 下游拿到的是"看起来是 DNG 的错误数据"。宁可直接失败
+            raise ImportError("保存 DNG 需要 Pillow：pip install Pillow")
 
         self.output_dir = Path(output_dir)
         self.scene_name = scene_name
@@ -102,6 +158,8 @@ class OccNetDataSaver:
 
         # 后台IO线程池（DNG/npy异步写入，避免阻塞采集主线程）
         self._io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        # 完成标记单独一个线程：它要等同一帧在 IO 线程池里的写入，放在同一个池里可能把 4 个线程全占住死锁
+        self._marker_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self._pending_futures = []
 
         # 创建目录结构
@@ -123,6 +181,7 @@ class OccNetDataSaver:
             'ego_motion',
             'mask_camera',
             'scenes',
+            'meta',
         ]
 
         for d in dirs:
@@ -131,13 +190,23 @@ class OccNetDataSaver:
         if self.save_actor_ids:
             (self.output_dir / 'debug_actor_ids').mkdir(parents=True, exist_ok=True)
 
+        # 写入协议：首次用新代码打开这个目录时，把盘上已有、没有完成标记的旧帧冻结成 legacy 名单
+        self._marker_gen = {}
+        if (self.output_dir / PROTOCOL_FILE).exists():
+            self._legacy = self._legacy_samples()
+        else:
+            self._legacy = {q.stem for q in (self.output_dir / 'occupancy').glob('*.npy')
+                            if _marker_files(self.output_dir, q.stem) is None}
+            self._write_protocol()
+
         print(f"  ✓ 目录结构已创建 (含 depth 目录{', 含 debug_actor_ids 目录' if self.save_actor_ids else ''})")
 
     def save_calibration(
         self,
         camera_intrinsics: Dict[str, np.ndarray],
         camera_extrinsics: Dict[str, np.ndarray],
-        camera_configs: List[Dict]
+        camera_configs: List[Dict],
+        must_match_existing: bool = False,
     ):
         """
         保存相机标定文件
@@ -170,8 +239,11 @@ class OccNetDataSaver:
                 # 等距投影 (equidistant, r=f*theta)，与 CARLA sensor.camera.rgb_fisheye
                 # (camera_model=equidistant) 采集时用的投影模型一致，不是针孔模型，
                 # 没有径向/切向畸变系数的概念
+                # 与 camera_manager 实际传给传感器的镜头模型一致 (之前固定写 equidistant，配了
+                # Kannala-Brandt 的相机标定会被错误解释)
                 'distortion': {
-                    'model': 'equidistant',
+                    'model': cam_config.get('lens_model', 'equidistant'),
+                    'coeffs': [float(k) for k in cam_config.get('distortion_coeffs', (0.0, 0.0, 0.0, 0.0))],
                 }
             }
 
@@ -183,8 +255,9 @@ class OccNetDataSaver:
         # 真值语义版本 (见 config/occupancy_config.py LABEL_VERSION)，dataset.py 据此拒绝混用
         intrinsics_data['label_version'] = LABEL_VERSION
 
-        with open(self.output_dir / 'calibration' / 'intrinsics.json', 'w') as f:
-            json.dump(intrinsics_data, f, indent=2)
+        # 追加采集 (must_match_existing)：数据集里所有场景共用一份标定，新场景的相机配置必须与已有标定完全一致，
+        # 否则旧图片会被新标定解释 (之前追加时只比 label_version/位深，然后直接覆盖公共标定)
+        self._write_or_check_json('intrinsics.json', intrinsics_data, must_match_existing)
 
         # extrinsics.json
         extrinsics_data = {}
@@ -215,10 +288,23 @@ class OccNetDataSaver:
         extrinsics_data['rotation_convention'] = 'ue_frotator'
         extrinsics_data['camera_axes'] = 'ue'
 
-        with open(self.output_dir / 'calibration' / 'extrinsics.json', 'w') as f:
-            json.dump(extrinsics_data, f, indent=2)
+        self._write_or_check_json('extrinsics.json', extrinsics_data, must_match_existing)
 
         print(f"  ✓ 标定文件已保存")
+
+    def _write_or_check_json(self, name, data, must_match_existing):
+        path = self.output_dir / 'calibration' / name
+        if must_match_existing and path.exists():
+            with open(path, encoding='utf-8') as f:
+                old = json.load(f)
+            new = json.loads(json.dumps(data))          # 与写盘后读回的形式一致 (tuple→list 等)
+            diff = _json_diff(old, new)
+            if diff:
+                raise ValueError(f'{path} 与本次相机配置不一致，不能追加到同一个数据集 (换个输出目录)：'
+                                 + '; '.join(diff[:5]))
+            return
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
 
     def save_sample(
         self,
@@ -232,6 +318,7 @@ class OccNetDataSaver:
         depth: Dict[str, np.ndarray] = None, # ⭐ 新增
         actor_ids: np.ndarray = None,  # 调试用，仅 save_actor_ids=True 时写盘
         mask_camera: np.ndarray = None,
+        meta: Dict = None,
     ):
         """
         保存一个训练样本
@@ -250,85 +337,115 @@ class OccNetDataSaver:
             actor_ids: (400, 400, 32) int32，只在 self.save_actor_ids 为 True 时才写盘 (可选)
             mask_camera: (400, 400, 32) bool，相机观测到的体素 (可选，见 processing/camera_visibility.py)
         """
-        # 1. 保存图像
+        # 写入协议 (2026-10-15)：每个文件先写 <name>.tmp 再 os.replace 原子改名 (进程被杀时不会留下截断的
+        # 正式文件)；这一帧全部文件 (含后台线程写的 DNG/深度/流场) 都成功后，最后写完成标记
+        # meta/<sid>.json，其中 files 列出每个文件的相对路径和字节数。sample_complete() 以完成标记为准逐个核对，
+        # 必需的输出 (掩码、深度...) 由这一帧实际写了什么决定，而不是从目录里有没有同类文件推断。
+        # 覆盖同名样本：先让旧完成标记失效，否则这一帧写到一半失败时，旧标记会把"新体素 + 旧图像"放行
+        # (2026-10-15 评审复现：文件大小恰好一致)。旧帧被覆盖后也不再享受 legacy 兜底
+        marker = self.output_dir / 'meta' / f'{sample_id}.json'
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+        if sample_id in self._legacy:
+            self._legacy.discard(sample_id)
+            self._write_protocol()
+        gen = self._marker_gen[sample_id] = self._marker_gen.get(sample_id, 0) + 1
+        written = {}                       # 相对路径 -> 同步写完的字节数 (异步文件在完成标记任务里补)
+        futures = []
+
+        def rel(p):
+            return p.relative_to(self.output_dir).as_posix()
+
+        def sync_npy(path, arr):
+            _atomic_write(path, lambda f: np.save(f, arr))
+            written[rel(path)] = path.stat().st_size
+
+        def async_write(path, fn):
+            futures.append((rel(path), self._io_executor.submit(_atomic_write, path, fn)))
+
+        # 1. 图像
         img_dir = self.output_dir / 'images' / sample_id
         img_dir.mkdir(parents=True, exist_ok=True)
-
         for cam_id, img_info in images.items():
-            # 提取相机索引 (如 'front_main' → 0)
             cam_index = self._get_cam_index(cam_id)
-
-            # 检查数据类型
             if isinstance(img_info, dict) and 'raw_type' in img_info:
-                # 处理 Bayer 数据 - 异步提交到IO线程池，不阻塞主线程
-                raw_type = img_info['raw_type']
                 data = img_info['data'].copy()  # 拷贝避免主线程修改
-                output_path = img_dir / f'cam_{cam_index}.dng'
-
-                if raw_type == 'bayer_rggb':
-                    fut = self._io_executor.submit(self._save_bayer_dng, data, output_path)
-                    self._pending_futures.append(fut)
+                if img_info['raw_type'] == 'bayer_rggb':
+                    path = img_dir / f'cam_{cam_index}.dng'
+                    async_write(path, lambda f, d=data: self._save_bayer_dng(d, f))
                 else:
-                    fut = self._io_executor.submit(np.save, img_dir / f'cam_{cam_index}.npy', data)
-                    self._pending_futures.append(fut)
+                    async_write(img_dir / f'cam_{cam_index}.npy', lambda f, d=data: np.save(f, d))
             else:
-                # 兼容旧格式 (直接传入 array)
-                img = img_info
-                np.save(img_dir / f'cam_{cam_index}.npy', img)
+                sync_npy(img_dir / f'cam_{cam_index}.npy', img_info)      # 兼容旧格式 (直接传入 array)
 
-        # 2. 保存occupancy
+        # 2. occupancy
         assert occupancy.shape == GRID_SIZE, f"occupancy形状错误: {occupancy.shape} (expected {GRID_SIZE})"
-        np.save(self.output_dir / 'occupancy' / f'{sample_id}.npy', occupancy.astype(np.uint8))
+        sync_npy(self.output_dir / 'occupancy' / f'{sample_id}.npy', occupancy.astype(np.uint8))
 
-        # 3. 保存flow (可选)
+        # 3. flow (只有动态物体所在体素非零，压缩后从 ~30MB 降到几十 KB)
         if flow is not None:
             expected_flow_shape = (3,) + GRID_SIZE
             assert flow.shape == expected_flow_shape, f"flow形状错误: {flow.shape} (expected {expected_flow_shape})"
-            # 只有动态物体所在体素非零，压缩后从 ~30MB 降到几十 KB
-            fut = self._io_executor.submit(np.savez_compressed, self.output_dir / 'flow' / f'{sample_id}.npz',
-                                           flow=flow.astype(np.float16))
-            self._pending_futures.append(fut)
-
+            f16 = flow.astype(np.float16)
+            async_write(self.output_dir / 'flow' / f'{sample_id}.npz', lambda f: np.savez_compressed(f, flow=f16))
         if flow_mask is not None:
             assert flow_mask.shape == GRID_SIZE, f"flow_mask形状错误: {flow_mask.shape} (expected {GRID_SIZE})"
-            np.save(self.output_dir / 'flow_mask' / f'{sample_id}.npy', flow_mask.astype(np.uint8))
+            sync_npy(self.output_dir / 'flow_mask' / f'{sample_id}.npy', flow_mask.astype(np.uint8))
 
-        # 4. 保存ego数据 (可选)
+        # 4. ego
         if ego_pose is not None:
             assert ego_pose.shape == (4, 4), f"ego_pose形状错误: {ego_pose.shape}"
-            np.save(self.output_dir / 'ego_pose' / f'{sample_id}.npy', ego_pose.astype(np.float32))
-
+            sync_npy(self.output_dir / 'ego_pose' / f'{sample_id}.npy', ego_pose.astype(np.float32))
         if ego_motion is not None:
             assert ego_motion.shape == (4, 4), f"ego_motion形状错误: {ego_motion.shape}"
-            np.save(self.output_dir / 'ego_motion' / f'{sample_id}.npy', ego_motion.astype(np.float32))
+            sync_npy(self.output_dir / 'ego_motion' / f'{sample_id}.npy', ego_motion.astype(np.float32))
 
-        # 5. 保存深度图 (可选) ⭐ 新增
+        # 5. 深度图：float16 (米)，40m 处量化步长 0.03m，对深度监督和可见性掩码 (0.1m 容差) 都够用
         if depth is not None:
             depth_dir = self.output_dir / 'depth' / sample_id
             depth_dir.mkdir(parents=True, exist_ok=True)
-
             for cam_id, depth_data in depth.items():
-                cam_index = self._get_cam_index(cam_id)
-                # float16 (单位: 米)：40m 处量化步长 0.03m，对深度监督 (1~60m 对数分 bin) 和
-                # 可见性掩码 (0.1m 容差) 都够用，文件从 4.9MB 减半；天空 1000m 也在 float16 范围内
-                fut = self._io_executor.submit(np.save, depth_dir / f'cam_{cam_index}.npy',
-                                               depth_data.astype(np.float16))
-                self._pending_futures.append(fut)
+                d16 = depth_data.astype(np.float16)
+                async_write(depth_dir / f'cam_{self._get_cam_index(cam_id)}.npy', lambda f, d=d16: np.save(f, d))
 
-        # 6. 保存 actor_ids (可选，调试用)
+        # 6. actor_ids (可选，调试用)
         if self.save_actor_ids and actor_ids is not None:
             assert actor_ids.shape == GRID_SIZE, f"actor_ids形状错误: {actor_ids.shape} (expected {GRID_SIZE})"
-            np.save(self.output_dir / 'debug_actor_ids' / f'{sample_id}.npy', actor_ids.astype(np.int32))
+            sync_npy(self.output_dir / 'debug_actor_ids' / f'{sample_id}.npy', actor_ids.astype(np.int32))
 
         if mask_camera is not None:
             assert mask_camera.shape == GRID_SIZE, f"mask_camera形状错误: {mask_camera.shape}"
-            save_mask(self.output_dir / 'mask_camera' / f'{sample_id}.npy', mask_camera)
+            path = self.output_dir / 'mask_camera' / f'{sample_id}.npy'
+            _atomic_write(path, lambda f: save_mask(f, mask_camera))
+            written[rel(path)] = path.stat().st_size
+
+        # 7. 完成标记：等这一帧的后台写入全部成功后再写 (单线程，不占 IO 线程池)
+        meta = dict(meta or {})
+
+        def finish():
+            if self._marker_gen.get(sample_id) != gen:                   # 同名样本又被覆盖了：这份标记已过期
+                return False
+            files = dict(written)
+            for name, fut in futures:
+                try:
+                    fut.result()
+                except Exception as e:                                   # 任何一个失败：不写完成标记
+                    print(f"  [错误] {sample_id} 写 {name} 失败: {e}；该帧不会进入划分")
+                    return False
+                files[name] = (self.output_dir / name).stat().st_size
+            meta['files'] = files
+            _atomic_write(marker, lambda f: f.write(json.dumps(meta, ensure_ascii=False).encode('utf-8')))
+            return True
+
+        self._pending_futures.append(self._marker_executor.submit(finish))
 
         # 记录sample_id
         self.sample_ids.append(sample_id)
 
-    def _save_bayer_dng(self, bayer_data, output_path):
-        """保存 Bayer RGGB 数据为 DNG 格式"""
+    def _save_bayer_dng(self, bayer_data, fileobj):
+        """Bayer RGGB 数据写成 DNG 到 fileobj (由 _atomic_write 提供临时文件)；失败直接抛出，该帧不写完成标记"""
         # 转换为 uint16
         bayer_u16 = bayer_data.astype(np.uint16)
 
@@ -345,54 +462,28 @@ class OccNetDataSaver:
         else:
             bayer_quantized = bayer_u16
 
-        try:
-            # 使用 PIL/Pillow 保存单通道 16-bit TIFF（DNG 兼容）
-            if DNG_AVAILABLE:
-                # DNG = 带 DNG 标签的 TIFF。标签必须走 tiffinfo 直接写进 IFD0：以前用 piexif 构造
-                # exif 传给 PIL，那些标签根本没进 IFD，文件里没有 CFAPattern/WhiteLevel/DNGVersion，
-                # rawpy 读出来 white_level=65535、Bayer 排列靠猜。BitsPerSample 仍是容器宽度 16
-                # (PIL 不可改)，真实位深看 WhiteLevel / intrinsics.json 的 raw_bit_depth。
-                ifd = TiffImagePlugin.ImageFileDirectory_v2()
-                for tag, val, typ in (
-                    (262, 32803, 3),                              # PhotometricInterpretation = CFA
-                    (271, 'CARLA Simulator', 2),                  # Make
-                    (272, 'Bayer RGGB Camera', 2),                # Model
-                    (305, 'OccNetV3 Data Generator', 2),          # Software
-                    (50706, b'\x01\x04\x00\x00', 1),             # DNGVersion 1.4
-                    (50707, b'\x01\x01\x00\x00', 1),             # DNGBackwardVersion 1.1
-                    (50708, 'CARLA Bayer RGGB', 2),               # UniqueCameraModel
-                    (33421, (2, 2), 3),                           # CFARepeatPatternDim
-                    (33422, b'\x00\x01\x01\x02', 1),             # CFAPattern = R G / G B
-                    (50714, 0, 4),                                # BlackLevel (仿真无暗电流偏置)
-                    (50717, (1 << self.raw_bit_depth) - 1, 4),    # WhiteLevel = 2^bits - 1
-                ):
-                    ifd[tag] = val
-                    ifd.tagtype[tag] = typ
-                Image.fromarray(bayer_quantized).save(str(output_path), format='TIFF', compression='raw',
-                                                      tiffinfo=ifd)
-
-            else:
-                # 降级: 使用 OpenCV 保存为 TIFF 后重命名
-                path_tif = output_path.with_suffix('.tif')
-                success = cv2.imwrite(str(path_tif), bayer_quantized, [
-                    cv2.IMWRITE_TIFF_COMPRESSION, 1  # 无压缩
-                ])
-                if not success:
-                    raise IOError("cv2.imwrite returned False")
-
-                # 重命名为 .dng
-                if output_path.exists():
-                    output_path.unlink()
-                path_tif.rename(output_path)
-
-        except Exception as e:
-            print(f"  [错误] DNG保存失败: {e}")
-            # Fallback: 保存为 NPY
-            path_npy = output_path.with_suffix('.npy')
-            np.save(path_npy, bayer_data)
-
-        # 注意: 缩略图生成已移至外部调用，避免重复逻辑
-        height, width = bayer_data.shape
+        # Pillow 写单通道 16-bit TIFF（DNG 兼容）；Pillow 缺失时 __init__ 已报错
+        # DNG = 带 DNG 标签的 TIFF。标签必须走 tiffinfo 直接写进 IFD0：以前用 piexif 构造
+        # exif 传给 PIL，那些标签根本没进 IFD，文件里没有 CFAPattern/WhiteLevel/DNGVersion，
+        # rawpy 读出来 white_level=65535、Bayer 排列靠猜。BitsPerSample 仍是容器宽度 16
+        # (PIL 不可改)，真实位深看 WhiteLevel / intrinsics.json 的 raw_bit_depth。
+        ifd = TiffImagePlugin.ImageFileDirectory_v2()
+        for tag, val, typ in (
+            (262, 32803, 3),                              # PhotometricInterpretation = CFA
+            (271, 'CARLA Simulator', 2),                  # Make
+            (272, 'Bayer RGGB Camera', 2),                # Model
+            (305, 'OccNetV3 Data Generator', 2),          # Software
+            (50706, b'\x01\x04\x00\x00', 1),             # DNGVersion 1.4
+            (50707, b'\x01\x01\x00\x00', 1),             # DNGBackwardVersion 1.1
+            (50708, 'CARLA Bayer RGGB', 2),               # UniqueCameraModel
+            (33421, (2, 2), 3),                           # CFARepeatPatternDim
+            (33422, b'\x00\x01\x01\x02', 1),             # CFAPattern = R G / G B
+            (50714, 0, 4),                                # BlackLevel (仿真无暗电流偏置)
+            (50717, (1 << self.raw_bit_depth) - 1, 4),    # WhiteLevel = 2^bits - 1
+        ):
+            ifd[tag] = val
+            ifd.tagtype[tag] = typ
+        Image.fromarray(bayer_quantized).save(fileobj, format='TIFF', compression='raw', tiffinfo=ifd)
 
     def _generate_png_thumbnail(self, bayer_data: np.ndarray, dng_path: Path):
         """
@@ -485,6 +576,51 @@ class OccNetDataSaver:
         with open(self.output_dir / 'scenes' / f'{scene_id}.json', 'w', encoding='utf-8') as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
+    def sample_complete(self, sample_id: str, num_cameras: int = 8) -> bool:
+        """一个样本是否完整写完 (与 e2e_occ/dataset.py 的严格校验对应)。
+
+        新数据 (2026-10-15 起)：以完成标记 meta/<sid>.json 为准——它在这一帧所有文件都原子写完后才写，
+        files 字段记录每个文件的字节数，逐个核对存在且大小一致 (零字节/截断/被删都能识别)。
+        旧数据没有完成标记 (或标记里没有 files)：退化为检查必需文件存在且非空。"""
+        d = self.output_dir
+        files = _marker_files(d, sample_id)
+        if files:
+            for name, size in files.items():
+                p = d / name
+                if not p.exists() or p.stat().st_size != size or size == 0:
+                    return False
+            return f'occupancy/{sample_id}.npy' in files
+        legacy = self._legacy_samples()
+        if legacy is not None and sample_id not in legacy:     # 新协议写过的目录：缺完成标记 = 不完整
+            return False
+        files = [d / 'occupancy' / f'{sample_id}.npy', d / 'ego_pose' / f'{sample_id}.npy',
+                 d / 'flow_mask' / f'{sample_id}.npy']
+        files += [d / 'images' / sample_id / f'cam_{i}.dng' for i in range(num_cameras)]
+        files += [d / 'depth' / sample_id / f'cam_{i}.npy' for i in range(num_cameras)]
+        if getattr(self, '_has_masks', None) is None:      # 关了相机掩码 (--no-camera-mask) 的数据集不要求
+            self._has_masks = any((d / 'mask_camera').glob('*.npy'))
+        if self._has_masks:
+            files.append(d / 'mask_camera' / f'{sample_id}.npy')
+        flow = [p for p in (d / 'flow' / f'{sample_id}.npz', d / 'flow' / f'{sample_id}.npy') if p.exists()]
+        return bool(flow) and flow[0].stat().st_size > 0 and all(f.exists() and f.stat().st_size > 0 for f in files)
+
+    def _legacy_samples(self):
+        """写入协议文件里的旧帧名单；目录从未被新代码写过 (没有协议文件) 时返回 None。
+        batch_collection 用 __new__ 构造只设了 output_dir 的检查器，这里按需从磁盘读。"""
+        if getattr(self, '_legacy', None) is not None:
+            return self._legacy
+        try:
+            with open(self.output_dir / PROTOCOL_FILE, encoding='utf-8') as f:
+                self._legacy = set(json.load(f).get('legacy_samples', []))
+        except FileNotFoundError:
+            return None
+        return self._legacy
+
+    def _write_protocol(self):
+        body = {'marker_protocol': 1, 'legacy_samples': sorted(self._legacy)}
+        _atomic_write(self.output_dir / PROTOCOL_FILE,
+                      lambda f: f.write(json.dumps(body, ensure_ascii=False, indent=1).encode('utf-8')))
+
     @staticmethod
     def scene_split(scene_id: str, train_ratio=0.8, val_ratio=0.1) -> str:
         """按场景名的哈希确定性地分 train/val/test：追加新场景不会改变已有场景的归属，
@@ -513,8 +649,16 @@ class OccNetDataSaver:
                     print(f"  [警告] 后台IO任务失败: {e}")
             self._pending_futures.clear()
         self._io_executor.shutdown(wait=False)
+        self._marker_executor.shutdown(wait=True)
 
         all_ids = sorted(p.stem for p in (self.output_dir / 'occupancy').glob('*.npy'))
+        # 只把文件齐全的样本写进划分：采集进程被杀/崩溃时，最后几帧可能只写了一部分 (体素已存、DNG 还在
+        # 后台线程里)。e2e_occ/dataset.py 默认严格校验，残缺样本进了 train.txt 会让训练直接报错
+        complete = [s for s in all_ids if self.sample_complete(s)]
+        if len(complete) < len(all_ids):
+            bad = sorted(set(all_ids) - set(complete))
+            print(f"[OccNetDataSaver] ⚠️ {len(bad)} 个样本文件不全，不写入划分文件 (例如 {bad[:3]})")
+        all_ids = complete
         total = len(all_ids)
         if total == 0:
             print(f"[OccNetDataSaver] 警告: 没有数据")
@@ -527,22 +671,34 @@ class OccNetDataSaver:
         scene_list = sorted(scenes)
 
         n_scenes = len(scene_list)
-        if n_scenes == 1:
-            # 特殊处理：只有一个场景时，用于训练和验证，以便调试
-            print("[OccNetDataSaver] 提示: 只有一个场景，将同时用于训练和验证")
-            train_scenes = scene_list
-            val_scenes = scene_list
-            test_scenes = []
-        else:
-            split = {sc: self.scene_split(sc, train_ratio, val_ratio) for sc in scene_list}
-            train_scenes = [sc for sc in scene_list if split[sc] == 'train']
-            val_scenes = [sc for sc in scene_list if split[sc] == 'val']
-            test_scenes = [sc for sc in scene_list if split[sc] == 'test']
-            # 场景很少时哈希可能全落进一边：保证 train 和 val 都非空
-            if not train_scenes:
-                train_scenes = [(val_scenes or test_scenes).pop(0)]
-            if not val_scenes and len(train_scenes) > 1:
-                val_scenes = [train_scenes.pop()]
+        # 划分持久化在 splits.json：已经分过的场景永远不再移动 (之前每次 finalize 重新计算，为了"保证验证集
+        # 非空"会把老场景挪来挪去，追加采集后验证集悄悄换了一批)。新场景按场景名哈希分，只在新场景里补位。
+        split_path = self.output_dir / 'splits.json'
+        record = {}
+        if split_path.exists():
+            with open(split_path, encoding='utf-8') as f:
+                record = json.load(f).get('scenes', {})
+        new = [sc for sc in scene_list if sc not in record]
+        for sc in new:
+            record[sc] = self.scene_split(sc, train_ratio, val_ratio)
+        assigned = {k: v for k, v in record.items() if k in scenes}
+        if new and 'train' not in assigned.values():
+            record[new[0]] = assigned[new[0]] = 'train'
+        if new and 'val' not in assigned.values():
+            spare = [sc for sc in new if assigned[sc] == 'train']
+            if len(spare) > 1 or (spare and list(assigned.values()).count('train') > 1):
+                record[spare[-1]] = assigned[spare[-1]] = 'val'
+        train_scenes = [sc for sc in scene_list if assigned[sc] == 'train']
+        val_scenes = [sc for sc in scene_list if assigned[sc] == 'val']
+        test_scenes = [sc for sc in scene_list if assigned[sc] == 'test']
+        debug_shared = False
+        if not val_scenes:
+            # 只有一个场景等调试情况：验证集复用训练场景，在 splits.json 里显式标记，正式指标不能用它
+            print("[OccNetDataSaver] ⚠️ 没有独立的验证场景，验证集复用训练场景 (仅供调试，指标无参考价值)")
+            val_scenes = list(train_scenes)
+            debug_shared = True
+        with open(split_path, 'w', encoding='utf-8') as f:
+            json.dump({'scenes': record, 'debug_val_reuses_train': debug_shared}, f, indent=2, ensure_ascii=False)
 
         # 展开为样本列表
         train_samples = [s for sc in train_scenes for s in scenes[sc]]

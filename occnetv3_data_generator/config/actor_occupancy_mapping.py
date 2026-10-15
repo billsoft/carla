@@ -206,47 +206,18 @@ PROP_MAPPING = {
 }
 
 # ============================================================================
-# CARLA CityObjectLabel 到 Occupancy 的映射
-# 用于静态环境对象（建筑、植被、道路等）
+# CARLA CityObjectLabel 编号 → Occupancy
 # ============================================================================
+# 唯一来源是 config/occupancy_config.CARLA_TO_OCCUPANCY_MAPPING (环境物体光栅化也用它)。2026-10-15 之前这里
+# 另有一份以 carla.CityObjectLabel 枚举为键的表：(1) 与那份不一致 (RailTrack 17 vs 11)；(2) Actor 语义标签兜底
+# 用 int 去查枚举键的 dict，永远查不到 (17 in CITY_OBJECT_MAPPING 为 False)，语义标签兜底从来没生效过。
+# 现在统一为 int 键；用枚举查时先 int(label)。
+from config.occupancy_config import CARLA_TO_OCCUPANCY_MAPPING
 
-import carla
+CITY_OBJECT_MAPPING = dict(CARLA_TO_OCCUPANCY_MAPPING)
 
-CITY_OBJECT_MAPPING = {
-    # 基于Town10HD_Opt实际场景的CityObjectLabel映射
-    carla.CityObjectLabel.NONE: 0,             # NONE (110个) -> free
-    carla.CityObjectLabel.Roads: 11,           # 道路 (4个) -> driveable_surface
-    carla.CityObjectLabel.Sidewalks: 13,       # 人行道 (269个) -> sidewalk
-    carla.CityObjectLabel.Buildings: 15,       # 建筑 (48369个) -> manmade
-    carla.CityObjectLabel.Walls: 15,           # 墙 (48个) -> manmade
-    carla.CityObjectLabel.Fences: 1,           # 围栏 (1767个) -> barrier
-    carla.CityObjectLabel.Poles: 15,           # 杆 (120个) -> manmade
-    # 交通灯/交通标志是固定在杆上的设施，按 nuScenes/Occ3D 约定归 manmade；traffic_cone(8)
-    # 只留给可移动的锥桶类 (label_version 2 起改，旧数据里它们被错标成 8)
-    carla.CityObjectLabel.TrafficLight: 15,    # 交通灯 (62个) -> manmade
-    carla.CityObjectLabel.TrafficSigns: 15,    # 交通标志 (147个) -> manmade
-    carla.CityObjectLabel.Vegetation: 16,      # 植被 (4270个) -> vegetation
-    carla.CityObjectLabel.Terrain: 14,         # 地形 (23个) -> terrain
-    carla.CityObjectLabel.Car: 4,              # 车辆 (80个) -> car
-    carla.CityObjectLabel.Truck: 10,           # 卡车 (45个) -> truck
-    carla.CityObjectLabel.Bus: 3,              # 公交车 (5个) -> bus
-    carla.CityObjectLabel.Motorcycle: 6,       # 摩托车 (8个) -> motorcycle
-    carla.CityObjectLabel.Bicycle: 2,          # 自行车 (56个) -> bicycle
-    carla.CityObjectLabel.Static: 17,          # 静态物体 (1223个) -> general_object
-    carla.CityObjectLabel.Dynamic: 17,         # 动态物体 (489个) -> general_object
-    carla.CityObjectLabel.Other: 17,           # 其他 (370个) -> general_object
-    carla.CityObjectLabel.Water: 12,           # 水 (2个) -> other_flat
-    carla.CityObjectLabel.RoadLines: 11,       # 道路标线 (4个) -> driveable_surface
-    carla.CityObjectLabel.Ground: 12,          # 地面 (15个) -> other_flat
-    carla.CityObjectLabel.Bridge: 15,          # 桥 (9个) -> manmade
-    # carla.CityObjectLabel.Any: 不映射 (57495个，包含所有)
-
-    # 以下在Town10HD_Opt中未出现，但保留以防其他地图使用
-    carla.CityObjectLabel.Pedestrians: 7,      # 行人 -> pedestrian
-    carla.CityObjectLabel.RailTrack: 17,       # 铁轨 -> general_object
-    carla.CityObjectLabel.GuardRail: 1,        # 护栏 -> barrier
-    carla.CityObjectLabel.Sky: 0,              # 天空 -> free
-}
+# Actor 语义标签里优先认的类别 (车辆的 semantic_tags 可能同时带 Rider 等部件标签)
+_PREFERRED_TAGS = (15, 16, 17, 14, 18, 19, 12)   # Truck, Bus, Train, Car, Motorcycle, Bicycle, Pedestrians
 
 # ============================================================================
 # 映射函数
@@ -254,79 +225,64 @@ CITY_OBJECT_MAPPING = {
 
 def get_occupancy_label_from_type_id(type_id):
     """
-    根据 type_id 获取 Occupancy 标签（基于精确匹配）
+    根据 type_id 精确匹配 Occupancy 标签 (行人前缀 / VEHICLE_MAPPING / PROP_MAPPING)。
 
-    Args:
-        type_id: str, actor的type_id
-
-    Returns:
-        int or None: Occupancy标签ID (0-17)，如果未找到返回None
+    没有精确匹配时返回 None——**不再**在这里按 "vehicle." 前缀兜底成 car：那样外层永远轮不到语义标签，
+    新资产里的卡车/公交会被悄悄标成小汽车。前缀兜底在 get_occupancy_label_from_actor 的最后一步。
     """
     type_id_lower = type_id.lower()
 
-    # 1. 检查行人
     if type_id_lower.startswith('walker.pedestrian'):
         return 7
-
-    # 2. 检查车辆（精确匹配） - 使用小写比较
     for label_id, type_ids in VEHICLE_MAPPING.items():
         for tid in type_ids:
             if type_id_lower == tid.lower():
                 return label_id
-
-    # 3. 检查Props - 使用小写比较
     for label_id, type_ids in PROP_MAPPING.items():
         for tid in type_ids:
             if type_id_lower == tid.lower():
                 return label_id
-
-    # 4. 兜底：如果是vehicle开头但未匹配，默认为car
-    if type_id_lower.startswith('vehicle.'):
-        return 4  # car
-
-    # 5. 兜底：如果是static.prop开头但未匹配，默认为general_object
-    if type_id_lower.startswith('static.prop'):
-        return 17  # general_object
-
-    # 6. 未找到
     return None
+
+
+def _prefix_fallback(type_id):
+    t = type_id.lower()
+    if t.startswith('vehicle.'):
+        return 4      # car
+    if t.startswith('walker.'):
+        return 7
+    return 17         # general_object (含未收录的 static.prop.*)
+
+
+# 兜底统计：{type_id: (标签, 来源)}，来源为 'semantic_tag' 或 'prefix'。每个 type_id 只打印一次
+FALLBACK_LOG = {}
 
 
 def get_occupancy_label_from_actor(actor):
     """
-    从Actor对象获取Occupancy标签（完整逻辑）
-
-    Args:
-        actor: carla.Actor对象
+    Actor → Occupancy 标签。顺序：精确车型/道具映射 → 有效语义标签 → 前缀兜底。
 
     Returns:
         int: Occupancy标签ID (0-17)
     """
-    # 1. 优先使用type_id精确匹配
     label = get_occupancy_label_from_type_id(actor.type_id)
     if label is not None:
-        # 调试日志
-        import logging
-        logging.info(f"Actor {actor.type_id} -> Label {label} ({OCCUPANCY_LABELS.get(label, 'unknown')})")
         return label
 
-    # 2. 兜底：使用semantic_tags
-    if hasattr(actor, 'semantic_tags') and actor.semantic_tags:
-        # 获取所有标签，优先匹配已知映射
-        for sem_tag in actor.semantic_tags:
-            sem_tag_int = int(sem_tag)
-            if sem_tag_int in CITY_OBJECT_MAPPING:
-                fallback_label = CITY_OBJECT_MAPPING[sem_tag_int]
-                print(f"[调试/type_id未映射] type_id={actor.type_id!r} id={actor.id} "
-                      f"semantic_tags={list(actor.semantic_tags)} -> 用 semantic_tag={sem_tag_int} "
-                      f"兜底得到 label={fallback_label} ({OCCUPANCY_LABELS.get(fallback_label, '?')})")
-                return fallback_label
-
-    # 3. 最终兜底
-    print(f"[调试/type_id未映射] type_id={actor.type_id!r} id={actor.id} "
-          f"semantic_tags={list(getattr(actor, 'semantic_tags', []))} -> 无任何匹配, "
-          f"兜底 label=17 (general_object)")
-    return 17  # general_object
+    tags = [int(t) for t in (getattr(actor, 'semantic_tags', None) or [])]
+    picked = next((t for t in _PREFERRED_TAGS if t in tags), None)
+    if picked is None:
+        picked = next((t for t in tags if CITY_OBJECT_MAPPING.get(t, 0) != 0), None)
+    if picked is not None:
+        label, source = CITY_OBJECT_MAPPING[picked], 'semantic_tag'
+    else:
+        label, source = _prefix_fallback(actor.type_id), 'prefix'
+    if actor.type_id not in FALLBACK_LOG:
+        FALLBACK_LOG[actor.type_id] = (label, source)
+        print(f"[类别兜底] type_id={actor.type_id!r} 没有精确映射，semantic_tags={tags} -> "
+              f"{source} 得到 {label} ({OCCUPANCY_LABELS.get(label, '?')})；"
+              f"确认无误后建议补进 VEHICLE_MAPPING/PROP_MAPPING")
+    return label
 
 
 def get_occupancy_color(label_id):

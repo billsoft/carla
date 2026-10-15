@@ -49,6 +49,8 @@ class OccupancyDecoder(nn.Module):
 
         self.register_buffer('coarse_pts', voxel_centers(config.coarse_size, config.voxel_range), persistent=False)
         self.register_buffer('fine_pts', voxel_centers(config.fine_size, config.voxel_range), persistent=False)
+        # 'mixed' 选点的近场分数：离自车越近越高
+        self.register_buffer('fine_near', -self.fine_pts[:, :2].norm(dim=-1), persistent=False)
 
         if config.use_temporal:
             self.temporal_fusion = TemporalFusionModule(config, use_checkpoint=True)
@@ -64,6 +66,24 @@ class OccupancyDecoder(nn.Module):
         )
         self.checkpoint_coarse = False
         self.checkpoint_fine = True
+
+    def _select_fine(self, score, K):
+        """score: [B, Qf] 细体素上插值得到的粗占用 logit → 被细化的 K 个索引 [B, K]。"""
+        if self.config.fine_select_mode == 'topk':
+            return score.topk(K, dim=1).indices
+        q_occ, q_unc, _ = self.config.fine_select_quota
+        k_occ, k_unc = int(K * q_occ), int(K * q_unc)
+        k_near = K - k_occ - k_unc
+        taken = torch.zeros_like(score, dtype=torch.bool)
+        picks = []
+        for key, k in ((score, k_occ), (-score.abs(), k_unc),
+                       (self.fine_near.unsqueeze(0).expand_as(score), k_near)):
+            if k <= 0:
+                continue
+            idx = key.masked_fill(taken, float('-inf')).topk(k, dim=1).indices
+            taken.scatter_(1, idx, True)
+            picks.append(idx)
+        return torch.cat(picks, dim=1)
 
     def _run_layers(self, layers, query, pts, image_feats, intrinsics, extrinsics, use_ckpt):
         for layer in layers:
@@ -115,7 +135,7 @@ class OccupancyDecoder(nn.Module):
             K = max(1, int(Qf * self.config.fine_keep_ratio))
             score = F.interpolate(coarse_occ_logits.detach().unsqueeze(1).float(), size=(fx, fy, fz),
                                   mode='trilinear', align_corners=False).view(B, -1)
-            selected = score.topk(K, dim=1).indices                                    # [B, K]
+            selected = self._select_fine(score, K)                                     # [B, K]
             idx_c = selected.unsqueeze(-1).expand(-1, -1, dim)
             q_sel = fine.gather(1, idx_c)
             p_sel = fine_pts.gather(1, selected.unsqueeze(-1).expand(-1, -1, 3))

@@ -195,6 +195,11 @@ CAMERA_SENSOR_CONFIG = {
     'exposure_speed_down': 3.0,
     'shutter_speed': 1/200.0,  # 仅在 manual 模式下有效
     'iso': 100.0,              # 仅在 manual 模式下有效
+
+    # cube 面边长：None (默认) = 引擎按镜头有效像素密度自动推算 (2026-10-15 起，焦距越长面越密，
+    # 见 SceneCaptureSensor_WideAngleLens::ComputeRequiredFaceSide)；给整数则所有相机固定用它
+    # (例如 1280 = 旧行为)，用于不重编引擎的回退。
+    'face_size': None,
 }
 
 # 输出规范 (对齐网络输入)

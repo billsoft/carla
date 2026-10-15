@@ -2612,6 +2612,12 @@ void UActorBlueprintFunctionLibrary::SetCamera(
     Camera->SetTargetGamma(
         RetrieveActorAttributeToFloat("gamma", Variations, 2.2f));
 
+  // 运动模糊属性 (MakeWideAngleLensCameraDefinition 里注册) 以前没人读，见 BeginPlay 里的说明
+  Camera->SetMotionBlur(
+      RetrieveActorAttributeToFloat("motion_blur_intensity", Variations, 0.45f),
+      RetrieveActorAttributeToFloat("motion_blur_max_distortion", Variations, 0.35f),
+      RetrieveActorAttributeToFloat("motion_blur_min_object_screen_size", Variations, 0.1f));
+
   SetShowOnlyFromDescription(Desc, Camera);
 
   // ========== 新增: 设置 RawType（镜像 SetCamera(ASceneCaptureSensor*) 里的逻辑） ==========

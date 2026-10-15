@@ -228,13 +228,98 @@ def update_confusion(confusion, pred, target, num_classes, ignore_index=255):
 
 
 def miou_from_confusion(confusion, exclude=(0,)):
-    """返回 (mIoU, 每类 IoU)。默认不把 0:free 计入 mIoU（与 Occ3D 等基准一致）。"""
+    """返回 (mIoU, 每类 IoU)。默认不把 0:free 计入 mIoU（与 Occ3D 等基准一致）。
+
+    参与平均的类别 = 真值里出现过 **或被预测过** 的类别 (union > 0)。只看真值时，把 free 错报成一个真值里
+    根本没有的类别不会扣分 (该类 IoU=0 但不计入均值)，小验证集上 mIoU 会虚高。"""
     inter = confusion.diag().float()
     union = confusion.sum(0).float() + confusion.sum(1).float() - inter
     iou = inter / union.clamp(min=1)
-    present = confusion.sum(1) > 0
+    present = union > 0
     keep = present.clone()
     for c in exclude:
         keep[c] = False
     miou = iou[keep].mean().item() if keep.any() else 0.0
     return miou, iou
+
+
+CLASS_NAMES = ['free', 'barrier', 'bicycle', 'bus', 'car', 'construction', 'motorcycle', 'pedestrian',
+               'traffic_cone', 'trailer', 'truck', 'driveable', 'other_flat', 'sidewalk', 'terrain',
+               'manmade', 'vegetation', 'general_obj']
+SMALL_CLASSES = (1, 2, 6, 7, 8)          # barrier / bicycle / motorcycle / pedestrian / traffic_cone
+
+
+class OccMetrics:
+    """验证指标累加器 (只统计相机观测体素，ignore=255 跳过)：
+
+    - 语义 mIoU (miou_from_confusion) 与每类 IoU / 召回 / 精度 / 预测体素数 (暴露"凭空预测"的类别)
+    - 几何 IoU：占用 vs 空二分类
+    - 按水平距离分段 (默认 0-10/10-20/20-30/30-40/40+ m) 的几何召回、障碍误报率 (free 判成占用 / 全部 free)
+      和障碍漏报率 (占用判成 free / 全部占用)：近场漏报直接关系到安全，不能被远处大量体素平均掉
+    - 小目标召回 (SMALL_CLASSES)
+    """
+
+    def __init__(self, config, device, band_edges=(10.0, 20.0, 30.0, 40.0), ignore_index=255):
+        self.nc = config.num_classes
+        self.ignore = ignore_index
+        self.confusion = torch.zeros(self.nc, self.nc, dtype=torch.long, device=device)
+        X, Y, _ = config.voxel_size
+        xmin, ymin, _, xmax, ymax, _ = config.voxel_range
+        xs = xmin + (torch.arange(X, device=device, dtype=torch.float32) + 0.5) * (xmax - xmin) / X
+        ys = ymin + (torch.arange(Y, device=device, dtype=torch.float32) + 0.5) * (ymax - ymin) / Y
+        dist = torch.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)                       # [X, Y]
+        self.edges = list(band_edges)
+        self.band = torch.bucketize(dist, torch.tensor(self.edges, device=device))   # [X, Y] 0..len(edges)
+        nb = len(self.edges) + 1
+        self.band_stats = torch.zeros(nb, 4, dtype=torch.long, device=device)         # TP, FP, FN, TN
+
+    @torch.no_grad()
+    def update(self, pred, target):
+        """pred/target: [B, X, Y, Z] 整型"""
+        update_confusion(self.confusion, pred, target, self.nc, self.ignore)
+        valid = target != self.ignore
+        gt_occ = (target != 0) & valid
+        pr_occ = (pred != 0) & valid
+        band = self.band.view(1, *self.band.shape, 1).expand_as(target)
+        nb = self.band_stats.shape[0]
+        for k, m in enumerate((gt_occ & pr_occ, ~gt_occ & pr_occ & valid, gt_occ & ~pr_occ,
+                               ~gt_occ & ~pr_occ & valid)):
+            self.band_stats[:, k] += torch.bincount(band[m], minlength=nb)[:nb]
+
+    def summary(self):
+        miou, iou = miou_from_confusion(self.confusion)
+        c = self.confusion.double()
+        tp = c.diag()
+        recall = tp / c.sum(1).clamp(min=1)
+        precision = tp / c.sum(0).clamp(min=1)
+        bs = self.band_stats.double()
+        geo_tp, geo_fp, geo_fn = bs[:, 0].sum(), bs[:, 1].sum(), bs[:, 2].sum()
+        names = [f'{a:.0f}-{b:.0f}m' for a, b in zip([0.0] + self.edges[:-1], self.edges)] + [f'{self.edges[-1]:.0f}m+']
+        bands = {}
+        for i, name in enumerate(names):
+            t, fp, fn, tn = bs[i].tolist()
+            if t + fp + fn + tn == 0:
+                continue
+            nan = float('nan')                    # 该距离段没有真值障碍时召回/漏报无意义，显示为 nan
+            bands[name] = {'iou': t / (t + fp + fn) if t + fp + fn else nan, 'recall': t / (t + fn) if t + fn else nan,
+                           'fp_rate': fp / (fp + tn) if fp + tn else nan, 'fn_rate': fn / (t + fn) if t + fn else nan}
+        per_class = {CLASS_NAMES[k]: {'iou': iou[k].item(), 'recall': recall[k].item(),
+                                      'precision': precision[k].item(), 'gt': int(c[k].sum()),
+                                      'pred': int(c[:, k].sum())}
+                     for k in range(1, self.nc) if c[k].sum() + c[:, k].sum() > 0}
+        small = [k for k in SMALL_CLASSES if c[k].sum() > 0]
+        return {'miou': miou,
+                'geo_iou': (geo_tp / max(1.0, geo_tp + geo_fp + geo_fn)).item(),
+                'small_recall': (tp[small].sum() / c[small].sum().clamp(min=1)).item() if small else float('nan'),
+                'bands': bands, 'per_class': per_class}
+
+    @staticmethod
+    def format(s):
+        lines = [f"mIoU {s['miou']:.4f} | 几何 IoU {s['geo_iou']:.4f} | 小目标召回 {s['small_recall']:.4f}"]
+        lines.append('  距离分段: ' + ' | '.join(
+            f"{k} IoU {v['iou']:.3f} 召回 {v['recall']:.3f} 误报 {v['fp_rate']:.4f} 漏报 {v['fn_rate']:.3f}"
+            for k, v in s['bands'].items()))
+        lines.append('  每类 (IoU/召回/精度, 真值→预测体素数): ' + ' '.join(
+            f"{k}={v['iou']:.2f}/{v['recall']:.2f}/{v['precision']:.2f}({v['gt']}→{v['pred']})"
+            for k, v in s['per_class'].items()))
+        return '\n'.join(lines)

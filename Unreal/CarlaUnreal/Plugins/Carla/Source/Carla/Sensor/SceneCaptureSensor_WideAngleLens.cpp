@@ -43,6 +43,20 @@ static TAutoConsoleVariable<int32> CVarWideAngleSensorDumpAllFramesCubemap(
     TEXT("0: Disabled\n")
     TEXT("1: Enabled\n"));
 
+static TAutoConsoleVariable<float> CVarWideAngleFaceOversample(
+    TEXT("Carla.WideAngleLens.FaceOversample"),
+    2.0F,
+    TEXT("RGB wide-angle cameras: cube-face texel density relative to the output image's angular pixel density,\n")
+    TEXT("used when face_size is 0 (label/depth cameras always use 1.0). 2.0 + the 4-sample pixel-area\n")
+    TEXT("integration in WideAngleLens.usf replaces TSR on the faces. Clamped by Carla.WideAngleLens.MaxFaceSide.\n"),
+    ECVF_ReadOnly);
+
+static TAutoConsoleVariable<int32> CVarWideAngleMaxFaceSide(
+    TEXT("Carla.WideAngleLens.MaxFaceSide"),
+    2048,
+    TEXT("Upper bound for the lens-derived cube-face side (pixels).\n"),
+    ECVF_ReadOnly);
+
 static TAutoConsoleVariable<int32> CVarWideAngleSensorSkipVFTR(
     TEXT("Carla.WideAngleLens.SkipVFTR"),
     0,
@@ -362,6 +376,9 @@ void ASceneCaptureSensor_WideAngleLens::SetPrincipalPoint(float Cx, float Cy)
 {
     PrincipalPointX = Cx;
     PrincipalPointY = Cy;
+    // 主点偏移会改变射线覆盖 (选面 / 前向面收窄)
+    CubemapRenderMask = ComputeCubemapRenderMask();
+    UpdateFrontFaceProjection();
 }
 
 float ASceneCaptureSensor_WideAngleLens::GetPrincipalPointX() const
@@ -594,6 +611,17 @@ uint8 ASceneCaptureSensor_WideAngleLens::ComputeCubemapRenderMask() const
     static const float HalfPi = Pi / 2.0f;
     static const float Sqrt2 = sqrtf(2.0f);
 
+    // 2026-10-15：一般情况（非 LUT1D、不开 FOV 圆形掩码）按镜头实际射线覆盖选面，与 shader 同一套
+    // 像素→射线公式，显式内参 / 偏心主点 / 独立水平焦距都自动生效。之前只看 FOV 字段 ×√2 估算：
+    // 显式内参对应的视野比 FOV 字段宽时，shader 会去采样没渲染的面。
+    if (CameraModel != ECameraModel::LUT1D && !GetFOVMaskEnable())
+    {
+        uint8 CoverageMask = 0;
+        float MaxFrontTan = 0.0F;
+        ComputeLensCoverage(CoverageMask, MaxFrontTan);
+        return CoverageMask != 0 ? CoverageMask : (uint8)(1U << CubeFace_PosX);
+    }
+
     auto Mask = 1U << CubeFace_PosX; // Render front face by default.
 
     // LUT1D: the table's acceptance angle bounds the field of view on both
@@ -633,25 +661,37 @@ void ASceneCaptureSensor_WideAngleLens::UpdateFrontFaceProjection()
 
     constexpr float DefaultHalfFOV = PI * 0.25F; // 45 deg: the original fixed 90 deg face.
     constexpr float MinHalfFOV = 1.0F * (PI / 180.0F); // 1 deg floor, avoid a degenerate projection.
-    static const float Sqrt2 = sqrtf(2.0f);
 
     float NewHalfFOV = DefaultHalfFOV;
 
     // Narrowing the face is only valid when SampleCubemap() (WideAngleLens.usf)
     // is guaranteed to only ever look up FaceIndex 0 for this camera — every
     // other face's UV math still assumes the untouched +/-45 deg convention.
-    // 5.8 上游新增的 LUT1D 镜头和显式内参（fx/fy/cx/cy）下，实际视场由 LUT/内参决定，
-    // 与 XFOVAngle/YFOVAngle 不一定一致，按 FOV 收窄可能裁掉画面——这两种情况保持 90 度原行为。
+    // LUT1D 镜头保持 90 度原行为（射线范围由 LUT 决定，这里不做覆盖分析）。
+    // 2026-10-15 起显式内参（fx/fy/cx/cy）也允许收窄：收窄范围由实际射线覆盖推导，不再依赖 FOV 字段，
+    // 之前显式内参一律退回 90 度，长焦的角分辨率增益静默消失。
     const bool bSingleFace = CubemapRenderMask == (1U << CubeFace_PosX) &&
-        CameraModel != ECameraModel::LUT1D && !bExplicitIntrinsics;
+        CameraModel != ECameraModel::LUT1D && !bRenderEquirectangular;
 
     if (bSingleFace)
     {
-        // Mirrors ComputeCubemapRenderMask()'s own safety margin exactly, so
-        // the captured cone is never narrower than what that mask decision
-        // already assumed was sufficient to cover.
-        const float Margin = GetFOVMaskEnable() ? 1.0F : Sqrt2;
-        const float CandidateHalfFOV = FMath::Max(XFOVAngle, YFOVAngle) * 0.5F * Margin;
+        float CandidateHalfFOV;
+        if (GetFOVMaskEnable())
+        {
+            // 圆形 FOV 掩码：画面只保留 YFOV 圆内，按圆半径收窄（与选面逻辑一致）
+            CandidateHalfFOV = FMath::Max(XFOVAngle, YFOVAngle) * 0.5F;
+        }
+        else
+        {
+            // 按输出图像全部边界/内部射线在前向面上的最大切线收窄，外加 1.5 个源纹素的双线性采样余量。
+            // 之前用 max(FOV)·0.5·√2 的经验余量：35° 长焦的源捕获面 49.5°，最终画面中间一行只用到
+            // 1280 宽源纹理里约 875 个像素；按射线边界收紧后约 36°，同样 1280 的纹理覆盖更窄的角度。
+            uint8 CoverageMask = 0;
+            float MaxFrontTan = 0.0F;
+            ComputeLensCoverage(CoverageMask, MaxFrontTan);
+            const float Side = static_cast<float>(FMath::Max<uint32>(GetFaceSide(), 1U));
+            CandidateHalfFOV = FMath::Atan(MaxFrontTan * (1.0F + 3.0F / Side));
+        }
 
         // Only narrow when it buys a meaningful density gain; otherwise keep
         // the original behavior untouched rather than churn the projection
@@ -670,12 +710,143 @@ void ASceneCaptureSensor_WideAngleLens::UpdateFrontFaceProjection()
     {
         FrontFaceCapture->CustomProjectionMatrix =
             ProjectionMatrixType(FrontFaceHalfFOV, 1.0F, 1.0F, GNearClippingPlane);
+        // 组件 FOVAngle 与实际投影保持一致（度）：引擎里按 FOVAngle 估算视图需求的地方（纹理流送等）
+        // 不会再按 90 度理解一个其实只有几十度的长焦捕获
+        FrontFaceCapture->FOVAngle = FMath::RadiansToDegrees(2.0F * FrontFaceHalfFOV);
     }
 
     UE_LOG(LogCarla, Log,
         TEXT("[WideAngleLens] %s: front face capture half-FOV -> %.2f deg (bSingleFace=%d, XFOV=%.2f, YFOV=%.2f)"),
         *GetName(), FMath::RadiansToDegrees(FrontFaceHalfFOV), bSingleFace,
         FMath::RadiansToDegrees(XFOVAngle), FMath::RadiansToDegrees(YFOVAngle));
+}
+
+uint32 ASceneCaptureSensor_WideAngleLens::GetFaceSide() const
+{
+    if (FaceSize > 0)
+        return static_cast<uint32>(FaceSize);
+    return AutoFaceSide > 0 ? AutoFaceSide : std::max(GetImageWidth(), GetImageHeight());
+}
+
+uint32 ASceneCaptureSensor_WideAngleLens::ComputeRequiredFaceSide() const
+{
+    const int32 W = static_cast<int32>(ImageWidth);
+    const int32 H = static_cast<int32>(ImageHeight);
+    const uint32 Fallback = std::max(GetImageWidth(), GetImageHeight());
+    // LUT1D / 经纬图输出不走 PixelToRay，保持原行为
+    if (W < 2 || H < 2 || CameraModel == ECameraModel::LUT1D || bRenderEquirectangular)
+        return Fallback;
+
+    // 超采样 (RGB) 相机按 CVar 倍数加密；标签/深度相机只要求不放大 (1 倍)
+    const float Oversample = bSupersampleDistortion ?
+        FMath::Max(CVarWideAngleFaceOversample.GetValueOnGameThread(), 0.25F) : 1.0F;
+    const float FrontTan = FMath::Tan(FrontFaceHalfFOV);
+    // 射线投到主轴对应 cube 面的平面上 (切线坐标)；面边长 Side 对应切线跨度 2*HalfTan
+    auto FaceUV = [](const FVector& D, int32 Axis)
+    {
+        const FVector A = D.GetAbs();
+        switch (Axis)
+        {
+        case 0: return FVector2D(D.Y / A.X, D.Z / A.X);
+        case 1: return FVector2D(D.X / A.Y, D.Z / A.Y);
+        default: return FVector2D(D.X / A.Z, D.Y / A.Z);
+        }
+    };
+    float Need = 0.0F;
+    for (int32 Y = 0; Y + 1 < H; Y += 8)
+    {
+        for (int32 X = 0; X + 1 < W; X += 8)
+        {
+            const FVector D = PixelToRay(static_cast<float>(X), static_cast<float>(Y));
+            const FVector A = D.GetAbs();
+            const int32 Axis = (A.X >= A.Y && A.X >= A.Z) ? 0 : (A.Y >= A.Z ? 1 : 2);
+            const float HalfTan = (Axis == 0 && D.X > 0.0) ? FrontTan : 1.0F;
+            const FVector2D P = FaceUV(D, Axis);
+            const float StepX = (FaceUV(PixelToRay(X + 1.0F, static_cast<float>(Y)), Axis) - P).Size();
+            const float StepY = (FaceUV(PixelToRay(static_cast<float>(X), Y + 1.0F), Axis) - P).Size();
+            const float Step = FMath::Min(StepX, StepY);
+            if (Step > 1e-9F)
+                Need = FMath::Max(Need, 2.0F * HalfTan * Oversample / Step);
+        }
+    }
+    if (Need <= 0.0F)
+        return Fallback;
+    const int32 MaxSide = FMath::Max(CVarWideAngleMaxFaceSide.GetValueOnGameThread(), 256);
+    const int32 Side = FMath::Clamp(FMath::CeilToInt(Need), 256, MaxSide);
+    return static_cast<uint32>(Align(Side, 16));
+}
+
+FVector ASceneCaptureSensor_WideAngleLens::PixelToRay(float Px, float Py) const
+{
+    // 与 CameraModelUtil::DistortCubemapToImage 构造 CameraParams、WideAngleLens.usf MainCS 构造射线完全一致
+    const float W = static_cast<float>(ImageWidth);
+    const float H = static_cast<float>(ImageHeight);
+    float Fx, Fy, Cx, Cy;
+    if (bExplicitIntrinsics)
+    {
+        Fx = LensIntrinsics.X * W;
+        Fy = LensIntrinsics.Y * H;
+        Cx = LensIntrinsics.Z * W;
+        Cy = LensIntrinsics.W * H;
+    }
+    else
+    {
+        Fx = XFocalLength > 0.0F ? XFocalLength : YFocalLength;
+        Fy = YFocalLength;
+        Cx = PrincipalPointX;
+        Cy = PrincipalPointY;
+    }
+    const float Ux = (Px - Cx) / FMath::Max(Fx, 1e-6F);
+    const float Uy = (Py - Cy) / FMath::Max(Fy, 1e-6F);
+    const float R = FMath::Sqrt(Ux * Ux + Uy * Uy);
+    const ECameraModel Model = CameraModel == ECameraModel::BrownConrady ? ECameraModel::Perspective : CameraModel;
+    const float Alpha = CameraModelUtil::ComputeAngle(Model, R, KannalaBrandtCameraCoefficients);
+    if (R < 1e-9F)
+        return FVector(1.0, 0.0, 0.0);
+    const float SinA = FMath::Sin(Alpha);
+    return FVector(FMath::Cos(Alpha), SinA * Ux / R, -SinA * Uy / R);
+}
+
+void ASceneCaptureSensor_WideAngleLens::ComputeLensCoverage(uint8& OutMask, float& OutMaxFrontTan) const
+{
+    OutMask = 0;
+    OutMaxFrontTan = 0.0F;
+    const int32 W = static_cast<int32>(ImageWidth);
+    const int32 H = static_cast<int32>(ImageHeight);
+    if (W <= 0 || H <= 0)
+        return;
+
+    auto Accumulate = [&](int32 X, int32 Y)
+    {
+        const FVector D = PixelToRay(static_cast<float>(X), static_cast<float>(Y));
+        const FVector A = D.GetAbs();
+        uint8 Face;
+        if (A.X >= A.Y && A.X >= A.Z)
+            Face = D.X < 0 ? CubeFace_NegX : CubeFace_PosX;
+        else if (A.Y >= A.X && A.Y >= A.Z)
+            Face = D.Y < 0 ? CubeFace_NegY : CubeFace_PosY;
+        else
+            Face = D.Z < 0 ? CubeFace_NegZ : CubeFace_PosZ;
+        OutMask |= (uint8)(1U << Face);
+        if (Face == CubeFace_PosX)
+            OutMaxFrontTan = FMath::Max(OutMaxFrontTan, (float)FMath::Max(A.Y, A.Z) / (float)A.X);
+    };
+
+    // 全部边界像素（单调镜头模型的最大视角都在边界上）+ 内部 16 像素间隔网格（选面：
+    // 超广角时某个面可能整个落在画面内部而不碰边界）
+    for (int32 X = 0; X < W; ++X)
+    {
+        Accumulate(X, 0);
+        Accumulate(X, H - 1);
+    }
+    for (int32 Y = 0; Y < H; ++Y)
+    {
+        Accumulate(0, Y);
+        Accumulate(W - 1, Y);
+    }
+    for (int32 Y = 0; Y < H; Y += 16)
+        for (int32 X = 0; X < W; X += 16)
+            Accumulate(X, Y);
 }
 
 void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
@@ -761,6 +932,7 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
     DistortedOptions.bFOVMaskEnable = bFOVMaskEnable;
     DistortedOptions.bRenderPerspective = bRenderPerspective;
     DistortedOptions.FrontFaceTanHalfFOV = FMath::Tan(FrontFaceHalfFOV);
+    DistortedOptions.bSupersample = bSupersampleDistortion;
 
     ENQUEUE_RENDER_COMMAND(WideAngleLensCommand)(
         [WeakSelf,
@@ -853,6 +1025,18 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
 {
     const bool bInForceLinearGamma = !bEnablePostProcessingEffects;
 
+    // 面边长按镜头有效像素密度推算 (2026-10-15)：之前固定 max(宽, 高)，90° 视场的 B 柱/翼子板相机输出每弧度
+    // ~815 像素，而 90° 面中心只有 640，等于放大采样。前向面先按射线覆盖收窄，再按收窄后的角度推算边长，
+    // 最后用新边长重算一次收窄余量 (余量只依赖 1.5 个纹素，第二次几乎不变)
+    if (FaceSize <= 0)
+    {
+        UpdateFrontFaceProjection();
+        AutoFaceSide = ComputeRequiredFaceSide();
+        UpdateFrontFaceProjection();
+        UE_LOG(LogCarla, Log, TEXT("[WideAngleLens] %s: %ux%u output -> cube face side %u (front half-FOV %.2f deg)"),
+            *GetName(), GetImageWidth(), GetImageHeight(), AutoFaceSide, FMath::RadiansToDegrees(FrontFaceHalfFOV));
+    }
+
     const auto Format = bEnable16BitFormat ? PF_FloatRGBA : PF_B8G8R8A8;
 
     // Cube faces are captured at a fixed "Side" resolution and then resampled
@@ -939,10 +1123,10 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
     // looks like; further guessing at cap values or camera counts is not
     // going to find this bug.
     // 5.8 上游新增 FaceSize 属性：>0 时所有 6 个面统一用该尺寸（统一尺寸，不触发上面记录的
-    // 非均匀面尺寸卡死问题）；默认 0 时与原行为一致。
-    const auto Side = FaceSize > 0 ?
-        static_cast<uint32>(FaceSize) :
-        std::max(GetImageWidth(), GetImageHeight());
+    // 非均匀面尺寸卡死问题）。默认 0 时用本函数开头按镜头有效像素密度推算的 AutoFaceSide——同样是 6 个面
+    // 统一一个边长，只是不同相机之间不同。2026-10-15 在 81 上只验证过 1280/2560 两种面尺寸的相机同帧共存，
+    // 8 相机生产配置要以实际采集验收为准；出问题时 camera_manager 可显式传 face_size 回退到固定边长。
+    const auto Side = GetFaceSide();
 
     CaptureRenderTarget->InitCustomFormat(
         GetImageWidth(),
@@ -999,6 +1183,28 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
             PP.LocalExposureDetailStrength = 1.0f;
             FaceCapture->ShowFlags.SetBloom(false);
             FaceCapture->ShowFlags.SetLensFlares(false);
+
+            // 运动模糊 (2026-10-15)：motion_blur_* 属性以前注册了却从没应用，各面一直是引擎默认强度 0.5，
+            // 运动模糊显示开关又被 EnablePostProcessingEffects 打开 (针孔相机宽 <1920 时会强制关掉，鱼眼没有)。
+            // 这里按属性应用 (采集配置为 0 → 关闭)。注意：静止场景的鱼眼发软不是它造成的 (r.MotionBlurQuality=0 对照无变化)
+            PP.bOverride_MotionBlurAmount = true;
+            PP.MotionBlurAmount = FMath::Max(MotionBlurIntensity, 0.0F);
+            PP.bOverride_MotionBlurMax = true;
+            PP.MotionBlurMax = MotionBlurMaxDistortion;
+            PP.bOverride_MotionBlurPerObjectSize = true;
+            PP.MotionBlurPerObjectSize = MotionBlurMinObjectScreenSize;
+            if (MotionBlurIntensity <= 0.0F)
+                FaceCapture->ShowFlags.SetMotionBlur(false);
+
+            // cube 面不跑 TSR (2026-10-15)：81 同帧收敛曲线——针孔清晰度 (中心拉普拉斯方差) 随帧数
+            // 268→760→1948 持续上升，鱼眼面 423→104→286 不升反降，即面上的时序历史累积失败、越累积越糊；
+            // 同时 TSR 对运动的车/人会留拖影，不适合训练数据。RGB 相机改为面按 ~2 倍角密度渲染 +
+            // 畸变 shader 像素面积积分 (确定性超采样)
+            if (bSupersampleDistortion)
+            {
+                FaceCapture->ShowFlags.SetTemporalAA(false);
+                FaceCapture->ShowFlags.SetAntiAliasing(false);
+            }
         }
 
         FaceCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
@@ -1044,14 +1250,15 @@ void ASceneCaptureSensor_WideAngleLens::PrePhysTick(float DeltaSeconds)
 
     // Add the view information every tick. It's only used for one tick and then
     // removed by the streamer.
-    // FOVAngle is stored in degrees; convert to radians and use the
-    // half-angle tangent, guarding against a non-positive denominator.
-    const float HalfFOVTan = FMath::Tan(
-        0.5f * FMath::DegreesToRadians(CaptureComponents[0]->FOVAngle));
+    // 按前向面的实际捕获向流送系统报告视图需求：屏幕尺寸 = 面渲染目标边长，视角 = 实际捕获半角
+    // (单面长焦时已收窄)。之前用组件 FOVAngle (固定 90 度) 和输出宽度报告，长焦相机实际放大了远处物体，
+    // 流送却按宽视野计算，远处纹理的高精度 mip 可能不加载。
+    const float Side = static_cast<float>(GetFaceSide());
+    const float HalfFOVTan = FMath::Tan(FrontFaceHalfFOV);
     IStreamingManager::Get().AddViewInformation(
         CaptureComponents[0]->GetComponentLocation(),
-        ImageWidth,
-        HalfFOVTan > 0.0f ? ImageWidth / HalfFOVTan : ImageWidth);
+        Side,
+        HalfFOVTan > 0.0f ? Side / HalfFOVTan : Side);
 }
 
 void ASceneCaptureSensor_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick TickType, float DeltaTime)
@@ -1124,6 +1331,43 @@ namespace SceneCaptureSensorWideAngleLens_local_ns {
         PostProcessSettings.DepthOfFieldVignetteSize = 0;
         PostProcessSettings.bOverride_AutoExposureMethod = true;
         PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+
+        // 与针孔相机 (SceneCaptureSensor.cpp 同名函数) 一致的 Lumen 质量设置 (2026-10-15)：之前鱼眼各面一项都没设，
+        // 全靠地图后处理体积和引擎默认值，同一场景两种相机的 GI/反射质量不一致
+        PostProcessSettings.bOverride_DynamicGlobalIlluminationMethod = true;
+        PostProcessSettings.DynamicGlobalIlluminationMethod = EDynamicGlobalIlluminationMethod::Lumen;
+        PostProcessSettings.bOverride_LumenSceneLightingQuality = true;
+        PostProcessSettings.LumenSceneLightingQuality = 1.0f;
+        PostProcessSettings.bOverride_LumenSceneDetail = true;
+        PostProcessSettings.LumenSceneDetail = 1.0f;
+        PostProcessSettings.bOverride_LumenSceneViewDistance = true;
+        PostProcessSettings.LumenSceneViewDistance = 20000.0f;
+        PostProcessSettings.bOverride_LumenFinalGatherQuality = true;
+        PostProcessSettings.LumenFinalGatherQuality = 1.0f;
+        PostProcessSettings.bOverride_LumenMaxTraceDistance = true;
+        PostProcessSettings.LumenMaxTraceDistance = 20000.0f;
+        PostProcessSettings.bOverride_LumenSurfaceCacheResolution = true;
+        PostProcessSettings.LumenSurfaceCacheResolution = 1.0f;
+        PostProcessSettings.bOverride_LumenSceneLightingUpdateSpeed = true;
+        PostProcessSettings.LumenSceneLightingUpdateSpeed = 1.0f;
+        PostProcessSettings.bOverride_LumenFinalGatherLightingUpdateSpeed = true;
+        PostProcessSettings.LumenFinalGatherLightingUpdateSpeed = 1.0f;
+        PostProcessSettings.bOverride_LumenDiffuseColorBoost = true;
+        PostProcessSettings.LumenDiffuseColorBoost = 1.0f;
+        PostProcessSettings.bOverride_LumenSkylightLeaking = true;
+        PostProcessSettings.LumenSkylightLeaking = 0.1f;
+        PostProcessSettings.bOverride_LumenFullSkylightLeakingDistance = true;
+        PostProcessSettings.LumenFullSkylightLeakingDistance = 1000.0f;
+        PostProcessSettings.bOverride_ReflectionMethod = true;
+        PostProcessSettings.ReflectionMethod = EReflectionMethod::Lumen;
+        PostProcessSettings.bOverride_LumenReflectionQuality = true;
+        PostProcessSettings.LumenReflectionQuality = 1.0f;
+        PostProcessSettings.bOverride_LumenRayLightingMode = true;
+        PostProcessSettings.LumenRayLightingMode = ELumenRayLightingModeOverride::Default;
+        PostProcessSettings.bOverride_LumenFrontLayerTranslucencyReflections = true;
+        PostProcessSettings.LumenFrontLayerTranslucencyReflections = true;
+        PostProcessSettings.bOverride_LumenMaxReflectionBounces = true;
+        PostProcessSettings.LumenMaxReflectionBounces = 3;
     }
 
 
