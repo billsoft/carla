@@ -52,6 +52,11 @@ void ASensor::Set(const FActorDescription &Description)
     CaptureStride = FMath::Max(1, UActorBlueprintFunctionLibrary::ActorAttributeToInt(
         Description.Variations["capture_stride"], 1));
   }
+  if (Description.Variations.Contains("output_stride"))
+  {
+    OutputStride = FMath::Max(1, UActorBlueprintFunctionLibrary::ActorAttributeToInt(
+        Description.Variations["output_stride"], 1));
+  }
 }
 
 std::optional<FActorAttribute> ASensor::GetAttribute(const FString Name)

@@ -152,6 +152,13 @@ public:
     return ReadyToTickDeltaSeconds;
   }
 
+  /// output_stride 属性：>1 时传感器每帧照常工作，但只在 FCarlaEngine::GetFrameCounter() % OutputStride == 0
+  /// 的帧向客户端输出数据 (目前鱼眼相机支持：渲染不停，跳过读回与发送)
+  bool ShouldOutputThisFrame() const
+  {
+    return OutputStride <= 1 || FCarlaEngine::GetFrameCounter() % static_cast<uint64_t>(OutputStride) == 0;
+  }
+
   UFUNCTION(BlueprintCallable)
   URandomEngine *GetRandomEngine()
   {
@@ -312,6 +319,9 @@ private:
 
   /// capture_stride 属性：>1 时只在 FCarlaEngine::GetFrameCounter() % CaptureStride == 0 的帧捕获 (见 Tick)
   int32 CaptureStride = 1;
+
+  /// output_stride 属性 (见 ShouldOutputThisFrame)
+  int32 OutputStride = 1;
 
   bool bClientsListening = false;
 

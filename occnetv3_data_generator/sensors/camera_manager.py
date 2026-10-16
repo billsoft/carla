@@ -29,7 +29,8 @@ class CameraManager:
     """
 
     def __init__(self, world: carla.World, vehicle: carla.Vehicle, enable_depth: bool = True,
-                 enable_semantic: bool = False, rgb_capture_stride: int = 1, aux_capture_stride: int = 1):
+                 enable_semantic: bool = False, rgb_capture_stride: int = 1, aux_capture_stride: int = 1,
+                 rgb_output_stride: int = 1, keep_frame_stride: int = 1):
         """
         Args:
             world: CARLA世界对象
@@ -40,6 +41,11 @@ class CameraManager:
             rgb_capture_stride / aux_capture_stride: RGB 鱼眼 / 深度+语义相机的 capture_stride 属性 (服务端
                 只在引擎帧号能被它整除的帧渲染并发数据，见 ASensor::Tick)。服务端不支持该属性时自动退回 1，
                 实际值见 self.capture_strides
+            rgb_output_stride: RGB 鱼眼的 output_stride 属性：每步照常渲染 (Lumen 时间累积)，只在帧号能被它整除
+                的帧读回并发数据 (省掉每步的 GPU 同步和被丢弃数据的传输)。服务端不支持时退回 1
+            keep_frame_stride: 回调里只保留帧号能被它整除的数据 (= 保存帧，主程序已把保存帧对齐到它的倍数)。
+                服务端不支持上面两个属性 (每步都发数据) 时，非保存帧在入队前就丢掉，不会把容量 2 的队列里
+                还没被后台取走的保存帧挤出去；也省掉对它们的解码
         """
         self.world = world
         self.vehicle = vehicle
@@ -55,6 +61,9 @@ class CameraManager:
         self.requested_strides = {'rgb': rgb_capture_stride, 'depth': aux_capture_stride,
                                   'semantic': aux_capture_stride}
         self.capture_strides = {}
+        self.rgb_output_stride = rgb_output_stride
+        self.keep_frame_stride = max(1, int(keep_frame_stride))
+        self._ahead = {}       # {id(queue): item} 取帧时先到的更晚帧，留给下一次请求 (见 get_frame_from_queue)
 
         self._setup_cameras()
         if self.enable_depth:
@@ -86,6 +95,13 @@ class CameraManager:
         camera_bp.set_attribute('image_size_y', str(CAMERA_SENSOR_CONFIG['image_size_y']))
         camera_bp.set_attribute('sensor_tick', str(CAMERA_SENSOR_CONFIG['sensor_tick']))
         self._apply_capture_stride(camera_bp, 'rgb')
+        out = max(1, int(self.rgb_output_stride))
+        if out > 1 and not camera_bp.has_attribute('output_stride'):
+            print("[CameraManager] ⚠️ 服务端不支持 output_stride，RGB 每步都读回 (需要 2026-10-16 之后的服务端)")
+            out = 1
+        if camera_bp.has_attribute('output_stride'):
+            camera_bp.set_attribute('output_stride', str(out))
+        self.capture_strides['rgb_output'] = out
 
         # 默认等距投影相机模型（camera_model 在下面按相机逐个设置，这里只设公共默认值）：
         # perspective=False 表示不再额外做一次转透视的 shader pass；equirectangular
@@ -307,7 +323,7 @@ class CameraManager:
             raw_type: 数据类型 ('bayer_rggb' or 'uint8')
         """
         self = weak_self()
-        if self is None:
+        if self is None or image.frame % self.keep_frame_stride:
             return
 
         try:
@@ -341,7 +357,7 @@ class CameraManager:
     def _semantic_callback(weak_self, cam_id: str, image: carla.Image):
         """语义分割图：BGRA，标签 (CityObjectLabel 编号) 在 R 通道"""
         self = weak_self()
-        if self is None:
+        if self is None or image.frame % self.keep_frame_stride:
             return
         try:
             a = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(image.height, image.width, 4)
@@ -370,7 +386,7 @@ class CameraManager:
         深度相机回调函数
         """
         self = weak_self()
-        if self is None:
+        if self is None or image.frame % self.keep_frame_stride:
             return
 
         try:
@@ -472,18 +488,21 @@ class CameraManager:
         # 转换为float16
         return gray.astype(np.float16)
 
-    @staticmethod
-    def get_frame_from_queue(q: queue.Queue, timeout: float, frame: Optional[int] = None):
+    def get_frame_from_queue(self, q: queue.Queue, timeout: float, frame: Optional[int] = None):
         """从传感器队列取一条数据。给了 frame (world.tick() 的返回值) 时丢弃更早帧的残留数据、
-        只返回该帧；等到更晚的帧说明这一帧丢了，抛 queue.Empty。不给 frame 时取最早的一条
-        (旧行为：依赖"每 tick 恰好取一次"，抽帧采集时会拿到过期数据)。"""
+        只返回该帧；等到更晚的帧说明这一帧丢了，抛 queue.Empty——那条更晚的数据存进 self._ahead，
+        下一次请求先看它 (2026-10-16：后台取帧时主线程在继续推进，之前直接丢掉它会让一次丢帧连带丢下一帧)。
+        不给 frame 时取最早的一条 (旧行为：依赖"每 tick 恰好取一次"，抽帧采集时会拿到过期数据)。"""
         import time
         deadline = time.time() + timeout
         while True:
-            item = q.get(timeout=max(0.0, deadline - time.time()))
+            item = self._ahead.pop(id(q), None)
+            if item is None:
+                item = q.get(timeout=max(0.0, deadline - time.time()))
             if frame is None or item['frame'] == frame:
                 return item
             if item['frame'] > frame:
+                self._ahead[id(q)] = item
                 raise queue.Empty(f"期望 frame {frame}，收到 {item['frame']}")
 
     def get_synced_frame(self, timeout: float = 2.0, frame: Optional[int] = None) -> Optional[Dict]:
@@ -555,6 +574,7 @@ class CameraManager:
 
     def clear_queues(self):
         """清空所有相机的队列 (RGB + 深度)"""
+        self._ahead.clear()
         for cam_id in self.data_queues:
             while not self.data_queues[cam_id].empty():
                 try:

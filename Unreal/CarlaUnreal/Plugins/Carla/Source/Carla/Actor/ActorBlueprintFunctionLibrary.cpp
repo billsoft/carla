@@ -294,6 +294,15 @@ static void AddVariationsForSensor(FActorDefinition &Def)
   Stride.bRestrictToRecommended = false;
 
   Def.Variations.Emplace(Stride);
+
+  // 照常每帧工作，只在 FrameCounter % output_stride == 0 的帧输出数据 (见 ASensor::ShouldOutputThisFrame)
+  FActorVariation OutStride;
+  OutStride.Id = TEXT("output_stride");
+  OutStride.Type = EActorAttributeType::Int;
+  OutStride.RecommendedValues = {TEXT("1")};
+  OutStride.bRestrictToRecommended = false;
+
+  Def.Variations.Emplace(OutStride);
 }
 
 static void AddVariationsForTrigger(FActorDefinition &Def)

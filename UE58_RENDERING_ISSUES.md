@@ -191,6 +191,12 @@ GPU 崩溃（同时有采集中途销毁/生成 NPC，两个因素都已撤掉�
 需要提速时加 `--rgb-saved-frames-only`。另外相机侧后处理/流场/保存移到后台线程与下一帧仿真并行。
 81 实测每帧 约 22 s → 约 12 s（RGB 每步渲染）/ 约 7.6 s（`--rgb-saved-frames-only`）。
 
+**`output_stride`（2026-10-16）**：`stat dumpframe` 显示一步 1.68 s 渲染线程时间里 1.2 s 是 `FlushBatchedReadbacksCmd`
+（每 tick 一次 GPU 同步，等这一步全部渲染完再读回），24 个视图的场景渲染本身只有 0.35 s，GPU 利用率约 57%。新增
+所有传感器通用的 `output_stride` 属性（`ASensor::ShouldOutputThisFrame`），鱼眼相机不输出的帧照常
+`EnqueueRenderSceneImmediate()` 但不读回/发送：RGB 每步渲染保持 Lumen 时间累积，同时只有保存帧有 GPU 同步。
+配合客户端改动后 Town10 约 12 s → 约 8 s/帧，Town15 约 29 s → 约 9~14 s/帧。
+
 **附带修复**：`carla_remote.ps1 -Action restart` 之前不把 `-CarlaArgs` 传给子调用（自定义 cvar 被静默丢掉）；
 `dataset_viewer_v2` 解码 DNG 不再按线性 RAW 叠伽马/自动亮度（数据本身是色调映射后的 sRGB 编码，问题 3），
 之前预览发白发灰。`Carla.WideAngleLens.DumpAllFrames.Cubemap` 导出 8 位面渲染目标会触发 D3D12 格式断言崩溃，

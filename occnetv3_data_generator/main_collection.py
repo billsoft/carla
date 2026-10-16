@@ -565,6 +565,20 @@ def main():
                                    recycle_radius=args.npc_recycle_radius, rng=npc_rng)
         print(f"  ✅ NPC 生成完成，耗时: {(time.time()-step_start):.2f}s")
 
+        # 预热放在挂相机之前 (2026-10-16)：预热只为让交通流散开，之前相机已挂上、每步完整渲染 24 路相机，
+        # Town15 上 100 步约 7 分钟白白渲染。挂相机后仍有 10 步初始化让 Lumen 等时间累积收敛
+        if args.warmup_ticks > 0:
+            print(f"  空跑 {args.warmup_ticks} 步让交通流散开 (相机还没挂)...")
+            for t in range(args.warmup_ticks):
+                if t % 10 == 0:
+                    npc_recycler.recycle()
+                world.tick()
+                if npc_recycler.pending_controllers:
+                    npc_recycler.start_pending()
+            nv, nw = npc_recycler.nearby_counts()
+            print(f"  ✓ 自车 40m 内: 车 {nv} 人 {nw} (累计回收 车 {npc_recycler.stats['vehicles']} "
+                  f"人 {npc_recycler.stats['walkers']})")
+
         # 4. 附加传感器
         print("\n[3/5] 附加传感器...")
         step_start = time.time()
@@ -574,7 +588,9 @@ def main():
         camera_manager = CameraManager(world, vehicle, enable_depth=True,
                                        enable_semantic=not args.no_camera_mask,
                                        rgb_capture_stride=args.frame_skip if args.rgb_saved_frames_only else 1,
-                                       aux_capture_stride=args.frame_skip)
+                                       aux_capture_stride=args.frame_skip,
+                                       rgb_output_stride=1 if args.rgb_saved_frames_only else args.frame_skip,
+                                       keep_frame_stride=args.frame_skip)
         camera_manager.start_listening()
         print(f"  ✓ capture_stride: {camera_manager.capture_strides}")
         print(f"  ✓ RGB 相机: {len(TESLA_CAMERAS)} 个")
@@ -648,21 +664,11 @@ def main():
         camera_manager.clear_queues()
         if semantic_lidar:
             semantic_lidar.clear_queues()
-        if args.warmup_ticks > 0:
-            print(f"  空跑 {args.warmup_ticks} 步让交通流散开...")
-            for t in range(args.warmup_ticks):
-                if t % 10 == 0:
-                    npc_recycler.recycle()
-                world.tick()
-                if npc_recycler.pending_controllers:
-                    npc_recycler.start_pending()
-            nv, nw = npc_recycler.nearby_counts()
-            print(f"  ✓ 自车 40m 内: 车 {nv} 人 {nw} (累计回收 车 {npc_recycler.stats['vehicles']} "
-                  f"人 {npc_recycler.stats['walkers']})")
 
-        # 帧号对齐：capture_stride>1 的相机只在帧号是 stride 倍数的那一步出数据；每组 frame_skip 步的最后一步
-        # 要正好落在这样的帧上 (stride 都等于 frame_skip 或 1，组之间不插别的 tick，对齐一次即可)
-        if max(camera_manager.capture_strides.values()) > 1:
+        # 帧号对齐：capture_stride/output_stride>1 的相机只在帧号是 stride 倍数的那一步出数据，CameraManager 回调也只留
+        # 这些帧 (keep_frame_stride)；每组 frame_skip 步的最后一步要正好落在这样的帧上 (组之间不插别的 tick，对齐一次
+        # 即可)。旧服务端不支持这两个属性时也要对齐，否则保存帧会被回调过滤掉
+        if args.frame_skip > 1:
             n_align = 0
             while world.get_snapshot().frame % args.frame_skip != 0:
                 world.tick()
@@ -677,6 +683,7 @@ def main():
 
         ego_pose_prev = None
         post_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='postprocess')
+        post_state = {'prev_ok': True}       # 后台上一帧是否保存成功 (只在后台线程里读写)
 
         for frame_idx in range(args.frames):
             frame_start = time.time()
@@ -696,19 +703,7 @@ def main():
                     npc_recycler.start_pending()          # 新行人的控制器要在一次 tick 之后才能 start
             print(f"  [1/6] World Tick x{args.frame_skip}: {(time.time()-step_start)*1000:.1f}ms")
 
-            # Step 2: 采集相机数据 (RGB + 深度)，按帧号严格对齐
-            step_start = time.time()
-            camera_data = camera_manager.get_synced_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
-            if camera_data is None:
-                print(f"  ❌ RGB 相机数据同步失败,跳过")
-                ego_pose_prev = None          # 断帧：下一帧的 ego_motion/时序不能跨过这个缺口
-                data_saver.generate_sample_id()   # 空占一个帧号，dataset 按帧号连续性切序列时能看到缺口
-                continue
-            depth_data = camera_manager.get_synced_depth_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
-            if depth_data is None:
-                print(f"  ⚠️ 深度相机数据同步失败,本帧无深度")
-            sem_data = camera_manager.get_synced_semantic_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
-            print(f"  [2/6] 相机采集 (RGB+Depth+Semantic): {(time.time()-step_start)*1000:.1f}ms")
+            # Step 2 (取相机数据) 在后台线程里做，见下面 postprocess_and_save
 
             # Step 3: 采集LiDAR数据 (只有 --lidar-filter 时需要)
             lidar_data = None
@@ -754,28 +749,12 @@ def main():
 
             ego_pose_prev = ego_pose.copy()
 
-            images = {cam['id']: camera_data[cam['id']] for cam in TESLA_CAMERAS}
-            depth_dict = None
-            if depth_data is not None:
-                depth_dict = {cam['id']: depth_data[cam['id']]['data'] for cam in TESLA_CAMERAS}
-            if camera_vis is not None and (depth_dict is None or sem_data is None):
-                # 没有深度/语义就没有掩码、重绘和雕刻，这一帧的真值和其他帧口径不一致，宁可丢掉
-                print(f"  ❌ 深度或语义分割缺失，无法做相机侧后处理,跳过")
-                ego_pose_prev = None
-                data_saver.generate_sample_id()
-                continue
-
             # 以下几项要读世界状态，必须在下一次 tick 之前取 (流场的速度/位姿快照、时间戳、自车周围 NPC 数)
             motion = voxel_generator.motion_snapshot(world, vehicle)
             meta = {
                 'sim_frame': int(sim_frame),
                 'timestamp': float(world.get_snapshot().timestamp.elapsed_seconds),
                 'frame_dt': FIXED_DELTA_SECONDS * args.frame_skip,
-                'sensor_frames': {
-                    'rgb': sorted({int(v['frame']) for v in camera_data.values()}),
-                    'depth': sorted({int(v['frame']) for v in depth_data.values()}) if depth_data else [],
-                    'semantic': sorted({int(v['frame']) for v in sem_data.values()}) if sem_data else [],
-                },
                 'label_version': LABEL_VERSION,
                 'npc_nearby_40m': dict(zip(('vehicles', 'walkers'), npc_recycler.nearby_counts())),
                 'generator': GENERATOR_VERSION,
@@ -783,14 +762,41 @@ def main():
             }
             sample_id = data_saver.generate_sample_id()
 
-            # Step 5.5 ~ 6 放到后台线程 (2026-10-16)：相机侧后处理 + 流场 + 保存只用上面已取好的数据，
-            # 与下一帧的 tick/取相机数据并行 (约省 5s/帧)。同一时间最多一帧在后台，样本号顺序不变；
-            # 后台出错在下一帧提交前 (或采集结束时) 抛出，走和主线程出错一样的退出路径
-            def postprocess_and_save(frame_no=frame_idx + 1, sample_id=sample_id, occupancy=occupancy,
-                                     actor_ids=actor_ids, images=images, depth_dict=depth_dict, sem_data=sem_data,
+            # Step 2 + 5.5 ~ 6 放到后台线程 (2026-10-16)：等相机数据 (按帧号对齐) + 相机侧后处理 + 流场 + 保存，
+            # 只用上面已取好的世界状态，与下一帧的 tick/体素生成并行 (约省 8s/帧)。同一时间最多一帧在后台，
+            # 样本号顺序不变；后台出错在下一帧提交前 (或采集结束时) 抛出，走和主线程出错一样的退出路径。
+            # 相机数据缺失的帧不保存 (样本号空着，dataset 按帧号连续性切序列)，下一个保存帧的 ego_motion 记单位阵
+            def postprocess_and_save(frame_no=frame_idx + 1, sim_frame=sim_frame, sample_id=sample_id,
+                                     occupancy=occupancy, actor_ids=actor_ids,
                                      ego_pose=ego_pose, ego_motion=ego_motion, motion=motion, meta=meta,
                                      object_volume=dict(voxel_generator.static_object_volume)):
                 tag = f"  [帧 {frame_no} 后台]"
+                if not post_state['prev_ok']:
+                    ego_motion = np.eye(4, dtype=np.float32)   # 上一帧没保存：不能跨过缺口
+                post_state['prev_ok'] = False
+                t_cam = time.time()
+                camera_data = camera_manager.get_synced_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
+                if camera_data is None:
+                    print(f"{tag} ❌ RGB 相机数据同步失败,跳过")
+                    return
+                depth_data = camera_manager.get_synced_depth_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
+                if depth_data is None:
+                    print(f"{tag} ⚠️ 深度相机数据同步失败,本帧无深度")
+                sem_data = camera_manager.get_synced_semantic_frame(timeout=SENSOR_TIMEOUT, frame=sim_frame)
+                print(f"{tag} [2/6] 相机数据: {(time.time()-t_cam)*1000:.0f}ms")
+                images = {cam['id']: camera_data[cam['id']] for cam in TESLA_CAMERAS}
+                depth_dict = None
+                if depth_data is not None:
+                    depth_dict = {cam['id']: depth_data[cam['id']]['data'] for cam in TESLA_CAMERAS}
+                if camera_vis is not None and (depth_dict is None or sem_data is None):
+                    # 没有深度/语义就没有掩码、重绘和雕刻，这一帧的真值和其他帧口径不一致，宁可丢掉
+                    print(f"{tag} ❌ 深度或语义分割缺失，无法做相机侧后处理,跳过")
+                    return
+                meta = dict(meta, sensor_frames={
+                    'rgb': sorted({int(v['frame']) for v in camera_data.values()}),
+                    'depth': sorted({int(v['frame']) for v in depth_data.values()}) if depth_data else [],
+                    'semantic': sorted({int(v['frame']) for v in sem_data.values()}) if sem_data else [],
+                })
                 mask_camera, st = None, None
                 if camera_vis is not None:
                     t_mask = time.time()
@@ -826,6 +832,7 @@ def main():
                 depth_info = "+ 8 Depth" if depth_dict else ""
                 print(f"{tag} [6/6] 数据保存 (8 DNG + 1 NPY {depth_info}): {(time.time()-t_save)*1000:.1f}ms, "
                       f"非空体素={np.count_nonzero(occupancy):,}")
+                post_state['prev_ok'] = True
 
             t_wait = time.time()
             if pending_save is not None:

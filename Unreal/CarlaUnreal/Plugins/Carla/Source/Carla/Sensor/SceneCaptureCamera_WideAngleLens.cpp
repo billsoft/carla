@@ -62,6 +62,14 @@ void ASceneCaptureCamera_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick T
   if (!AreClientsListening())
     return;
 
+  // output_stride (2026-10-16)：照常渲染 (Lumen 等时间累积需要连续帧)，但只在要输出的帧读回/发送。
+  // 不读回的帧没有每 tick 的 GPU 同步 (ImageUtil::FlushBatchedReadbacks)，CPU 准备下一步可以和 GPU 重叠，
+  // 也省掉客户端会丢弃的数据传输
+  if (!ShouldOutputThisFrame())
+  {
+    EnqueueRenderSceneImmediate();
+    return;
+  }
 
   // ========== 根据 RawType 选择数据捕获方式（镜像 ASceneCaptureCamera::PostPhysTick） ==========
   if (RawType == TEXT("float32") || RawType == TEXT("uint16") || RawType == TEXT("bayer_rggb"))
