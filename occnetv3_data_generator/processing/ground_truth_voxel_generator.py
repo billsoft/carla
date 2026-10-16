@@ -59,7 +59,21 @@ class GroundTruthVoxelGenerator:
             print(f"[警告] 体素网格尺寸 {self.grid_size} 与标准 {expected_grid_size} 不一致")
 
         
-    def generate_flow(self, world, ego_vehicle, actor_ids, dt=0.05):
+    @staticmethod
+    def motion_snapshot(world, ego_vehicle):
+        """generate_flow 需要的世界状态：自车位姿 + 所有车辆/行人的 (线速度, 角速度 rad/s, 原点)。
+        必须在保存帧的仿真状态下 (下一次 tick 之前) 取；之后 generate_flow(snapshot=...) 可在别的线程里算"""
+        actors = {}
+        for actor in world.get_actors():
+            if not (actor.type_id.startswith('vehicle.') or actor.type_id.startswith('walker.')):
+                continue
+            vel, ang = actor.get_velocity(), actor.get_angular_velocity()
+            actors[actor.id] = (np.array([vel.x, vel.y, vel.z]),
+                                np.radians([ang.x, ang.y, ang.z]),     # CARLA 给 deg/s；符号已用转弯车辆实测验证
+                                transform_to_matrix(actor.get_transform())[:3, 3])
+        return {'ego': transform_to_matrix(ego_vehicle.get_transform()), 'actors': actors}
+
+    def generate_flow(self, world, ego_vehicle, actor_ids, dt=0.05, snapshot=None):
         """
         生成 3D 场景流 (Scene Flow) 和 动态掩码 (Flow Mask)
 
@@ -78,6 +92,7 @@ class GroundTruthVoxelGenerator:
             actor_ids: (X, Y, Z) int32，generate() 返回的体素实例归属 (真实 Actor 为正 ID)，
                        需与最终保存的 occupancy 一致 (相机侧后处理之后)
             dt: float, 相邻保存帧的时间间隔 (秒)
+            snapshot: motion_snapshot() 的结果；给了就不再访问 world/ego_vehicle (可传 None)
 
         Returns:
             flow: (3, X, Y, Z) float32 array - 位移向量 (dx, dy, dz)，自车坐标系，米
@@ -90,23 +105,21 @@ class GroundTruthVoxelGenerator:
         if len(idx[0]) == 0:
             return flow, flow_mask
         ids = actor_ids[idx]
-        grid_to_world = transform_to_matrix(ego_vehicle.get_transform())
+        if snapshot is None:
+            snapshot = self.motion_snapshot(world, ego_vehicle)
+        grid_to_world = snapshot['ego']
         world_to_grid_rot = grid_to_world[:3, :3].T
         centers = np.stack([self.x_range[0] + (idx[0] + 0.5) * self.resolution,
                             self.y_range[0] + (idx[1] + 0.5) * self.resolution,
                             self.z_range[0] + (idx[2] + 0.5) * self.resolution], axis=1)
         pts_world = centers @ grid_to_world[:3, :3].T + grid_to_world[:3, 3]
 
-        actors = world.get_actors()
         for aid in np.unique(ids):
-            actor = actors.find(int(aid))
-            if actor is None or not (actor.type_id.startswith('vehicle.') or actor.type_id.startswith('walker.')):
+            motion = snapshot['actors'].get(int(aid))
+            if motion is None:                      # 不是车辆/行人 (或已不存在)
                 continue
             sel = ids == aid
-            vel, ang = actor.get_velocity(), actor.get_angular_velocity()
-            v = np.array([vel.x, vel.y, vel.z])
-            omega = np.radians([ang.x, ang.y, ang.z])     # CARLA 给 deg/s；符号已用转弯车辆实测验证
-            c = transform_to_matrix(actor.get_transform())[:3, 3]
+            v, omega, c = motion
             disp_world = (v + np.cross(omega, pts_world[sel] - c)) * dt
             disp = disp_world @ world_to_grid_rot.T
             sub = tuple(a[sel] for a in idx)

@@ -368,6 +368,15 @@ protected:
   /// 需要的面纹素越密——与物理相机一致，而不是固定边长的面被裁剪放大。6 个面统一用这一个边长。
   uint32 ComputeRequiredFaceSide() const;
 
+  /// 同一辆车上已开始运行、开着后处理 (Lumen) 的另一个鱼眼相机的前向面，作为本相机各面共享 Lumen 场景的
+  /// 视点锚 (见 BeginPlay)；没有时返回 nullptr，由本相机自己的前向面当锚
+  USceneCaptureComponent2D_CARLA* FindViewOriginAnchor() const;
+
+  /// 首次捕获前把本相机各面接到 FindViewOriginAnchor 的视点上 (只做一次)
+  void ResolveViewOrigin();
+
+  bool bViewOriginResolved = false;
+
   void CaptureSceneExtended();
 
   virtual void BeginPlay() override;

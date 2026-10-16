@@ -29,7 +29,7 @@ class CameraManager:
     """
 
     def __init__(self, world: carla.World, vehicle: carla.Vehicle, enable_depth: bool = True,
-                 enable_semantic: bool = False):
+                 enable_semantic: bool = False, rgb_capture_stride: int = 1, aux_capture_stride: int = 1):
         """
         Args:
             world: CARLA世界对象
@@ -37,6 +37,9 @@ class CameraManager:
             enable_depth: 是否启用深度相机 (默认: True)
             enable_semantic: 是否启用与深度相机同位姿的 UE 语义分割相机 (地面语义重绘用，
                 见 processing/camera_visibility.py paint_ground)
+            rgb_capture_stride / aux_capture_stride: RGB 鱼眼 / 深度+语义相机的 capture_stride 属性 (服务端
+                只在引擎帧号能被它整除的帧渲染并发数据，见 ASensor::Tick)。服务端不支持该属性时自动退回 1，
+                实际值见 self.capture_strides
         """
         self.world = world
         self.vehicle = vehicle
@@ -49,12 +52,24 @@ class CameraManager:
         self.semantic_queues = {}
         self.enable_depth = enable_depth
         self.enable_semantic = enable_semantic
+        self.requested_strides = {'rgb': rgb_capture_stride, 'depth': aux_capture_stride,
+                                  'semantic': aux_capture_stride}
+        self.capture_strides = {}
 
         self._setup_cameras()
         if self.enable_depth:
             self._setup_depth_cameras()
         if self.enable_semantic:
             self._setup_semantic_cameras()
+
+    def _apply_capture_stride(self, bp, kind):
+        stride = max(1, int(self.requested_strides[kind]))
+        if stride > 1 and not bp.has_attribute('capture_stride'):
+            print(f"[CameraManager] ⚠️ 服务端不支持 capture_stride，{kind} 相机每步都渲染 (需要 2026-10-16 之后的服务端)")
+            stride = 1
+        if bp.has_attribute('capture_stride'):
+            bp.set_attribute('capture_stride', str(stride))
+        self.capture_strides[kind] = stride
 
     def _setup_cameras(self):
         """创建并附加8个相机 (等距投影/鱼眼相机, sensor.camera.rgb_fisheye)"""
@@ -70,6 +85,7 @@ class CameraManager:
         camera_bp.set_attribute('image_size_x', str(CAMERA_SENSOR_CONFIG['image_size_x']))
         camera_bp.set_attribute('image_size_y', str(CAMERA_SENSOR_CONFIG['image_size_y']))
         camera_bp.set_attribute('sensor_tick', str(CAMERA_SENSOR_CONFIG['sensor_tick']))
+        self._apply_capture_stride(camera_bp, 'rgb')
 
         # 默认等距投影相机模型（camera_model 在下面按相机逐个设置，这里只设公共默认值）：
         # perspective=False 表示不再额外做一次转透视的 shader pass；equirectangular
@@ -213,6 +229,7 @@ class CameraManager:
         depth_bp.set_attribute('image_size_x', str(DEPTH_SENSOR_CONFIG['image_size_x']))
         depth_bp.set_attribute('image_size_y', str(DEPTH_SENSOR_CONFIG['image_size_y']))
         depth_bp.set_attribute('sensor_tick', str(DEPTH_SENSOR_CONFIG['sensor_tick']))
+        self._apply_capture_stride(depth_bp, 'depth')
 
         for cam_config in self.camera_configs:
             cam_id = cam_config['id']
@@ -243,6 +260,7 @@ class CameraManager:
         bp.set_attribute('image_size_x', str(DEPTH_SENSOR_CONFIG['image_size_x']))
         bp.set_attribute('image_size_y', str(DEPTH_SENSOR_CONFIG['image_size_y']))
         bp.set_attribute('sensor_tick', str(DEPTH_SENSOR_CONFIG['sensor_tick']))
+        self._apply_capture_stride(bp, 'semantic')
         for cam_config in self.camera_configs:
             bp.set_attribute('fov', str(cam_config['depth_fov']))
             pos, rot = cam_config['position'], cam_config['rotation']

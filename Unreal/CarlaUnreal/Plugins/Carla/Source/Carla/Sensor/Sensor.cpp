@@ -47,6 +47,11 @@ void ASensor::Set(const FActorDescription &Description)
         UActorBlueprintFunctionLibrary::ActorAttributeToFloat(Description.Variations["sensor_tick"],
         0.0f));
   }
+  if (Description.Variations.Contains("capture_stride"))
+  {
+    CaptureStride = FMath::Max(1, UActorBlueprintFunctionLibrary::ActorAttributeToInt(
+        Description.Variations["capture_stride"], 1));
+  }
 }
 
 std::optional<FActorAttribute> ASensor::GetAttribute(const FString Name)
@@ -80,7 +85,11 @@ void ASensor::Tick(const float DeltaTime)
     }
   }
   
-  ReadyToTick = true;
+  // capture_stride (2026-10-16)：同步模式抽帧采集时，客户端只要每 N 步里的一步数据，其余步相机照样完整渲染
+  // (81 上占 tick 时间的大半)。sensor_tick 走 UE 的 tick 间隔 + 超时补偿，浮点下偶尔 N-1/N+1 步才触发，
+  // 图像就和客户端在该步取的世界状态对不上；这里按引擎帧号 (= 客户端 world.tick() 的返回值、image.frame)
+  // 确定性判断，客户端只需让保存帧的帧号是 N 的倍数
+  ReadyToTick = CaptureStride <= 1 || FCarlaEngine::GetFrameCounter() % static_cast<uint64_t>(CaptureStride) == 0;
   ReadyToTickDeltaSeconds = DeltaTime;
   PrePhysTick(DeltaTime);
 }

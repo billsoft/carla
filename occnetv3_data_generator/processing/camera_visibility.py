@@ -250,7 +250,8 @@ class CameraVisibility:
           的最高一格" (max_shift 默认不限)：抬高时可挤掉静态物体包围盒，不动车辆/行人；降低时只清掉这一段
           连续的地面体素；该层附近根本没有地面体素时从观测高度往下补建，最多 CREATE_DEPTH 格。
         - 层匹配双向限高：观测比找到的地面段高/低出一个层间距以上，都不当成"同一层的高度误差"。低于时只有
-          视线确实穿过了那段地面 (through，analyze 的几何穿越证据) 才降低——看见桥下路面不代表视线穿过了
+          视线确实穿过了那段地面 (要清掉的每一格都有 through，analyze 的几何穿越证据；2026-10-16 之前只要
+          一格有证据就整段删除) 才降低，整段都在观测之上时清掉后在观测高度补建——看见桥下路面不代表视线穿过了
           桥面 (2026-10-15 评审复现：只有 4m 人行道、只看到 0m 路面时整列被清空)；没有证据则在观测高度
           独立补建，上层保持不动。through 为 None 时现算。"""
         X, Y, Z = self.shape
@@ -258,6 +259,8 @@ class CameraVisibility:
             through = self.analyze(depth_maps)[1]
         if max_shift is None:
             max_shift = Z
+        # 观测比地面段低一个层间距以上的列按证据分到哪一类 (见 _paint_ground_layer)，统计写进每帧 meta
+        self.far_down_counts = {'lowered': 0, 'full_detached': 0, 'partial': 0, 'none': 0}
         classes = np.array(sorted(set(GROUND_TAG_TO_CLASS.values())), dtype=np.uint8)
         cls_index = np.full(256, -1, np.int64)
         for tag, c in GROUND_TAG_TO_CLASS.items():
@@ -349,9 +352,26 @@ class CameraVisibility:
             crossed = np.zeros_like(above)
             r, k = np.nonzero(above)
             crossed[r, k] = thr[r, zz[r, k]]
-            no_evidence = far_down & ~crossed.any(1)
-            start[no_evidence] = -1
-            seg[no_evidence] = False
+            # 2026-10-16 按证据逐格处理 (之前 any()：只要一格有穿越证据就整段降低删除，上层 5 格只有 1 格被穿过时
+            # 整段被删、下层也不补建)：
+            # - 要清掉的每一格都被穿过、且这段一直延伸到观测高度：走下面原来的限幅降低 (同一层的高度误差)；
+            # - 否则当成另一层：被视线穿过的格清成 free (有证据是空的；留着会和观测掩码"看穿了"互相矛盾)，
+            #   没被穿过的格保留 (看不见，训练时被掩码忽略)，再由下面 create 在观测高度补建表面
+            #   (整段都在观测之上时，原来的限幅降低最多只能清掉这一段，观测到的表面不会建出来，整列变空)
+            full = above.any(1) & ~(crossed != above).any(1)
+            reaches = (seg & (zz <= target[:, None])).any(1)
+            other_layer = far_down & ~(full & reaches)
+            r, k = np.nonzero(crossed & other_layer[:, None])
+            occ_cols[r, zz[r, k]] = 0
+            if actor_ids is not None:
+                actor_ids.reshape(X * Y, Z)[cols[r], zz[r, k]] = 0
+            start[other_layer] = -1
+            seg[other_layer] = False
+            fd = self.far_down_counts
+            fd['lowered'] += int((far_down & full & reaches).sum())
+            fd['full_detached'] += int((far_down & full & ~reaches).sum())
+            fd['partial'] += int((far_down & ~full & crossed.any(1)).sum())
+            fd['none'] += int((far_down & ~crossed.any(1)).sum())
         seg_len = seg.sum(1)
         change = np.zeros_like(g)
         r, k = np.nonzero(seg)
@@ -449,6 +469,7 @@ def finalize_ground_truth(vis, occupancy, actor_ids, depth_maps, sem_maps=None, 
         if sh is not None and len(sh):
             stats['ground_shift_cols'] = int(np.count_nonzero(sh))
             stats['ground_shift_mean_m'] = round(float(np.abs(sh[sh != 0]).mean() * vis.res), 3) if sh.any() else 0.0
+        stats['ground_far_down'] = dict(getattr(vis, 'far_down_counts', {}))
     stats['carved'] = carve_static(occupancy, actor_ids, through, object_volume)
     stats['observed'] = float(mask.mean())
     return mask, stats

@@ -34,11 +34,12 @@ param(
     # Fisheye cube faces (2026-10-15): lens-derived face size capped at 1536 with 1.5x oversampling. The engine
     # defaults (2048 / 2.0) cost ~6.8 s/frame of rendering for the 24-camera rig vs ~4.9 s here; the 35 deg
     # telephoto face still has >=1.14x the output's angular density (see UE58_RENDERING_ISSUES.md section 9).
-    # VRAM (2026-10-15): texture pool 4000 -> 3000 MB. Keep the RT geometry pool at 8000 MB: at 4000 the server hit a
-    # GPU page fault in ray-tracing shaders (MMU fault, ray_tracing_*) during collection. nvidia-smi reads ~23.5 GB
-    # while collecting, but the D3D12 stats in that crash log said Local Used 15.4 GB of a 23.4 GB budget: residency
-    # keeps resources up to the OS budget and only evicts under pressure.
-    [string]$CarlaArgs = "-carla-server -quality-level=Epic -RenderOffScreen -nosound -ini:Engine:[/Script/Engine.RendererSettings]:r.Lumen.HardwareRayTracing=True,[SystemSettings]:r.RayTracing.ResidentGeometryMemoryPoolSizeInMB=8000,[SystemSettings]:r.Streaming.PoolSize=3000,[SystemSettings]:Carla.WideAngleLens.MaxFaceSide=1536,[SystemSettings]:Carla.WideAngleLens.FaceOversample=1.5",
+    # VRAM (2026-10-16): the RT geometry pool is a cache (RayTracingGeometryManager.cpp: geometry not referenced by the
+    # TLAS stays resident while the pool has room; engine default 400 MB). At 8000 MB it kept growing while the ego
+    # drove, on top of a render-target pool that already filled the 24 GB card, spilling into shared memory until the
+    # system budget ran out (GPU page fault, 2026-10-15 18:58: Local Used 6.9 GB, System Used 31.6 / 31.9 GB).
+    # The earlier 15.4 GB "Local Used" reading was not the steady state. Pool now 3000 MB; texture pool 3000 MB.
+    [string]$CarlaArgs = "-carla-server -quality-level=Epic -RenderOffScreen -nosound -ini:Engine:[/Script/Engine.RendererSettings]:r.Lumen.HardwareRayTracing=True,[SystemSettings]:r.RayTracing.ResidentGeometryMemoryPoolSizeInMB=3000,[SystemSettings]:r.Streaming.PoolSize=3000,[SystemSettings]:Carla.WideAngleLens.MaxFaceSide=1536,[SystemSettings]:Carla.WideAngleLens.FaceOversample=1.5",
     [int]$Tail = 50,
     # deploy: reuse the zip already uploaded to D:\carla-update (retry after a failure past the upload)
     [switch]$SkipUpload

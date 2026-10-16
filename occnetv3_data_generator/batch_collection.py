@@ -97,6 +97,8 @@ def main():
     ap.add_argument('--seed', type=int, default=1000, help='场景 i 用 seed+i，整批可复现')
     ap.add_argument('--raw-bit-depth', type=int, default=12)
     ap.add_argument('--scene-name', default='scene')
+    ap.add_argument('--rgb-saved-frames-only', action='store_true',
+                    help='透传给 main_collection：RGB 也只在保存帧渲染 (更快，暗部噪声更高，默认不开)')
     ap.add_argument('--auto-restart', action='store_true',
                     help='服务端连不上时用 remote/carla_remote.ps1 -Action restart 自动重启 (只适用于 81 那台常驻服务端)')
     ap.add_argument('--sec-per-tick', type=float, default=8.0,
@@ -131,7 +133,8 @@ def main():
                 for d in (out / sub).glob(f'{args.scene_name}_{idx:04d}_frame_*'):
                     shutil.rmtree(d, ignore_errors=True)
             print(f'[batch] 场景 {idx:04d} 只有 {have} 帧 (上次中断)，重采')
-        cmd = [sys.executable, str(HERE / 'main_collection.py'),
+        # -u：子进程输出重定向到文件时 Python 默认块缓冲，日志会长时间是 0 字节，看不出是在跑还是卡死
+        cmd = [sys.executable, '-u', str(HERE / 'main_collection.py'),
                '--host', args.host, '--port', str(args.port), '--town', town,
                '--output', str(out), '--append', '--scene', args.scene_name, '--scene-index', str(idx),
                '--frames', str(args.frames), '--frame-skip', str(args.frame_skip),
@@ -139,6 +142,8 @@ def main():
                '--num-vehicles', str(args.num_vehicles), '--num-walkers', str(args.num_walkers),
                '--weather', args.weather, '--seed', str(args.seed + idx),
                '--raw-bit-depth', str(args.raw_bit_depth)]
+        if args.rgb_saved_frames_only:
+            cmd.append('--rgb-saved-frames-only')
         print(f'\n[batch] === 场景 {idx:04d} / {len(jobs)}  {town}  seed={args.seed + idx} ===')
         if not ensure_server(args.host, args.port, args.auto_restart):
             failed.append(idx)

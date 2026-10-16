@@ -728,6 +728,65 @@ uint32 ASceneCaptureSensor_WideAngleLens::GetFaceSide() const
     return AutoFaceSide > 0 ? AutoFaceSide : std::max(GetImageWidth(), GetImageHeight());
 }
 
+USceneCaptureComponent2D_CARLA* ASceneCaptureSensor_WideAngleLens::FindViewOriginAnchor() const
+{
+    // 只在同一父 actor (自车) 上、相距 5m 内、同样开着后处理 (Lumen) 的鱼眼相机之间共享；深度/标签类鱼眼
+    // 不开 Lumen，不参与。锚固定取其中 UniqueID 最小 (最早生成) 的相机的前向面，与各相机首次捕获的先后无关；
+    // 锚面不能已经在共享别人 (ShareOrigin 不能嵌套)。返回自己的前向面表示本相机就是锚
+    constexpr float MaxAnchorDistanceCm = 500.0f;
+    const AActor* Parent = GetAttachParentActor();
+    if (Parent == nullptr || !bEnablePostProcessingEffects || FaceCaptures.Num() == 0)
+        return nullptr;
+    const ASceneCaptureSensor_WideAngleLens* Best = this;
+    TArray<AActor*> Siblings;
+    Parent->GetAttachedActors(Siblings);
+    for (AActor* Actor : Siblings)
+    {
+        const auto* Other = Cast<ASceneCaptureSensor_WideAngleLens>(Actor);
+        if (Other == nullptr || Other == this || !Other->HasActorBegunPlay() || Other->IsActorBeingDestroyed() ||
+            !Other->bEnablePostProcessingEffects || Other->FaceCaptures.Num() == 0 ||
+            Other->FaceCaptures[0] == nullptr || Other->FaceCaptures[0]->IsViewOriginSharer() ||
+            FVector::Dist(Other->GetActorLocation(), GetActorLocation()) > MaxAnchorDistanceCm)
+            continue;
+        if (Other->GetUniqueID() < Best->GetUniqueID())
+            Best = Other;
+    }
+    return Best->FaceCaptures[0];
+}
+
+void ASceneCaptureSensor_WideAngleLens::ResolveViewOrigin()
+{
+    // 共享 Lumen 场景 (见 BeginPlay 处说明)。放在首次捕获前而不是 BeginPlay：CARLA 先 spawn 传感器 (BeginPlay)
+    // 再挂到车上，BeginPlay 时还找不到同车的其他相机
+    bViewOriginResolved = true;
+    USceneCaptureComponent2D_CARLA* Anchor = FindViewOriginAnchor();
+    if (Anchor == nullptr)
+        Anchor = FaceCaptures[0];
+    // 首次捕获前面上若已有 view state (BeginPlay 的 UpdateContent 触发过一次延迟捕获)，先释放 (还没有历史可丢)；
+    // 已经被别的相机当作锚的前向面不动
+    bool bNeedRelease = false;
+    for (int32 i = 0; i < FaceCaptures.Num(); ++i)
+    {
+        auto *Face = FaceCaptures[i];
+        if (Face != Anchor && Face->HasViewState() && !Face->IsViewOriginSharer() && !Face->HasOriginSharers())
+            bNeedRelease = true;
+    }
+    if (bNeedRelease)
+    {
+        FlushRenderingCommands();
+        for (auto *Face : FaceCaptures)
+            if (Face != Anchor && !Face->IsViewOriginSharer() && !Face->HasOriginSharers())
+                Face->ReleaseViewStates();
+    }
+    int32 Shared = 0;
+    for (int32 i = 0; i < FaceCaptures.Num(); ++i)
+        if (FaceCaptures[i] != Anchor && (i == 0 || (CubemapRenderMask & (1U << i))) &&
+            FaceCaptures[i]->ShareViewOrigin(Anchor))
+            ++Shared;
+    UE_LOG(LogCarla, Log, TEXT("%s: %d faces share the Lumen scene of %s"),
+        *GetName(), Shared, *Anchor->GetOwner()->GetName());
+}
+
 uint32 ASceneCaptureSensor_WideAngleLens::ComputeRequiredFaceSide() const
 {
     const int32 W = static_cast<int32>(ImageWidth);
@@ -882,6 +941,9 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
             if (FaceCapture != nullptr)
                 ShowOnlyFilter.ApplyTo(*FaceCapture);
     }
+
+    if (!bViewOriginResolved)
+        ResolveViewOrigin();
 
     for (uint8 i = 0; i < 6; ++i)
         if (CubemapRenderMask & (1U << i))
@@ -1236,6 +1298,17 @@ void ASceneCaptureSensor_WideAngleLens::BeginPlay()
     // CaptureSceneExtended, so the other faces read the exposure it adapted in the same frame.
     for (int32 i = 1; i < FaceCaptures.Num(); ++i)
         SceneCaptureExposureSharing::SetExposureSource(FaceCaptures[i], FaceCaptures[0]);
+
+    // 各面共用一份 Lumen 场景 (2026-10-16)：每个面一个持久 view state，渲染器给每个 view state 各建一份
+    // per-view Lumen 场景 (表面缓存图集 4096^2，约 400MB/份)。81 上 8 相机生产配置 r.DumpRenderTargetPoolMemory：
+    // 渲染目标池 24.4GB，其中 24 个面各一份 Lumen 场景约 9GB，专用显存占满后溢出到共享内存并持续增长，
+    // 最终共享内存耗尽 GPU PageFault 崩溃。同一相机的各面视点完全相同，按引擎 cube 相机的做法
+    // (USceneCaptureComponent::GetViewState 对 cube 各面调用 ShareOrigin) 让渲染的面共享前向面的视点：
+    // Lumen 场景/全局距离场只保留一份，屏幕空间历史仍各面独立，画面不变。面 0 总在渲染掩码里且最先捕获。
+    // 进一步：同一辆车上的鱼眼相机彼此相距几米、看的是同一个世界，也共用一份 (同车最早生成的相机的前向面当锚，
+    // FindViewOriginAnchor)，8 相机从 8 份降到 1 份 (再省约 2.5GB)。锚相机先被销毁时它会先释放所有共享方
+    // (ReleaseViewStates)，共享方之后按需各自重新分配，不会崩。设置在首次捕获前做 (ResolveViewOrigin)
+    bViewOriginResolved = false;
 
     // Raise the render-fence block timeout: a single wide-angle capture
     // enqueues up to 6 face scene-captures plus the RDG composite pass, which

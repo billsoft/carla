@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 import argparse
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
@@ -482,6 +483,10 @@ def main():
                              '0 = 关闭 (NPC 铺满整张地图的旧行为)。默认 80 = 体素半径 40m 的 2 倍')
     parser.add_argument('--npc-recycle-every', type=int, default=2,
                         help='每多少个采集帧检查一次 NPC 回收')
+    parser.add_argument('--rgb-saved-frames-only', action='store_true', default=False,
+                        help='RGB 鱼眼相机也只在保存帧渲染 (capture_stride=frame_skip)，约快 40%%。代价：Lumen 降噪少了'
+                             '抽帧中间几步的时间累积，2026-10-16 81 同场景 A/B 暗部平坦区噪声高 30~50%%，默认不开。'
+                             '深度/语义相机没有时间累积，总是只在保存帧渲染')
     parser.add_argument('--debug-actor-ids', action='store_true', default=False,
                          help='调试开关: 额外保存每帧 actor_ids (400,400,32) 到 debug_actor_ids/ '
                               '目录，用于配合 dataset_viewer_v2 点击体素查具体是哪个 actor/环境物体 '
@@ -520,6 +525,8 @@ def main():
     visibility_filter = None # ⭐ 初始化变量
     npc_actors = []
     exit_code = 0
+    post_pool = None
+    pending_save = None
 
     try:
         # 1. 设置CARLA
@@ -562,9 +569,14 @@ def main():
         print("\n[3/5] 附加传感器...")
         step_start = time.time()
         # 语义分割相机只给相机侧后处理 (地面语义重绘) 用，关掉相机掩码时不需要
+        # capture_stride (2026-10-16)：抽帧时只有每组最后一步的数据被保存，其余步相机照样完整渲染 (约占 tick 时间大半)。
+        # 服务端按引擎帧号门控 (ASensor::Tick)，下面采集前把保存帧对齐到 frame_skip 的倍数
         camera_manager = CameraManager(world, vehicle, enable_depth=True,
-                                       enable_semantic=not args.no_camera_mask)
+                                       enable_semantic=not args.no_camera_mask,
+                                       rgb_capture_stride=args.frame_skip if args.rgb_saved_frames_only else 1,
+                                       aux_capture_stride=args.frame_skip)
         camera_manager.start_listening()
+        print(f"  ✓ capture_stride: {camera_manager.capture_strides}")
         print(f"  ✓ RGB 相机: {len(TESLA_CAMERAS)} 个")
         print(f"  ✓ 深度相机: {len(TESLA_CAMERAS)} 个 (与 RGB 重合)")
 
@@ -648,12 +660,23 @@ def main():
             print(f"  ✓ 自车 40m 内: 车 {nv} 人 {nw} (累计回收 车 {npc_recycler.stats['vehicles']} "
                   f"人 {npc_recycler.stats['walkers']})")
 
+        # 帧号对齐：capture_stride>1 的相机只在帧号是 stride 倍数的那一步出数据；每组 frame_skip 步的最后一步
+        # 要正好落在这样的帧上 (stride 都等于 frame_skip 或 1，组之间不插别的 tick，对齐一次即可)
+        if max(camera_manager.capture_strides.values()) > 1:
+            n_align = 0
+            while world.get_snapshot().frame % args.frame_skip != 0:
+                world.tick()
+                n_align += 1
+            camera_manager.clear_queues()
+            print(f"  ✓ 帧号对齐 (多 tick {n_align} 步)，保存帧 = frame_skip 的倍数")
+
         # 8. 开始采集
         print(f"\n{'='*60}")
         print(f"[5/5] 开始采集 {args.frames} 帧".center(60))
         print(f"{'='*60}\n")
 
         ego_pose_prev = None
+        post_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='postprocess')
 
         for frame_idx in range(args.frames):
             frame_start = time.time()
@@ -732,13 +755,44 @@ def main():
             ego_pose_prev = ego_pose.copy()
 
             images = {cam['id']: camera_data[cam['id']] for cam in TESLA_CAMERAS}
-
-            # 提取深度数据 (如果可用)
             depth_dict = None
-            mask_camera = None
             if depth_data is not None:
                 depth_dict = {cam['id']: depth_data[cam['id']]['data'] for cam in TESLA_CAMERAS}
-                if camera_vis is not None and sem_data is not None:
+            if camera_vis is not None and (depth_dict is None or sem_data is None):
+                # 没有深度/语义就没有掩码、重绘和雕刻，这一帧的真值和其他帧口径不一致，宁可丢掉
+                print(f"  ❌ 深度或语义分割缺失，无法做相机侧后处理,跳过")
+                ego_pose_prev = None
+                data_saver.generate_sample_id()
+                continue
+
+            # 以下几项要读世界状态，必须在下一次 tick 之前取 (流场的速度/位姿快照、时间戳、自车周围 NPC 数)
+            motion = voxel_generator.motion_snapshot(world, vehicle)
+            meta = {
+                'sim_frame': int(sim_frame),
+                'timestamp': float(world.get_snapshot().timestamp.elapsed_seconds),
+                'frame_dt': FIXED_DELTA_SECONDS * args.frame_skip,
+                'sensor_frames': {
+                    'rgb': sorted({int(v['frame']) for v in camera_data.values()}),
+                    'depth': sorted({int(v['frame']) for v in depth_data.values()}) if depth_data else [],
+                    'semantic': sorted({int(v['frame']) for v in sem_data.values()}) if sem_data else [],
+                },
+                'label_version': LABEL_VERSION,
+                'npc_nearby_40m': dict(zip(('vehicles', 'walkers'), npc_recycler.nearby_counts())),
+                'generator': GENERATOR_VERSION,
+                'flow_definition': 'v_actor + w x r, world velocity extrapolated over frame_dt, ego frame',
+            }
+            sample_id = data_saver.generate_sample_id()
+
+            # Step 5.5 ~ 6 放到后台线程 (2026-10-16)：相机侧后处理 + 流场 + 保存只用上面已取好的数据，
+            # 与下一帧的 tick/取相机数据并行 (约省 5s/帧)。同一时间最多一帧在后台，样本号顺序不变；
+            # 后台出错在下一帧提交前 (或采集结束时) 抛出，走和主线程出错一样的退出路径
+            def postprocess_and_save(frame_no=frame_idx + 1, sample_id=sample_id, occupancy=occupancy,
+                                     actor_ids=actor_ids, images=images, depth_dict=depth_dict, sem_data=sem_data,
+                                     ego_pose=ego_pose, ego_motion=ego_motion, motion=motion, meta=meta,
+                                     object_volume=dict(voxel_generator.static_object_volume)):
+                tag = f"  [帧 {frame_no} 后台]"
+                mask_camera, st = None, None
+                if camera_vis is not None:
                     t_mask = time.time()
                     # camera_vis.cameras 按 intrinsics.json 的 cam_i 顺序 = TESLA_CAMERAS 的 index 顺序
                     by_index = sorted(TESLA_CAMERAS, key=lambda c: c['index'])
@@ -747,58 +801,44 @@ def main():
                         camera_vis, occupancy, actor_ids,
                         [depth_dict[c['id']] for c in by_index],
                         [sem_data[c['id']]['data'] for c in by_index],
-                        object_volume=voxel_generator.static_object_volume)
-                    print(f"  [5.5/6] 相机侧后处理: {(time.time()-t_mask)*1000:.0f}ms, 观测体素 {st['observed']*100:.1f}%, "
-                          f"地面重绘 {st['ground_cols_repainted']:,} 列, 雕掉 {st['carved']:,} 个静态体素")
-            if camera_vis is not None and mask_camera is None:
-                # 没有深度/语义就没有掩码、重绘和雕刻，这一帧的真值和其他帧口径不一致，宁可丢掉
-                print(f"  ❌ 深度或语义分割缺失，无法做相机侧后处理,跳过")
-                ego_pose_prev = None
-                data_saver.generate_sample_id()
-                continue
+                        object_volume=object_volume)
+                    print(f"{tag} [5.5/6] 相机侧后处理: {(time.time()-t_mask)*1000:.0f}ms, "
+                          f"观测体素 {st['observed']*100:.1f}%, 地面重绘 {st['ground_cols_repainted']:,} 列, "
+                          f"雕掉 {st['carved']:,} 个静态体素")
+                # 5.6 Flow：写在最终体素里属于各车辆/行人的体素上 (与 occupancy 同一份实例归属)，
+                # 位移时长 = 相邻两个保存帧的间隔，与 ego_motion 对应同一段时间；速度/位姿用本 sim 帧的快照
+                flow, flow_mask = voxel_generator.generate_flow(
+                    None, None, actor_ids, dt=FIXED_DELTA_SECONDS * args.frame_skip, snapshot=motion)
+                t_save = time.time()
+                data_saver.save_sample(
+                    sample_id=sample_id,
+                    images=images,
+                    occupancy=occupancy,
+                    flow=flow,
+                    flow_mask=flow_mask,
+                    ego_pose=ego_pose,
+                    ego_motion=ego_motion,
+                    depth=depth_dict,
+                    actor_ids=actor_ids if args.debug_actor_ids else None,
+                    mask_camera=mask_camera,
+                    meta=dict(meta, postprocess=st),
+                )
+                depth_info = "+ 8 Depth" if depth_dict else ""
+                print(f"{tag} [6/6] 数据保存 (8 DNG + 1 NPY {depth_info}): {(time.time()-t_save)*1000:.1f}ms, "
+                      f"非空体素={np.count_nonzero(occupancy):,}")
 
-            # 5.6 Flow：写在最终体素里属于各车辆/行人的体素上 (与 occupancy 同一份实例归属)，
-            # 位移时长 = 相邻两个保存帧的间隔，与 ego_motion 对应同一段时间。仍是本 sim 帧的状态 (之间没有 tick)
-            flow, flow_mask = voxel_generator.generate_flow(
-                world, vehicle, actor_ids, dt=FIXED_DELTA_SECONDS * args.frame_skip)
-
-            sample_id = data_saver.generate_sample_id()
-
-            # Step 6: 保存数据
-            step_start = time.time()
-            data_saver.save_sample(
-                sample_id=sample_id,
-                images=images,
-                occupancy=occupancy,
-                flow=flow,         # ⭐ 保存 Flow
-                flow_mask=flow_mask, # ⭐ 保存 Flow Mask
-                ego_pose=ego_pose,
-                ego_motion=ego_motion,
-                depth=depth_dict,  # ⭐ 保存深度图
-                actor_ids=actor_ids if args.debug_actor_ids else None,
-                mask_camera=mask_camera,
-                meta={
-                    'sim_frame': int(sim_frame),
-                    'timestamp': float(world.get_snapshot().timestamp.elapsed_seconds),
-                    'frame_dt': FIXED_DELTA_SECONDS * args.frame_skip,
-                    'sensor_frames': {
-                        'rgb': sorted({int(v['frame']) for v in camera_data.values()}),
-                        'depth': sorted({int(v['frame']) for v in depth_data.values()}) if depth_data else [],
-                        'semantic': sorted({int(v['frame']) for v in sem_data.values()}) if sem_data else [],
-                    },
-                    'label_version': LABEL_VERSION,
-                    'npc_nearby_40m': dict(zip(('vehicles', 'walkers'), npc_recycler.nearby_counts())),
-                    'generator': GENERATOR_VERSION,
-                    'flow_definition': 'v_actor + w x r, world velocity extrapolated over frame_dt, ego frame',
-                    'postprocess': None if camera_vis is None else st,
-                },
-            )
-            save_time = (time.time() - step_start) * 1000
-            depth_info = "+ 8 Depth" if depth_dict else ""
-            print(f"  [6/6] 数据保存 (8 DNG + 1 NPY {depth_info}): {save_time:.1f}ms")
+            t_wait = time.time()
+            if pending_save is not None:
+                pending_save.result()
+            wait_ms = (time.time() - t_wait) * 1000
+            pending_save = post_pool.submit(postprocess_and_save)
 
             frame_time = (time.time() - frame_start) * 1000
-            print(f"  ✅ 帧完成: 总耗时={frame_time:.0f}ms, 非空体素={np.count_nonzero(occupancy):,}")
+            print(f"  ✅ 帧完成: 总耗时={frame_time:.0f}ms (其中等上一帧后台 {wait_ms:.0f}ms)")
+
+        if pending_save is not None:
+            pending_save.result()
+            pending_save = None
 
         # 9. 完成
         data_saver.finalize()
@@ -819,6 +859,15 @@ def main():
     finally:
         # 清理资源
         print("\n[Cleanup] 清理资源...")
+        if post_pool is not None:
+            # 中断/出错时让后台正在写的那一帧写完 (半成品帧没有完成标记，dataset 不会用)
+            if pending_save is not None:
+                try:
+                    pending_save.result()
+                except Exception as e:
+                    print(f"  ⚠️ 后台保存失败: {e}")
+                    exit_code = exit_code or 1
+            post_pool.shutdown(wait=True)
 
         if camera_manager:
             try:

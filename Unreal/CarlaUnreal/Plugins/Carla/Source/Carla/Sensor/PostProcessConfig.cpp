@@ -31,6 +31,9 @@ void FPostProcessConfig::DisablePostProcessingEffects()
   EngineShowFlags.SetAmbientOcclusion(false);
   EngineShowFlags.SetAntiAliasing(false);
   EngineShowFlags.SetVolumetricFog(false);
+  // 体积云 (2026-10-16)：深度/语义等不开后处理的相机原来照样渲染体积云，每个相机各留 4 张全分辨率重建历史
+  // (81 上 16 个 1280x960 针孔深度/语义相机合计约 1GB 显存)；云不写深度、不进语义标签，关掉不影响输出
+  EngineShowFlags.SetCloud(false);
   // EngineShowFlags.SetAtmosphericFog(false);
   // EngineShowFlags.SetAudioRadius(false);
   // EngineShowFlags.SetBillboardSprites(false);

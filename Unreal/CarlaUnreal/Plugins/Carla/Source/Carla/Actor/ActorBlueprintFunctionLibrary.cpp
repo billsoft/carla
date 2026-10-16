@@ -285,6 +285,15 @@ static void AddVariationsForSensor(FActorDefinition &Def)
   Tick.bRestrictToRecommended = false;
 
   Def.Variations.Emplace(Tick);
+
+  // 按引擎帧号确定性抽帧 (见 ASensor::Tick)：只在 FrameCounter % capture_stride == 0 的帧捕获/发数据
+  FActorVariation Stride;
+  Stride.Id = TEXT("capture_stride");
+  Stride.Type = EActorAttributeType::Int;
+  Stride.RecommendedValues = {TEXT("1")};
+  Stride.bRestrictToRecommended = false;
+
+  Def.Variations.Emplace(Stride);
 }
 
 static void AddVariationsForTrigger(FActorDefinition &Def)

@@ -310,6 +310,9 @@ private:
   /// Elapsed time computed by UE5's tick scheduler for the most recent Tick().
   float ReadyToTickDeltaSeconds = 0.0f;
 
+  /// capture_stride 属性：>1 时只在 FCarlaEngine::GetFrameCounter() % CaptureStride == 0 的帧捕获 (见 Tick)
+  int32 CaptureStride = 1;
+
   bool bClientsListening = false;
 
 };

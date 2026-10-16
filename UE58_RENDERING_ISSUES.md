@@ -168,9 +168,28 @@ cube 面 mip/采样器（`SampleLevel(…, 0)`）、渲染百分比（默认 100
 `[SystemSettings]:Carla.WideAngleLens.MaxFaceSide=1536,[SystemSettings]:Carla.WideAngleLens.FaceOversample=1.5`。
 **81 的默认启动参数（`carla_remote.ps1 $CarlaArgs`）已采用这组较轻的设置**，纹理流送池 4000→3000 MB。
 光追几何常驻池保持 8000 MB：试过 4000 MB，采集中出现光追 shader 显存页错误（`MMU Fault`, `ray_tracing_*`）
-GPU 崩溃（同时有采集中途销毁/生成 NPC，两个因素都已撤掉）。nvidia-smi 采集时显示约 23.5 GB，但该次崩溃日志里
-D3D12 自己的统计是 Local Used 15.4 GB / Budget 23.4 GB：驻留管理会把资源留到预算附近、有压力才换出。抽帧采集时被丢弃的
-中间 tick 也会完整渲染 24 路相机（约占总时间 65%），可改为相机只在保存帧渲染，但触发相位需要对齐，暂未做。
+GPU 崩溃（同时有采集中途销毁/生成 NPC，两个因素都已撤掉）。
+
+**显存真实占用（2026-10-16 更正）**：之前根据一次崩溃日志的 Local Used 15.4 GB 判断"nvidia-smi 的 23.5 GB 多是驻留
+预留"，这是错的。批量采集默认配置（40 车 30 人）下进程计数器 `GPU Process Memory` 专用显存 23.5 GB 是真占满，
+共享内存（溢出到系统内存）每分钟涨约 1.5 GB；10-15 18:58 那次崩溃日志是 Local Used 6.9 GB、**System Used 31.6 /
+31.9 GB**——共享内存耗尽后 GPU PageFault。用服务端 `console_command` RPC 发 `r.DumpRenderTargetPoolMemory`：
+渲染目标池 24.4 GB / 1605 张，大头是 **24 个鱼眼面各一份 per-view Lumen 场景**（表面缓存图集 4096²，约 360 MB/份，
+合计约 9 GB）、Lumen 辐射缓存（每面 2 份，约 4.7 GB）、体积云重建历史（约 3.5 GB，其中 16 个深度/语义针孔相机约 1 GB）。
+修复：同一辆车上所有鱼眼相机的各面共享同一个视点锚（同车最早生成的鱼眼相机的前向面；
+`USceneCaptureComponent2D_CARLA::ShareViewOrigin`，即引擎 cube 相机各面用的 `FSceneViewStateReference::ShareOrigin`，
+在每个相机首次捕获前设置——CARLA 先 spawn 再 attach，BeginPlay 时还找不到同车相机），Lumen 场景从 24 份降到 1 份；
+不开后处理的相机（深度/语义）关掉体积云；光追几何池 8000→3000 MB（它是"未被 TLAS 引用的几何也留着"的缓存，
+引擎默认 400 MB）。渲染目标池 24.4→15.2 GB，输出画面不变。锚相机先销毁时会先释放所有共享方，共享方随后各自
+重新分配，不会触发 `~FSceneViewStateReference` 的断言。
+
+**抽帧只在保存帧渲染（`capture_stride`，2026-10-16）**：新增所有传感器通用的 `capture_stride` 属性，服务端只在
+`FCarlaEngine::GetFrameCounter() % capture_stride == 0` 的帧捕获/发数据（`ASensor::Tick`）。没用 `sensor_tick`：
+它走 UE tick 间隔 + 超时补偿，浮点下偶尔 N±1 步才触发，图像会和客户端取的世界状态错帧。`main_collection.py`
+采集前把保存帧对齐到 `frame_skip` 的倍数。深度/语义相机默认开（无时间累积，零画质影响）；RGB 鱼眼默认不开：
+81 同场景 A/B，RGB 只在保存帧渲染时暗部平坦区噪声高 30~50%（Lumen 降噪少了中间几步的时间累积），
+需要提速时加 `--rgb-saved-frames-only`。另外相机侧后处理/流场/保存移到后台线程与下一帧仿真并行。
+81 实测每帧 约 22 s → 约 12 s（RGB 每步渲染）/ 约 7.6 s（`--rgb-saved-frames-only`）。
 
 **附带修复**：`carla_remote.ps1 -Action restart` 之前不把 `-CarlaArgs` 传给子调用（自定义 cvar 被静默丢掉）；
 `dataset_viewer_v2` 解码 DNG 不再按线性 RAW 叠伽马/自动亮度（数据本身是色调映射后的 sRGB 编码，问题 3），
